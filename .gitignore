@@ -1,0 +1,89 @@
+# =============================================
+# Rust Standard Ignores (Official GitHub template + 2026 best practices)
+# =============================================
+
+# Cargo build artifacts
+/target/
+debug/
+release/
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# MSVC Windows debugging files
+*.pdb
+
+# cargo mutants mutation testing output
+**/mutants.out*/
+
+# RustRover / JetBrains IDE files
+.idea/
+*.iml
+
+# =============================================
+# MorphArch Project Specific
+# =============================================
+
+# SQLite databases (local cache and tests)
+*.db
+*.sqlite
+*.sqlite3
+morpharch.db
+
+# Demo and test directories
+demo-monorepo/
+morpharch-demo/
+test-repos/
+__test__/
+test/
+
+# Visual demo and recording files
+*.gif
+*.mp4
+*.webm
+*.cast
+assets/demo*.gif
+screenshots/
+
+# Logs and traces
+*.log
+trace-*.json
+tracing.log
+*.trace
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Editor / IDE files
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+
+# Claude Desktop / AI generated temporary files
+.claude/
+claude-*.md
+claude-history/
+
+# Performance profiling outputs
+perf-*.txt
+flamegraph.*
+heaptrack.*
+
+# =============================================
+# Optional (recommended for CLI tools)
+# =============================================
+
+# Do NOT ignore Cargo.lock (executable CLI project)
+# Cargo.lock
+
+# Large binary files (if any)
+*.bin
+*.exe
+*.dll
+*.so
