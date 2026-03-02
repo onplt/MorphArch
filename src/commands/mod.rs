@@ -1,15 +1,16 @@
 // =============================================================================
-// commands/mod.rs — Alt komut modülleri
+// commands/mod.rs — Subcommand modules
 // =============================================================================
 //
-// Her CLI alt komutu ayrı bir modülde yaşar:
-//   scan    → Git deposu tarama + dependency graph + drift skoru (Sprint 2-3)
-//   analyze → Detaylı drift raporu (Sprint 3)
+// Each CLI subcommand lives in a separate module:
+//   scan    → Git repo scanning + dependency graph + drift score (Sprint 2-3)
+//   analyze → Detailed drift report (Sprint 3)
+//   watch   → Scan + animated TUI launch (Sprint 4)
 //
-// İleride eklenecekler:
-//   watch → Dosya izleme + canlı TUI (Sprint 4)
-//   diff  → İki commit arası graph karşılaştırma (Sprint 5)
+// Future additions:
+//   diff  → Graph comparison between two commits (Sprint 5)
 // =============================================================================
 
 pub mod analyze;
 pub mod scan;
+pub mod watch;

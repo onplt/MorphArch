@@ -1,17 +1,17 @@
 // =============================================================================
-// graph_builder.rs — petgraph ile bağımlılık grafi oluşturma
+// graph_builder.rs — Dependency graph construction with petgraph
 // =============================================================================
 //
-// Sorumluluklar:
-//   1. Parser'dan gelen düğüm (modül) ve kenar (bağımlılık) listesinden
-//      yönlü graf (DiGraph) oluşturma
-//   2. Düğüm deduplication — aynı modül adı tek düğüm olur
-//   3. Kenar ekleme — from → to yönünde
-//   4. Graf istatistiklerini hesaplama (node_count, edge_count)
+// Responsibilities:
+//   1. Build a directed graph (DiGraph) from node (module) and edge
+//      (dependency) lists provided by the parser
+//   2. Node deduplication — same module name maps to a single node
+//   3. Edge insertion — from → to direction
+//   4. Compute graph statistics (node_count, edge_count)
 //
-// petgraph::graph::DiGraph kullanılır:
-//   - Düğüm ağırlığı: String (modül adı)
-//   - Kenar ağırlığı: () (sadece bağlantı bilgisi, ağırlıksız)
+// petgraph::graph::DiGraph is used:
+//   - Node weight: String (module name)
+//   - Edge weight: () (connection info only, unweighted)
 // =============================================================================
 
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -19,36 +19,54 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::DependencyEdge;
 
-/// Parser'dan gelen düğüm ve kenar listesinden yönlü bağımlılık grafi oluşturur.
+/// Builds a directed dependency graph from node and edge lists.
 ///
-/// # Parametreler
-/// - `nodes`: Benzersiz modül/paket adları seti
-/// - `edges`: Modüller arası bağımlılık kenarları
+/// # Parameters
+/// - `nodes`: Set of unique module/package names
+/// - `edges`: Dependency edges between modules
 ///
-/// # Dönüş
-/// petgraph `DiGraph<String, ()>` — düğümler modül adları, kenarlar bağımlılıklar.
+/// # Returns
+/// petgraph `DiGraph<String, ()>` — nodes are package names, edges are dependencies.
 ///
-/// # Davranış
-/// - Her benzersiz modül adı için tek düğüm oluşturulur
-/// - Aynı (from, to) çifti için birden fazla kenar eklenebilir
-///   (farklı dosyalardan aynı modüle bağımlılık)
-/// - edges'teki modül adı nodes'ta yoksa sessizce atlanır
-pub fn build_graph(nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGraph<String, ()> {
+/// # Behavior
+/// - One node is created for each unique package name
+/// - `from_module` and `to_module` from edges are used directly as node labels
+///   (they should already contain clean package names from scan.rs)
+pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGraph<String, ()> {
     let mut graph = DiGraph::new();
-    let mut node_indices: HashMap<&str, NodeIndex> = HashMap::new();
+    let mut node_indices: HashMap<String, NodeIndex> = HashMap::new();
 
-    // Düğümleri ekle — her modül adı için benzersiz bir NodeIndex
-    for node_name in nodes {
-        let idx = graph.add_node(node_name.clone());
-        node_indices.insert(node_name, idx);
-    }
-
-    // Kenarları ekle — from → to yönünde
+    // Process edges and dynamically add nodes (deduplicated)
     for edge in edges {
-        if let (Some(&from_idx), Some(&to_idx)) = (
-            node_indices.get(edge.from_module.as_str()),
-            node_indices.get(edge.to_module.as_str()),
-        ) {
+        // Use from_module directly — scan.rs now provides clean package names
+        let from_pkg = edge.from_module.clone();
+
+        // Target package name (clean up import paths: "../core" → "core")
+        let to_pkg = if edge.to_module.contains('/') || edge.to_module.contains('\\') {
+            // Path-like import — extract the last meaningful segment
+            edge.to_module
+                .rsplit('/')
+                .next()
+                .unwrap_or(&edge.to_module)
+                .to_string()
+        } else {
+            edge.to_module.clone()
+        };
+
+        // Skip self-dependencies
+        if from_pkg == to_pkg {
+            continue;
+        }
+
+        let from_idx = *node_indices
+            .entry(from_pkg.clone())
+            .or_insert_with(|| graph.add_node(from_pkg));
+        let to_idx = *node_indices
+            .entry(to_pkg.clone())
+            .or_insert_with(|| graph.add_node(to_pkg));
+
+        // Don't add duplicate edges (deduplicate)
+        if !graph.contains_edge(from_idx, to_idx) {
             graph.add_edge(from_idx, to_idx, ());
         }
     }
@@ -57,7 +75,7 @@ pub fn build_graph(nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGraph
 }
 
 // =============================================================================
-// Testler
+// Tests
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -65,10 +83,7 @@ mod tests {
 
     #[test]
     fn test_build_graph_basic() {
-        let mut nodes = HashSet::new();
-        nodes.insert("main".to_string());
-        nodes.insert("serde".to_string());
-        nodes.insert("std".to_string());
+        let nodes = HashSet::new();
 
         let edges = vec![
             DependencyEdge {
@@ -76,19 +91,48 @@ mod tests {
                 to_module: "serde".to_string(),
                 file_path: "src/main.rs".to_string(),
                 line: 1,
+                weight: 1,
             },
             DependencyEdge {
                 from_module: "main".to_string(),
                 to_module: "std".to_string(),
                 file_path: "src/main.rs".to_string(),
                 line: 2,
+                weight: 1,
             },
         ];
 
         let graph = build_graph(&nodes, &edges);
 
-        assert_eq!(graph.node_count(), 3, "3 düğüm olmalı");
-        assert_eq!(graph.edge_count(), 2, "2 kenar olmalı");
+        // "main" → "serde", "main" → "std"
+        assert_eq!(graph.node_count(), 3, "should have 3 nodes (main, serde, std)");
+        assert_eq!(graph.edge_count(), 2, "should have 2 edges");
+    }
+
+    #[test]
+    fn test_build_graph_deduplication() {
+        let nodes = HashSet::new();
+        let edges = vec![
+            DependencyEdge {
+                from_module: "web".to_string(),
+                to_module: "core".to_string(),
+                file_path: "apps/web/src/app.ts".to_string(),
+                line: 1,
+                weight: 1,
+            },
+            DependencyEdge {
+                from_module: "web".to_string(),
+                to_module: "core".to_string(),
+                file_path: "apps/web/src/index.ts".to_string(),
+                line: 1,
+                weight: 1,
+            },
+        ];
+
+        let graph = build_graph(&nodes, &edges);
+
+        assert_eq!(graph.node_count(), 2, "should have 2 nodes (web, core)");
+        assert_eq!(graph.edge_count(), 1, "same package pair should have one edge");
     }
 
     #[test]
@@ -100,24 +144,5 @@ mod tests {
 
         assert_eq!(graph.node_count(), 0);
         assert_eq!(graph.edge_count(), 0);
-    }
-
-    #[test]
-    fn test_build_graph_missing_node_edge_skipped() {
-        let mut nodes = HashSet::new();
-        nodes.insert("main".to_string());
-        // "serde" düğümü yok — kenar atlanmalı
-
-        let edges = vec![DependencyEdge {
-            from_module: "main".to_string(),
-            to_module: "serde".to_string(),
-            file_path: "src/main.rs".to_string(),
-            line: 1,
-        }];
-
-        let graph = build_graph(&nodes, &edges);
-
-        assert_eq!(graph.node_count(), 1, "Sadece 'main' düğümü olmalı");
-        assert_eq!(graph.edge_count(), 0, "Hedef düğüm yok — kenar olmamalı");
     }
 }

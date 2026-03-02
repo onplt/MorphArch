@@ -1,24 +1,24 @@
 // =============================================================================
-// scoring.rs — Architecture Drift Score hesaplama motoru
+// scoring.rs — Architecture Drift Score calculation engine
 // =============================================================================
 //
-// Sprint 3'ün temel modülü. Her commit için dependency graph'ın mimari
-// "sağlığını" ölçer ve 0-100 arasında bir skor üretir.
+// Core module for Sprint 3. Measures the architectural "health" of the
+// dependency graph for each commit and produces a 0-100 score.
 //
-// Metrikler:
-//   1. Fan-in / Fan-out değişimi (her node'un gelen/giden kenar sayısı)
-//   2. Döngüsel bağımlılık sayısı (petgraph SCC analizi)
-//   3. Boundary violation (paket sınır ihlalleri: apps/ ↔ packages/)
+// Metrics:
+//   1. Fan-in / Fan-out change (incoming/outgoing edge count per node)
+//   2. Cyclic dependency count (petgraph SCC analysis)
+//   3. Boundary violations (package boundary crossings: apps/ <-> packages/)
 //   4. Cognitive complexity proxy = (edges/nodes)*10 + cycles*5
-//   5. Toplam skor = normalize(0-100)
+//   5. Total score = normalize(0-100)
 //
-// Temporal analiz:
-//   compare_graphs() iki ardışık commit'in graph'ını karşılaştırır,
-//   TemporalDelta üretir.
+// Temporal analysis:
+//   compare_graphs() compares two consecutive commits' graphs and
+//   produces a TemporalDelta.
 //
-// Determinizm:
-//   Tüm hesaplamalar aynı girdi ile aynı çıktıyı verir.
-//   Floating-point yuvarlama tutarlı olması için round() kullanılır.
+// Determinism:
+//   All calculations produce the same output for the same input.
+//   round() is used for consistent floating-point rounding.
 // =============================================================================
 
 use petgraph::algo::kosaraju_scc;
@@ -28,46 +28,46 @@ use tracing::debug;
 
 use crate::models::{DriftScore, TemporalDelta};
 
-/// Baseline drift skoru — önceki graf yoksa bu değer kullanılır.
+/// Baseline drift score — used when no previous graph exists.
 const BASELINE_SCORE: u8 = 50;
 
-/// Boundary violation kuralları: bu prefix çiftleri arası bağımlılık ihlal sayılır.
+/// Boundary violation rules: dependencies between these prefix pairs are violations.
 ///
-/// Genel monorepo konvansiyonu:
-///   - `apps/` → uygulamalar (son kullanıcıya açık)
-///   - `packages/` → paylaşılan kütüphaneler
+/// Standard monorepo convention:
+///   - `apps/` → applications (user-facing)
+///   - `packages/` → shared libraries
 ///
-/// İhlal: `packages/` → `apps/` yönünde bağımlılık (kütüphane, uygulamaya bağımlı olmamalı)
+/// Violation: dependency from `packages/` → `apps/` (library depending on app)
 pub const BOUNDARY_RULES: &[(&str, &str)] = &[
-    ("packages::", "apps::"), // Kütüphane → uygulama (yasak yön)
-    ("lib::", "apps::"),      // lib → apps (yasak yön)
-    ("core::", "apps::"),     // core → apps (yasak yön)
-    ("shared::", "apps::"),   // shared → apps (yasak yön)
-    ("packages::", "cmd::"),  // packages → cmd (yasak yön)
-    ("lib::", "cmd::"),       // lib → cmd (yasak yön)
+    ("packages::", "apps::"), // Library → app (forbidden direction)
+    ("lib::", "apps::"),      // lib → apps (forbidden direction)
+    ("core::", "apps::"),     // core → apps (forbidden direction)
+    ("shared::", "apps::"),   // shared → apps (forbidden direction)
+    ("packages::", "cmd::"),  // packages → cmd (forbidden direction)
+    ("lib::", "cmd::"),       // lib → cmd (forbidden direction)
 ];
 
-/// Bir dependency graph için mimari drift skoru hesaplar.
+/// Calculates the architecture drift score for a dependency graph.
 ///
-/// Önceki commit'in graf'ı verilmişse delta analizi yapılır;
-/// yoksa baseline (50) skoru ile mutlak metrikler hesaplanır.
+/// If a previous commit's graph is provided, delta analysis is performed;
+/// otherwise a baseline (50) score with absolute metrics is calculated.
 ///
-/// # Parametreler
-/// - `graph`: Mevcut commit'in bağımlılık grafi
-/// - `prev_graph`: Bir önceki commit'in grafi (ilk commit için `None`)
-/// - `nodes`: Mevcut graftaki modül adları (boundary kontrolü için)
-/// - `edges_raw`: Ham kenar listesi (from_module, to_module çiftleri)
-/// - `timestamp`: Commit'in zaman damgası
+/// # Parameters
+/// - `graph`: Current commit's dependency graph
+/// - `prev_graph`: Previous commit's graph (`None` for first commit)
+/// - `nodes`: Module names in the current graph (for boundary checks)
+/// - `edges_raw`: Raw edge list (from_module, to_module pairs)
+/// - `timestamp`: Commit timestamp
 ///
-/// # Dönüş
-/// `DriftScore` — toplam skor (0-100) ve alt metrikler
+/// # Returns
+/// `DriftScore` — total score (0-100) and sub-metrics
 ///
-/// # Algoritma
-/// 1. Fan-in/fan-out hesapla, önceki graf varsa delta bul
-/// 2. SCC ile döngü sayısını hesapla
-/// 3. Boundary violation kontrolü yap
-/// 4. Cognitive complexity proxy hesapla
-/// 5. Normalize et ve [0, 100] aralığına clamp'le
+/// # Algorithm
+/// 1. Compute fan-in/fan-out, find delta if previous graph exists
+/// 2. Count cycles with SCC
+/// 3. Check boundary violations
+/// 4. Compute cognitive complexity proxy
+/// 5. Normalize and clamp to [0, 100]
 pub fn calculate_drift(
     graph: &DiGraph<String, ()>,
     prev_graph: Option<&DiGraph<String, ()>>,
@@ -78,7 +78,7 @@ pub fn calculate_drift(
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
 
-    // ── 1. Fan-in / Fan-out hesapla ──
+    // ── 1. Fan-in / Fan-out calculation ──
     let (current_fan_in, current_fan_out) = compute_fan_metrics(graph);
 
     let (fan_in_delta, fan_out_delta) = if let Some(prev) = prev_graph {
@@ -88,16 +88,16 @@ pub fn calculate_drift(
             current_fan_out as i32 - prev_fan_out as i32,
         )
     } else {
-        // İlk commit — delta yok
+        // First commit — no delta
         (0, 0)
     };
 
-    // ── 2. Döngüsel bağımlılık sayısı (SCC analizi) ──
+    // ── 2. Cyclic dependency count (SCC analysis) ──
     let current_cycles = count_cycles(graph);
     let prev_cycles = prev_graph.map_or(0, count_cycles);
     let new_cycles = current_cycles.saturating_sub(prev_cycles);
 
-    // ── 3. Boundary violation kontrolü ──
+    // ── 3. Boundary violation check ──
     let boundary_violations = count_boundary_violations(edges_raw);
 
     // ── 4. Cognitive complexity proxy ──
@@ -107,7 +107,7 @@ pub fn calculate_drift(
         0.0
     };
 
-    // ── 5. Toplam skor hesapla ve normalize et ──
+    // ── 5. Compute total score and normalize ──
     let total = if prev_graph.is_some() {
         compute_total_score(
             fan_in_delta,
@@ -117,7 +117,7 @@ pub fn calculate_drift(
             complexity,
         )
     } else {
-        // İlk commit — baseline skor
+        // First commit — baseline score
         BASELINE_SCORE
     };
 
@@ -128,7 +128,7 @@ pub fn calculate_drift(
         new_cycles,
         boundary_violations,
         complexity,
-        "Drift skoru hesaplandı"
+        "Drift score calculated"
     );
 
     DriftScore {
@@ -142,26 +142,8 @@ pub fn calculate_drift(
     }
 }
 
-/// İki ardışık commit'in graf'ını karşılaştırarak temporal delta hesaplar.
-///
-/// Hangi modüllerin eklendiği/kaldırıldığı, yeni/çözülen döngüler ve
-/// drift skoru değişimini raporlar.
-///
-/// # Parametreler
-/// - `current_graph`: Mevcut commit'in grafi
-/// - `prev_graph`: Önceki commit'in grafi
-/// - `current_nodes`: Mevcut graftaki modül adları seti
-/// - `prev_nodes`: Önceki graftaki modül adları seti
-/// - `current_edges`: Mevcut kenar sayısı
-/// - `prev_edges`: Önceki kenar sayısı
-/// - `current_score`: Mevcut drift skoru
-/// - `prev_score`: Önceki drift skoru
-/// - `current_hash`: Mevcut commit hash'i
-/// - `prev_hash`: Önceki commit hash'i
-///
-/// # Dönüş
-/// `TemporalDelta` — iki commit arası tüm değişimlerin özeti
-#[allow(dead_code, clippy::too_many_arguments)] // Gelecek sprintlerde detaylı temporal analiz için kullanılacak
+/// Compares two consecutive commits' graphs to compute a temporal delta.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn compare_graphs(
     current_graph: &DiGraph<String, ()>,
     prev_graph: &DiGraph<String, ()>,
@@ -202,24 +184,17 @@ pub fn compare_graphs(
 }
 
 // =============================================================================
-// Yardımcı fonksiyonlar — dahili kullanım
+// Helper functions — internal use
 // =============================================================================
 
-/// Her düğüm için fan-in (gelen kenar) ve fan-out (giden kenar) sayılarının
-/// toplamını hesaplar.
-///
-/// # Dönüş
-/// `(total_fan_in, total_fan_out)` — tüm düğümlerin toplam gelen/giden kenar sayıları
 fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
     let mut total_fan_in: usize = 0;
     let mut total_fan_out: usize = 0;
 
     for node_idx in graph.node_indices() {
-        // Fan-in: bu düğüme gelen kenar sayısı
         total_fan_in += graph
             .neighbors_directed(node_idx, petgraph::Direction::Incoming)
             .count();
-        // Fan-out: bu düğümden giden kenar sayısı
         total_fan_out += graph
             .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
             .count();
@@ -228,28 +203,11 @@ fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
     (total_fan_in, total_fan_out)
 }
 
-/// Graftaki döngüsel bağımlılık sayısını hesaplar.
-///
-/// Kosaraju'nun SCC (Strongly Connected Components) algoritmasını kullanır.
-/// Tek elemanlı SCC'ler döngü değildir; 2+ elemanlı SCC'ler döngüdür.
-///
-/// # Dönüş
-/// Döngüsel bağımlılık grubu sayısı (2+ elemanlı SCC sayısı)
 fn count_cycles(graph: &DiGraph<String, ()>) -> usize {
     let sccs = kosaraju_scc(graph);
     sccs.iter().filter(|scc| scc.len() > 1).count()
 }
 
-/// Paket sınırı ihlallerini sayar.
-///
-/// Monorepo konvansiyonuna göre: kütüphane katmanı (packages/, lib/, core/)
-/// uygulama katmanına (apps/, cmd/) bağımlı olmamalıdır.
-///
-/// # Parametreler
-/// - `edges`: `(from_module, to_module)` çiftleri
-///
-/// # Dönüş
-/// İhlal eden kenar sayısı
 fn count_boundary_violations(edges: &[(String, String)]) -> usize {
     edges
         .iter()
@@ -261,19 +219,6 @@ fn count_boundary_violations(edges: &[(String, String)]) -> usize {
         .count()
 }
 
-/// Alt metriklerden toplam drift skorunu hesaplar ve [0, 100] aralığına normalize eder.
-///
-/// # Formül
-/// ```text
-/// fan_component   = |fan_in_delta| + |fan_out_delta|  (max katkı: ~30)
-/// cycle_penalty   = new_cycles * 15                   (her yeni döngü +15)
-/// boundary_penalty= violations * 10                   (her ihlal +10)
-/// complexity_comp = complexity * 1.5                   (karmaşıklık ağırlığı)
-/// raw_score       = baseline(50) + fan_comp/2 + cycle_pen + boundary_pen + complexity_comp/3
-/// ```
-///
-/// # Determinizm
-/// Aynı girdiler her zaman aynı skoru üretir.
 fn compute_total_score(
     fan_in_delta: i32,
     fan_out_delta: i32,
@@ -286,28 +231,21 @@ fn compute_total_score(
     let boundary_penalty = boundary_violations as f64 * 10.0;
     let complexity_component = cognitive_complexity * 1.5;
 
-    // Baseline'dan başla, ceza ekle
     let raw = BASELINE_SCORE as f64
         + fan_component / 2.0
         + cycle_penalty
         + boundary_penalty
         + complexity_component / 3.0;
 
-    // [0, 100] aralığına clamp'le
     raw.round().clamp(0.0, 100.0) as u8
 }
 
-/// Graftaki döngüsel bağımlılık sayısını public olarak döndürür.
-///
-/// `commands::analyze` modülü tarafından kullanılır.
+/// Returns the cyclic dependency count as a public function.
 pub fn count_cycles_public(graph: &DiGraph<String, ()>) -> usize {
     count_cycles(graph)
 }
 
-/// Kenar listesinden (from, to) çiftlerini oluşturur.
-///
-/// `commands::scan` modülünden çağrılır. DependencyEdge vektöründen
-/// sadece modül adlarını içeren tuple vektörü üretir.
+/// Creates (from, to) pairs from an edge list.
 pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, String)> {
     edges
         .iter()
@@ -316,16 +254,12 @@ pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, S
 }
 
 // =============================================================================
-// Testler
+// Tests
 // =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Test yardımcısı: basit bir DiGraph oluşturur.
-    ///
-    /// Düğümler: A, B, C
-    /// Kenarlar: A→B, A→C, B→C
     fn make_simple_graph() -> DiGraph<String, ()> {
         let mut g = DiGraph::new();
         let a = g.add_node("A".to_string());
@@ -337,10 +271,6 @@ mod tests {
         g
     }
 
-    /// Test yardımcısı: döngüsel bir DiGraph oluşturur.
-    ///
-    /// Düğümler: A, B, C
-    /// Kenarlar: A→B, B→C, C→A (tam döngü)
     fn make_cyclic_graph() -> DiGraph<String, ()> {
         let mut g = DiGraph::new();
         let a = g.add_node("A".to_string());
@@ -354,7 +284,6 @@ mod tests {
 
     #[test]
     fn test_calculate_drift_baseline() {
-        // İlk commit — önceki graf yok → baseline 50 olmalı
         let graph = make_simple_graph();
         let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
         let edges = vec![
@@ -365,15 +294,14 @@ mod tests {
 
         let score = calculate_drift(&graph, None, &nodes, &edges, 1_000_000);
 
-        assert_eq!(score.total, BASELINE_SCORE, "İlk commit baseline olmalı");
-        assert_eq!(score.fan_in_delta, 0, "Delta yoksa fan_in_delta 0 olmalı");
-        assert_eq!(score.fan_out_delta, 0, "Delta yoksa fan_out_delta 0 olmalı");
-        assert_eq!(score.new_cycles, 0, "Basit grafta döngü olmamalı");
+        assert_eq!(score.total, BASELINE_SCORE, "First commit should be baseline");
+        assert_eq!(score.fan_in_delta, 0);
+        assert_eq!(score.fan_out_delta, 0);
+        assert_eq!(score.new_cycles, 0);
     }
 
     #[test]
     fn test_calculate_drift_with_previous() {
-        // Önceki graf: basit, mevcut graf: döngüsel → skor artmalı
         let prev = make_simple_graph();
         let current = make_cyclic_graph();
         let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
@@ -387,60 +315,43 @@ mod tests {
 
         assert!(
             score.total > BASELINE_SCORE,
-            "Döngü eklenince skor artmalı, ama {} geldi",
+            "Adding a cycle should increase score, but got {}",
             score.total
         );
-        assert_eq!(score.new_cycles, 1, "Bir yeni döngü eklendi");
+        assert_eq!(score.new_cycles, 1);
     }
 
     #[test]
     fn test_cycle_detection() {
         let simple = make_simple_graph();
-        assert_eq!(count_cycles(&simple), 0, "Basit grafta döngü yok");
+        assert_eq!(count_cycles(&simple), 0);
 
         let cyclic = make_cyclic_graph();
-        assert_eq!(count_cycles(&cyclic), 1, "Tam döngülü grafta 1 SCC");
+        assert_eq!(count_cycles(&cyclic), 1);
 
         let empty: DiGraph<String, ()> = DiGraph::new();
-        assert_eq!(count_cycles(&empty), 0, "Boş grafta döngü yok");
+        assert_eq!(count_cycles(&empty), 0);
     }
 
     #[test]
     fn test_boundary_violations() {
         let edges = vec![
-            // İhlal: packages → apps
-            (
-                "packages::ui::button".to_string(),
-                "apps::web::home".to_string(),
-            ),
-            // Normal: apps → packages (izin verilen yön)
-            (
-                "apps::web::home".to_string(),
-                "packages::ui::button".to_string(),
-            ),
-            // İhlal: lib → apps
+            ("packages::ui::button".to_string(), "apps::web::home".to_string()),
+            ("apps::web::home".to_string(), "packages::ui::button".to_string()),
             ("lib::utils".to_string(), "apps::api::routes".to_string()),
-            // Normal: dahili referans
-            (
-                "packages::ui::button".to_string(),
-                "packages::ui::theme".to_string(),
-            ),
+            ("packages::ui::button".to_string(), "packages::ui::theme".to_string()),
         ];
 
         let violations = count_boundary_violations(&edges);
-        assert_eq!(violations, 2, "2 ihlal olmalı (packages→apps, lib→apps)");
+        assert_eq!(violations, 2, "Should have 2 violations (packages->apps, lib->apps)");
     }
 
     #[test]
     fn test_fan_metrics() {
         let graph = make_simple_graph();
         let (fan_in, fan_out) = compute_fan_metrics(&graph);
-
-        // A→B, A→C, B→C
-        // Fan-in: A=0, B=1, C=2 → total=3
-        // Fan-out: A=2, B=1, C=0 → total=3
-        assert_eq!(fan_in, 3, "Toplam fan-in 3 olmalı");
-        assert_eq!(fan_out, 3, "Toplam fan-out 3 olmalı");
+        assert_eq!(fan_in, 3);
+        assert_eq!(fan_out, 3);
     }
 
     #[test]
@@ -453,38 +364,26 @@ mod tests {
             ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
 
         let delta = compare_graphs(
-            &current,
-            &prev,
-            &current_nodes,
-            &prev_nodes,
-            3, // current edges
-            3, // prev edges
-            65,
-            50,
-            "commit2",
-            "commit1",
+            &current, &prev, &current_nodes, &prev_nodes,
+            3, 3, 65, 50, "commit2", "commit1",
         );
 
-        assert_eq!(delta.score_delta, 15, "Skor farkı 65-50=15 olmalı");
-        assert_eq!(delta.nodes_added, 1, "D eklendi → 1 yeni düğüm");
-        assert_eq!(delta.nodes_removed, 0, "Hiç düğüm kaldırılmadı");
-        assert_eq!(delta.new_cycles, 1, "1 yeni döngü");
-        assert_eq!(delta.resolved_cycles, 0, "Çözülen döngü yok");
+        assert_eq!(delta.score_delta, 15);
+        assert_eq!(delta.nodes_added, 1);
+        assert_eq!(delta.nodes_removed, 0);
+        assert_eq!(delta.new_cycles, 1);
+        assert_eq!(delta.resolved_cycles, 0);
     }
 
     #[test]
     fn test_compute_total_score_deterministic() {
-        // Aynı girdiler her zaman aynı çıktıyı vermeli
         let s1 = compute_total_score(5, 3, 1, 2, 15.0);
         let s2 = compute_total_score(5, 3, 1, 2, 15.0);
-        assert_eq!(s1, s2, "Deterministic olmalı");
+        assert_eq!(s1, s2, "Should be deterministic");
+        assert!(s1 <= 100);
 
-        // Skor [0, 100] aralığında olmalı
-        assert!(s1 <= 100, "Skor 100'den büyük olamaz");
-
-        // Çok büyük değerler 100'e clamp'lenmeli
         let extreme = compute_total_score(100, 100, 10, 20, 500.0);
-        assert_eq!(extreme, 100, "Aşırı değerler 100'e clamp'lenmeli");
+        assert_eq!(extreme, 100, "Extreme values should clamp to 100");
     }
 
     #[test]
@@ -494,7 +393,7 @@ mod tests {
         let edges: Vec<(String, String)> = vec![];
 
         let score = calculate_drift(&empty, None, &nodes, &edges, 0);
-        assert_eq!(score.total, BASELINE_SCORE, "Boş graf baseline olmalı");
-        assert_eq!(score.cognitive_complexity, 0.0, "Boş grafta karmaşıklık 0");
+        assert_eq!(score.total, BASELINE_SCORE);
+        assert_eq!(score.cognitive_complexity, 0.0);
     }
 }
