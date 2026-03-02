@@ -1,23 +1,23 @@
 // =============================================================================
-// main.rs — MorphArch giriş noktası
+// main.rs — MorphArch entry point
 // =============================================================================
 //
-// Program akışı:
-//   1. Logging başlat (tracing-subscriber)
-//   2. CLI argümanlarını parse et (clap)
-//   3. Yapılandırmayı yükle (config — ~/.morpharch/ dizini + DB yolu)
-//   4. Veritabanını aç (SQLite — migration otomatik çalışır)
-//   5. Komuta göre işlem yap:
-//      - scan        → Depoyu tara (commit + graph + drift), sonuç yazdır
-//      - watch       → Depoyu tara, izleme mesajı göster (TUI Sprint 4'te)
-//      - list-graphs → Son N graph snapshot'ı tablo formatında listele
-//      - analyze     → Belirtilen commit'in detaylı drift raporu
-//      - list-drift  → Son 20 commit'in drift trend tablosu
-//   6. Hata oluşursa kullanıcı dostu mesaj göster
+// Program flow:
+//   1. Initialize logging (tracing-subscriber)
+//   2. Parse CLI arguments (clap)
+//   3. Load configuration (config — ~/.morpharch/ directory + DB path)
+//   4. Open database (SQLite — migration runs automatically)
+//   5. Execute subcommand:
+//      - scan        → Scan repo (commit + graph + drift), print results
+//      - watch       → Scan repo + launch animated TUI (Sprint 4)
+//      - list-graphs → List last N graph snapshots in table format
+//      - analyze     → Detailed drift report for a specific commit
+//      - list-drift  → Drift trend table for the last 20 commits
+//   6. On error, display a user-friendly message
 //
-// Çıkış kodları:
-//   0 → Başarılı
-//   1 → Hata (detay stderr'de)
+// Exit codes:
+//   0 → Success
+//   1 → Error (details on stderr)
 // =============================================================================
 
 mod cli;
@@ -29,6 +29,7 @@ mod graph_builder;
 mod models;
 mod parser;
 mod scoring;
+mod tui;
 mod utils;
 
 use std::process;
@@ -43,42 +44,40 @@ use config::MorphArchConfig;
 use db::Database;
 
 fn main() {
-    // Logging altyapısını başlat — diğer her şeyden önce
+    // Initialize logging — before anything else
     utils::init_logging();
 
-    // Asıl iş mantığını çalıştır, hata varsa güzel yazdır ve çık
+    // Run business logic; on error, print and exit
     if let Err(err) = run() {
         utils::print_error(&err);
         process::exit(1);
     }
 }
 
-/// Ana iş mantığı — anyhow::Result döner, main() hataları yakalar.
+/// Main business logic — returns anyhow::Result; main() catches errors.
 ///
-/// Bu ayrım sayesinde tüm hatalar tek noktada (main) yakalanır
-/// ve kullanıcı dostu formatta gösterilir.
+/// This separation ensures all errors are caught at a single point (main)
+/// and displayed in a user-friendly format.
 fn run() -> Result<()> {
-    // CLI argümanlarını parse et
+    // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Yapılandırmayı yükle (~/.morpharch/ dizini otomatik oluşturulur)
+    // Load configuration (~/.morpharch/ directory created automatically)
     let config = MorphArchConfig::load()?;
-    info!(db_path = %config.db_path.display(), "Yapılandırma hazır");
+    info!(db_path = %config.db_path.display(), "Configuration ready");
 
-    // SQLite veritabanını aç (tablo migration'ı otomatik)
+    // Open SQLite database (table migrations run automatically)
     let db = Database::open(&config.db_path)?;
 
-    // Alt komuta göre dallan
+    // Dispatch to subcommand
     match cli.command {
         Commands::Scan { path } => {
             execute_scan(&path, &db, config.max_commits)?;
         }
         Commands::Watch { path } => {
-            // Watch = Scan + izleme mesajı (TUI sonraki sprint)
-            execute_scan(&path, &db, config.max_commits)?;
-            println!();
-            println!("👀 Watch mode active. TUI sonraki sprintte gelecek.");
-            println!("   Değişiklik izleme ve canlı graf Sprint 4'te eklenecek.");
+            // Sprint 4: Scan + launch animated TUI
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::watch::run_watch(&path, &db, config.max_commits))?;
         }
         Commands::ListGraphs => {
             execute_list_graphs(&db)?;
@@ -94,30 +93,31 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// Scan işlemini çalıştırır ve sonuç özetini yazdırır.
+/// Executes the scan and prints a result summary.
 ///
-/// Sprint 3'ten itibaren commit tarama + dependency graph + drift skoru
-/// tek komutta çalışır. `commands::scan::run_scan` üç adımı orkestre eder.
+/// Since Sprint 3, commit scanning + dependency graph + drift scoring
+/// all run in a single command. `commands::scan::run_scan` orchestrates
+/// all three steps.
 fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Result<()> {
-    println!("🔍 Depo taranıyor: {}", path.display());
+    println!("Scanning repository: {}", path.display());
     println!();
 
-    // Zamanlama başlat
+    // Start timer
     let start = Instant::now();
 
-    // Sprint 3: commit tarama + dependency graph + drift skoru
+    // Sprint 3: commit scanning + dependency graph + drift scoring
     let result = commands::scan::run_scan(path, db, max_commits)?;
 
-    // Geçen süreyi hesapla
+    // Calculate elapsed time
     let elapsed = start.elapsed();
 
-    // Veritabanındaki toplam kayıt sayıları
+    // Total record counts in database
     let total_commits = db.commit_count()?;
     let total_graphs = db.graph_snapshot_count()?;
 
-    // Sonuç özeti
+    // Result summary
     println!(
-        "✅ {} commit tarandı, {} graph + {} drift skoru hesaplandı, {:.1} sn",
+        "Done: {} commits scanned, {} graphs + {} drift scores calculated in {:.1}s",
         result.commits_scanned,
         result.graphs_created,
         result.drifts_calculated,
@@ -126,7 +126,7 @@ fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Re
 
     if total_commits > result.commits_scanned {
         println!(
-            "📊 Veritabanında toplam {} commit, {} graph snapshot kayıtlı",
+            "Database totals: {} commits, {} graph snapshots stored",
             total_commits, total_graphs
         );
     }
@@ -134,25 +134,25 @@ fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Re
     Ok(())
 }
 
-/// Son graph snapshot'ları tablo formatında listeler.
+/// Lists recent graph snapshots in table format.
 ///
-/// Veritabanından son 10 graph snapshot'ı çeker ve her biri için:
-/// - Commit hash'inin ilk 7 karakteri
-/// - Commit mesajının ilk satırı (max 50 karakter)
-/// - Düğüm (node) sayısı
-/// - Kenar (edge) sayısı
-/// - Tarih (Unix timestamp → okunabilir format)
+/// Fetches the last 10 graph snapshots from the database and displays:
+/// - First 7 characters of commit hash
+/// - First line of commit message (max 50 characters)
+/// - Node count
+/// - Edge count
+/// - Date (Unix timestamp → readable format)
 fn execute_list_graphs(db: &Database) -> Result<()> {
     let total = db.graph_snapshot_count()?;
 
     if total == 0 {
-        println!("📭 Henüz graph snapshot yok. Önce 'morpharch scan <path>' çalıştırın.");
+        println!("No graph snapshots yet. Run 'morpharch scan <path>' first.");
         return Ok(());
     }
 
     let graphs = db.list_recent_graphs(10)?;
 
-    println!("📊 Son graph snapshot'lar ({total} kayıttan):");
+    println!("Recent graph snapshots ({total} total):");
     println!();
     let header = format!(
         "{:<9} {:<50} {:>6} {:>6}   {}",
@@ -163,10 +163,10 @@ fn execute_list_graphs(db: &Database) -> Result<()> {
     println!("{separator}");
 
     for (hash, message, timestamp, nodes, edges) in &graphs {
-        // Hash: ilk 7 karakter
+        // Hash: first 7 characters
         let short_hash = if hash.len() >= 7 { &hash[..7] } else { hash };
 
-        // Message: ilk satır, max 50 karakter
+        // Message: first line, max 50 characters
         let first_line = message.lines().next().unwrap_or("");
         let truncated = if first_line.len() > 50 {
             format!("{}…", &first_line[..49])
@@ -174,7 +174,7 @@ fn execute_list_graphs(db: &Database) -> Result<()> {
             first_line.to_string()
         };
 
-        // Timestamp → okunabilir tarih
+        // Timestamp → readable date
         let date = chrono::DateTime::from_timestamp(*timestamp, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "?".to_string());
@@ -186,24 +186,24 @@ fn execute_list_graphs(db: &Database) -> Result<()> {
     }
 
     println!();
-    println!("Toplam: {total} graph snapshot");
+    println!("Total: {total} graph snapshots");
 
     Ok(())
 }
 
-/// Son 20 commit'in drift skor trendini tablo formatında gösterir.
+/// Displays the drift score trend for the last 20 commits in table format.
 ///
-/// Her satır: commit hash, mesaj, düğüm sayısı, kenar sayısı,
-/// drift skoru ve önceki commit'e göre delta.
+/// Each row: commit hash, message, node count, edge count,
+/// drift score, and delta compared to the previous commit.
 fn execute_list_drift(db: &Database) -> Result<()> {
     let trend = db.list_drift_trend(20)?;
 
     if trend.is_empty() {
-        println!("📭 Henüz drift verisi yok. Önce 'morpharch scan <path>' çalıştırın.");
+        println!("No drift data yet. Run 'morpharch scan <path>' first.");
         return Ok(());
     }
 
-    println!("📈 Drift Skor Trendi (son {} commit):", trend.len());
+    println!("Drift Score Trend (last {} commits):", trend.len());
     println!();
     let header = format!(
         "{:<9} {:<35} {:>6} {:>6} {:>7} {:>7}   {}",
@@ -215,8 +215,8 @@ fn execute_list_drift(db: &Database) -> Result<()> {
 
     let mut prev_drift: Option<u8> = None;
 
-    // Trend zaman damgasına göre azalan sırada — tersten itereyerek
-    // kronolojik sırada delta hesaplıyoruz
+    // Trend is in descending timestamp order — iterate in reverse
+    // for chronological delta calculation
     let reversed: Vec<_> = trend.iter().rev().collect();
 
     for (hash, message, nodes, edges, drift_total, timestamp) in &reversed {
@@ -260,7 +260,7 @@ fn execute_list_drift(db: &Database) -> Result<()> {
     }
 
     println!();
-    println!("Toplam: {} commit analiz edildi", trend.len());
+    println!("Total: {} commits analyzed", trend.len());
 
     Ok(())
 }

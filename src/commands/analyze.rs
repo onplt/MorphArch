@@ -1,18 +1,18 @@
 // =============================================================================
-// commands/analyze.rs — Analyze komutu: detaylı drift raporu
+// commands/analyze.rs — Analyze command: detailed drift report
 // =============================================================================
 //
-// Sprint 3 analiz modülü. Belirtilen commit (veya HEAD) için:
-//   1. Graph snapshot'ı DB'den çeker
-//   2. Drift skorunu ve alt metrikleri gösterir
-//   3. Önceki 3 commit ile temporal delta hesaplar
-//   4. Top boundary violator'ları listeler
-//   5. Döngü bilgisini raporlar
-//   6. İyileştirme önerileri sunar
+// Sprint 3 analysis module. For the specified commit (or HEAD):
+//   1. Fetches graph snapshot from DB
+//   2. Displays drift score and sub-metrics
+//   3. Computes temporal delta with the previous 3 commits
+//   4. Lists top boundary violators
+//   5. Reports cycle information
+//   6. Offers improvement recommendations
 //
-// Kullanım:
-//   morpharch analyze           → HEAD commit analizi
-//   morpharch analyze main~5    → Belirtilen commit analizi
+// Usage:
+//   morpharch analyze           → HEAD commit analysis
+//   morpharch analyze main~5    → Specified commit analysis
 // =============================================================================
 
 use std::collections::HashSet;
@@ -26,21 +26,9 @@ use crate::graph_builder;
 use crate::models::DriftScore;
 use crate::scoring;
 
-/// Analyze komutunu çalıştırır: detaylı drift raporu üretir.
-///
-/// # Parametreler
-/// - `repo_path`: Git deposunun yolu (commit-ish resolve için)
-/// - `commit_ish`: Analiz edilecek commit referansı (None = HEAD)
-/// - `db`: SQLite veritabanı referansı
-///
-/// # İş Akışı
-/// 1. commit-ish'i resolve et (gix ile)
-/// 2. DB'den graph snapshot'ı çek
-/// 3. Drift raporu yazdır
-/// 4. Önceki commit'lerle karşılaştır
-/// 5. Öneriler sun
+/// Runs the analyze command: produces a detailed drift report.
 pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) -> Result<()> {
-    // ── Commit hash'i resolve et ──
+    // ── Resolve commit hash ──
     let commit_hash = resolve_commit(repo_path, commit_ish)?;
     let short_hash = if commit_hash.len() >= 7 {
         &commit_hash[..7]
@@ -48,51 +36,48 @@ pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) ->
         &commit_hash
     };
 
-    info!(hash = %commit_hash, "Commit analiz ediliyor");
+    info!(hash = %commit_hash, "Analyzing commit");
 
-    // ── Graph snapshot'ı getir ──
+    // ── Fetch graph snapshot ──
     let snapshot = db
         .get_graph_snapshot(&commit_hash)?
-        .with_context(|| format!("Bu commit için graph snapshot bulunamadı: {short_hash}"))?;
+        .with_context(|| format!("No graph snapshot found for this commit: {short_hash}"))?;
 
-    println!("🔬 Commit Analizi: {short_hash}");
+    println!("  Commit Analysis: {short_hash}");
     println!();
 
-    // ── Drift raporu ──
+    // ── Drift report ──
     if let Some(ref drift) = snapshot.drift {
         print_drift_report(drift, snapshot.node_count, snapshot.edge_count);
     } else {
-        println!("⚠️  Bu commit için drift skoru hesaplanmamış.");
-        println!("   Önce 'morpharch scan <path>' ile yeniden tarama yapın.");
+        println!("  No drift score calculated for this commit.");
+        println!("   Run 'morpharch scan <path>' to re-scan first.");
         return Ok(());
     }
 
-    // ── Temporal analiz: önceki 3 commit ile karşılaştır ──
+    // ── Temporal analysis: compare with previous 3 commits ──
     println!();
-    println!("📈 Temporal Analiz (önceki commit'lerle karşılaştırma):");
+    println!("  Temporal Analysis (comparison with previous commits):");
     println!();
 
     let trend = db.list_drift_trend(20)?;
 
-    // Mevcut commit'in pozisyonunu bul
     let current_pos = trend.iter().position(|(h, ..)| h == &commit_hash);
 
     if let Some(pos) = current_pos {
-        // Sonraki 3 kayıt (kronolojik olarak önceki commit'ler)
         let prev_commits: Vec<_> = trend.iter().skip(pos + 1).take(3).collect();
 
         if prev_commits.is_empty() {
-            println!("  İlk commit — karşılaştırılacak önceki commit yok.");
+            println!("  First commit — no previous commits to compare.");
         } else {
             let header = format!(
                 "  {:<9} {:>6} {:>6} {:>7} {:>8}",
                 "HASH", "NODES", "EDGES", "DRIFT", "DELTA"
             );
             println!("{header}");
-            let separator = format!("  {}", "─".repeat(45));
+            let separator = format!("  {}", "-".repeat(45));
             println!("{separator}");
 
-            // Mevcut commit'in drift skoru
             let current_drift = snapshot.drift.as_ref().map(|d| d.total).unwrap_or(0);
 
             for (prev_hash, _msg, prev_nodes, prev_edges, prev_drift, _ts) in &prev_commits {
@@ -122,80 +107,65 @@ pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) ->
             }
         }
     } else {
-        println!("  Bu commit trend verisinde bulunamadı.");
+        println!("  This commit was not found in the trend data.");
     }
 
-    // ── Boundary violation detayları ──
+    // ── Boundary violation details ──
     println!();
     print_boundary_details(&snapshot.edges);
 
-    // ── Döngü bilgisi ──
+    // ── Cycle information ──
     println!();
     print_cycle_info(&snapshot.nodes, &snapshot.edges);
 
-    // ── Öneriler ──
+    // ── Recommendations ──
     println!();
     print_recommendations(&snapshot.drift);
 
     Ok(())
 }
 
-/// commit-ish referansını tam SHA hash'e çevirir.
-///
-/// `gix` ile depoyu açar ve rev-parse yapar.
-/// None verilmişse HEAD kullanılır.
 fn resolve_commit(repo_path: &Path, commit_ish: Option<&str>) -> Result<String> {
     let repo = gix::discover(repo_path)
-        .with_context(|| format!("Git deposu bulunamadı: {}", repo_path.display()))?;
+        .with_context(|| format!("Git repository not found: {}", repo_path.display()))?;
 
     let reference = commit_ish.unwrap_or("HEAD");
 
-    // gix ile rev-parse — detach() ile ObjectId'ye çevir
     let object = repo
         .rev_parse_single(reference)
-        .with_context(|| format!("Commit referansı çözümlenemedi: '{reference}'"))?;
+        .with_context(|| format!("Failed to resolve commit reference: '{reference}'"))?;
 
     Ok(object.detach().to_string())
 }
 
-/// Drift skoru detay raporu yazdırır.
-///
-/// Skor seviyesine göre emoji ve renk kodu:
-/// - 0-30: 🟢 Sağlıklı
-/// - 31-60: 🟡 Dikkat
-/// - 61-80: 🟠 Uyarı
-/// - 81-100: 🔴 Kritik
 fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) {
     let (emoji, level) = match drift.total {
-        0..=30 => ("🟢", "Sağlıklı"),
-        31..=60 => ("🟡", "Dikkat"),
-        61..=80 => ("🟠", "Uyarı"),
-        _ => ("🔴", "Kritik"),
+        0..=30 => ("  ", "Healthy"),
+        31..=60 => ("  ", "Warning"),
+        61..=80 => ("  ", "Degraded"),
+        _ => ("  ", "Critical"),
     };
 
-    println!("{emoji} Drift Skoru: {}/100 ({level})", drift.total);
+    println!("{emoji} Drift Score: {}/100 ({level})", drift.total);
     println!();
-    println!("  📊 Graf İstatistikleri:");
-    println!("     Düğüm (modül) sayısı:    {node_count}");
-    println!("     Kenar (bağımlılık) sayısı: {edge_count}");
+    println!("  Graph Statistics:");
+    println!("     Node (module) count:      {node_count}");
+    println!("     Edge (dependency) count:   {edge_count}");
     println!();
-    println!("  📐 Alt Metrikler:");
-    println!("     Fan-in değişimi:          {:+}", drift.fan_in_delta);
-    println!("     Fan-out değişimi:         {:+}", drift.fan_out_delta);
-    println!("     Yeni döngüsel bağımlılık: {}", drift.new_cycles);
+    println!("  Sub-Metrics:");
+    println!("     Fan-in change:            {:+}", drift.fan_in_delta);
+    println!("     Fan-out change:           {:+}", drift.fan_out_delta);
+    println!("     New cyclic dependencies:  {}", drift.new_cycles);
     println!(
-        "     Sınır ihlali:             {}",
+        "     Boundary violations:      {}",
         drift.boundary_violations
     );
     println!(
-        "     Bilişsel karmaşıklık:     {:.2}",
+        "     Cognitive complexity:     {:.2}",
         drift.cognitive_complexity
     );
 }
 
-/// Boundary violation detaylarını yazdırır.
-///
-/// Ham kenar listesinden ihlal eden kenarları bulur ve listeler.
 fn print_boundary_details(edges: &[crate::models::DependencyEdge]) {
     let pairs = scoring::edges_to_pairs(edges);
     let violations: Vec<_> = pairs
@@ -208,38 +178,36 @@ fn print_boundary_details(edges: &[crate::models::DependencyEdge]) {
         .collect();
 
     if violations.is_empty() {
-        println!("✅ Boundary İhlali: Yok — paket sınırları temiz.");
+        println!("  Boundary Violations: None — package boundaries are clean.");
     } else {
-        println!("⚠️  Boundary İhlalleri ({} adet):", violations.len());
+        println!("  Boundary Violations ({} found):", violations.len());
         for (i, (from, to)) in violations.iter().enumerate().take(10) {
-            println!("     {}. {} → {}", i + 1, from, to);
+            println!("     {}. {} -> {}", i + 1, from, to);
         }
         if violations.len() > 10 {
-            println!("     ... ve {} tane daha", violations.len() - 10);
+            println!("     ... and {} more", violations.len() - 10);
         }
     }
 }
 
-/// Döngüsel bağımlılık bilgisini yazdırır.
 fn print_cycle_info(nodes: &[String], edges: &[crate::models::DependencyEdge]) {
     let node_set: HashSet<String> = nodes.iter().cloned().collect();
     let graph = graph_builder::build_graph(&node_set, edges);
     let cycle_count = scoring::count_cycles_public(&graph);
 
     if cycle_count == 0 {
-        println!("✅ Döngüsel Bağımlılık: Yok — DAG yapısı korunuyor.");
+        println!("  Cyclic Dependencies: None — DAG structure is maintained.");
     } else {
-        println!("⚠️  Döngüsel Bağımlılık: {cycle_count} adet döngü tespit edildi.");
-        println!("     Döngüler mimari karmaşıklığı artırır ve refactoring'i zorlaştırır.");
+        println!("  Cyclic Dependencies: {cycle_count} cycle(s) detected.");
+        println!("     Cycles increase architectural complexity and make refactoring harder.");
     }
 }
 
-/// Drift skoruna göre iyileştirme önerileri sunar.
 fn print_recommendations(drift: &Option<DriftScore>) {
-    println!("💡 Öneriler:");
+    println!("  Recommendations:");
 
     let Some(d) = drift else {
-        println!("   Drift skoru hesaplanmamış — 'morpharch scan' çalıştırın.");
+        println!("   No drift score calculated — run 'morpharch scan' first.");
         return;
     };
 
@@ -247,45 +215,45 @@ fn print_recommendations(drift: &Option<DriftScore>) {
 
     if d.new_cycles > 0 {
         suggestions.push(format!(
-            "🔄 {} yeni döngüsel bağımlılık var. Dependency Inversion prensibi \
-             uygulayarak interface/trait ile kırın.",
+            "   {} new cyclic dependency(ies). Apply Dependency Inversion \
+             principle — break cycles with interfaces/traits.",
             d.new_cycles
         ));
     }
 
     if d.boundary_violations > 0 {
         suggestions.push(format!(
-            "🚧 {} sınır ihlali var. Kütüphane katmanı (packages/lib) \
-             uygulama katmanına (apps/cmd) bağımlı olmamalı.",
+            "   {} boundary violation(s). Library layers (packages/lib) \
+             should not depend on application layers (apps/cmd).",
             d.boundary_violations
         ));
     }
 
     if d.fan_out_delta > 5 {
         suggestions.push(
-            "📤 Fan-out artışı yüksek. Modüller çok fazla dış bağımlılık ekliyor. \
-             Facade pattern veya modül birleştirme düşünün."
+            "   High fan-out growth. Modules are adding too many external dependencies. \
+             Consider a Facade pattern or module consolidation."
                 .to_string(),
         );
     }
 
     if d.cognitive_complexity > 20.0 {
         suggestions.push(
-            "🧠 Bilişsel karmaşıklık yüksek. Graf çok yoğun — modülleri daha \
-             küçük, odaklı parçalara bölmeyi düşünün."
+            "   High cognitive complexity. The graph is too dense — consider splitting \
+             modules into smaller, focused pieces."
                 .to_string(),
         );
     }
 
     if d.total <= 30 {
-        suggestions.push("🎉 Mimari sağlıklı görünüyor! İyi gidiyorsunuz.".to_string());
+        suggestions.push("   Architecture looks healthy! Keep it up.".to_string());
     }
 
     if suggestions.is_empty() {
-        suggestions.push("👍 Genel durum kabul edilebilir düzeyde.".to_string());
+        suggestions.push("   Overall status is acceptable.".to_string());
     }
 
     for suggestion in &suggestions {
-        println!("   {suggestion}");
+        println!("{suggestion}");
     }
 }

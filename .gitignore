@@ -87,3 +87,6 @@ heaptrack.*
 *.exe
 *.dll
 *.so
+
+# File History Records
+.history/

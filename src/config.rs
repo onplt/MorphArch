@@ -1,59 +1,51 @@
 // =============================================================================
-// config.rs — MorphArch yapılandırma yönetimi
+// config.rs — MorphArch configuration management
 // =============================================================================
 //
-// Varsayılan yapılandırma değerlerini ve veritabanı yolunu yönetir.
+// Manages default configuration values and the database path.
 //
-// Veritabanı konumu: ~/.morpharch/morpharch.db
-//   - Klasör yoksa otomatik oluşturulur
-//   - Platform bağımsız: dirs crate ile home dizini tespit edilir
+// Database location: ~/.morpharch/morpharch.db
+//   - Directory is auto-created if it doesn't exist
+//   - Platform-independent: home directory detected via dirs crate
 //
-// max_commits: Tek seferde taranacak maksimum commit sayısı (varsayılan: 500)
+// max_commits: Maximum commits to scan per run (default: 500)
 // =============================================================================
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tracing::info;
 
-/// Taranacak maksimum commit sayısı (Sprint 1 için sabit)
 const DEFAULT_MAX_COMMITS: usize = 500;
 
-/// MorphArch uygulamasının çalışma zamanı yapılandırması
-///
-/// Veritabanı yolu ve tarama parametrelerini tutar.
-/// İleride TOML/YAML dosyasından okunabilir hale getirilecek.
+/// Runtime configuration for the MorphArch application.
 #[derive(Debug)]
 pub struct MorphArchConfig {
-    /// SQLite veritabanı dosyasının tam yolu
+    /// Full path to the SQLite database file
     pub db_path: PathBuf,
-
-    /// Tek taramada okunacak maksimum commit sayısı
+    /// Maximum commits to read per scan
     pub max_commits: usize,
 }
 
 impl MorphArchConfig {
-    /// Varsayılan yapılandırmayı yükler.
+    /// Loads the default configuration.
     ///
-    /// ~/.morpharch/ dizinini oluşturur (yoksa) ve veritabanı yolunu ayarlar.
-    /// Home dizini bulunamazsa anlamlı bir hata mesajı döner.
+    /// Creates ~/.morpharch/ if needed and sets the database path.
     pub fn load() -> Result<Self> {
-        // Platform-bağımsız home dizini tespiti
         let home = dirs::home_dir().context(
-            "Home dizini bulunamadı. \
-             HOME (Linux/macOS) veya USERPROFILE (Windows) ortam değişkenini kontrol edin.",
+            "Home directory not found. \
+             Check your HOME (Linux/macOS) or USERPROFILE (Windows) environment variable.",
         )?;
 
-        // ~/.morpharch/ veri dizinini oluştur
         let morpharch_dir = home.join(".morpharch");
         std::fs::create_dir_all(&morpharch_dir).with_context(|| {
             format!(
-                "MorphArch veri dizini oluşturulamadı: {}",
+                "Failed to create MorphArch data directory: {}",
                 morpharch_dir.display()
             )
         })?;
 
         let db_path = morpharch_dir.join("morpharch.db");
-        info!(path = %db_path.display(), "Yapılandırma yüklendi");
+        info!(path = %db_path.display(), "Configuration loaded");
 
         Ok(Self {
             db_path,

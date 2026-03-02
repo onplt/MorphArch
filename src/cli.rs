@@ -1,17 +1,17 @@
 // =============================================================================
-// cli.rs — MorphArch komut satırı arayüzü tanımları
+// cli.rs — MorphArch command-line interface definitions
 // =============================================================================
 //
-// Clap derive makroları ile ergonomik CLI yapısı:
-//   morpharch scan <path>        → Depoyu tara: commit metadata + graph + drift
-//   morpharch watch <path>       → Tara + izleme modu (TUI sonraki sprint)
-//   morpharch list-graphs        → Son dependency graph snapshot'ları listele
-//   morpharch analyze [commit]   → Belirtilen commit'in drift raporunu göster
-//   morpharch list-drift         → Son 20 commit'in drift trend tablosu
-//   morpharch --help             → Yardım mesajı
+// Ergonomic CLI structure using clap derive macros:
+//   morpharch scan <path>        → Scan repo: commit metadata + graph + drift
+//   morpharch watch <path>       → Scan + launch animated TUI (Sprint 4)
+//   morpharch list-graphs        → List recent dependency graph snapshots
+//   morpharch analyze [commit]   → Show drift report for a specific commit
+//   morpharch list-drift         → Drift trend table for the last 20 commits
+//   morpharch --help             → Help message
 //
-// Her subcommand isteğe bağlı bir path alır; verilmezse "." (mevcut dizin) kullanılır.
-// list-graphs, list-drift ve analyze path almaz — doğrudan DB'den okur.
+// Each subcommand takes an optional path; defaults to "." (current directory).
+// list-graphs, list-drift, and analyze do not take a path — they read from DB.
 // =============================================================================
 
 use clap::{Parser, Subcommand};
@@ -19,8 +19,9 @@ use std::path::PathBuf;
 
 /// MorphArch — Monorepo architecture drift visualizer
 ///
-/// Büyük monorepo'ların Git geçmişini tarar, paket/modül bağımlılık grafini
-/// oluşturur, architecture drift skorunu hesaplar ve animasyonlu TUI ile gösterir.
+/// Scans large monorepo Git history, builds per-commit dependency graphs,
+/// calculates architecture drift scores, and visualizes them with an
+/// animated TUI.
 #[derive(Parser, Debug)]
 #[command(
     name = "morpharch",
@@ -31,62 +32,67 @@ use std::path::PathBuf;
                   animated force-graph + timeline using ratatui.\n\n\
                   Sprint 1: Git history scanning & SQLite storage.\n\
                   Sprint 2: Dependency graph building with tree-sitter.\n\
-                  Sprint 3: Architecture drift scoring & temporal analysis.",
+                  Sprint 3: Architecture drift scoring & temporal analysis.\n\
+                  Sprint 4: Animated TUI with Verlet physics force-graph.",
     after_help = "Examples:\n  morpharch scan .          Scan repo: commits + graphs + drift scores\n  morpharch scan ../myrepo  Scan a specific repository\n  morpharch watch .         Scan + activate watch mode\n  morpharch list-graphs     Show last 10 graph snapshots\n  morpharch list-drift      Show drift score trend (last 20 commits)\n  morpharch analyze         Analyze HEAD commit drift\n  morpharch analyze main~5  Analyze specific commit drift"
 )]
 pub struct Cli {
-    /// Çalıştırılacak alt komut
+    /// Subcommand to execute
     #[command(subcommand)]
     pub command: Commands,
 }
 
-/// Kullanılabilir alt komutlar
+/// Available subcommands
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Git deposunu tara: commit metadata + dependency graph + drift skoru
+    /// Scan a Git repository: commit metadata + dependency graph + drift score
     ///
-    /// Belirtilen dizindeki Git deposunun son N commit'ini (varsayılan: 500)
-    /// okur, her commit için bağımlılık grafini oluşturur, drift skoru
-    /// hesaplar ve SQLite veritabanına kaydeder.
+    /// Reads the last N commits (default: 500) from the Git repository at
+    /// the given path, builds a dependency graph for each commit, calculates
+    /// drift scores, and stores everything in the SQLite database.
     Scan {
-        /// Taranacak Git deposunun yolu
+        /// Path to the Git repository to scan
         #[arg(default_value = ".")]
         path: PathBuf,
     },
 
-    /// Depoyu tara ve izleme modunu etkinleştir
+    /// Scan the repository and launch the animated TUI
     ///
-    /// Önce bir scan işlemi yapar, ardından dosya değişikliklerini izlemeye
-    /// başlar. (TUI görselleştirme sonraki sprintte eklenecek.)
+    /// First performs a scan, then loads graph snapshots from the database
+    /// to present a Verlet physics force-directed graph visualization,
+    /// timeline slider, and drift insight panel.
+    ///
+    /// Keys: j/k=navigate, p=play/pause, r=reset, /=search, q=quit
     Watch {
-        /// İzlenecek Git deposunun yolu
+        /// Path to the Git repository to watch
         #[arg(default_value = ".")]
         path: PathBuf,
     },
 
-    /// Son dependency graph snapshot'ları listele
+    /// List recent dependency graph snapshots
     ///
-    /// Veritabanındaki son 10 graph snapshot'ı commit bilgileriyle birlikte
-    /// tablo formatında gösterir.
+    /// Shows the last 10 graph snapshots from the database in table format
+    /// with commit info.
     ListGraphs,
 
-    /// Belirtilen commit'in detaylı drift raporunu göster
+    /// Show detailed drift report for a specific commit
     ///
-    /// Drift skoru, alt metrikler, boundary ihlalleri, döngüsel bağımlılıklar
-    /// ve iyileştirme önerileri içerir. Commit belirtilmezse HEAD kullanılır.
+    /// Includes drift score, sub-metrics, boundary violations, circular
+    /// dependencies, and improvement recommendations. Defaults to HEAD
+    /// if no commit is specified.
     Analyze {
-        /// Analiz edilecek commit referansı (ör. HEAD, main~5, abc1234)
+        /// Commit reference to analyze (e.g., HEAD, main~5, abc1234)
         #[arg(default_value = None)]
         commit: Option<String>,
 
-        /// Git deposunun yolu (rev-parse için gerekli)
+        /// Path to the Git repository (needed for rev-parse)
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
 
-    /// Son commit'lerin drift skor trendini tablo olarak göster
+    /// Show drift score trend for recent commits
     ///
-    /// Veritabanındaki son 20 commit'in drift skorlarını, düğüm/kenar
-    /// sayılarını ve önceki commit'e göre delta değişimini gösterir.
+    /// Displays drift scores, node/edge counts, and delta changes
+    /// compared to the previous commit for the last 20 commits.
     ListDrift,
 }
