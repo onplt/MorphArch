@@ -30,7 +30,9 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -120,9 +122,7 @@ impl App {
     pub fn new(snapshots: Vec<GraphSnapshot>) -> Self {
         let timeline_commits: Vec<(String, String, i64)> = snapshots
             .iter()
-            .map(|s| {
-                (s.commit_hash.clone(), String::new(), s.timestamp)
-            })
+            .map(|s| (s.commit_hash.clone(), String::new(), s.timestamp))
             .collect();
 
         let timeline = TimelineState::new(timeline_commits);
@@ -340,13 +340,21 @@ impl App {
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 // Faster (shorter interval), minimum 200ms
                 let ms = self.auto_play_interval.as_millis() as u64;
-                let new_ms = if ms > 500 { ms - 250 } else { (ms - 100).max(200) };
+                let new_ms = if ms > 500 {
+                    ms - 250
+                } else {
+                    (ms - 100).max(200)
+                };
                 self.auto_play_interval = Duration::from_millis(new_ms);
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
                 // Slower (longer interval), maximum 5000ms
                 let ms = self.auto_play_interval.as_millis() as u64;
-                let new_ms = if ms < 500 { ms + 100 } else { (ms + 250).min(5000) };
+                let new_ms = if ms < 500 {
+                    ms + 100
+                } else {
+                    (ms + 250).min(5000)
+                };
                 self.auto_play_interval = Duration::from_millis(new_ms);
             }
             KeyCode::Char('p') | KeyCode::Char(' ') => {
@@ -363,7 +371,9 @@ impl App {
             }
             KeyCode::Char(']') => {
                 // Scroll package list down
-                self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_add(5)
+                self.pkg_scroll_offset = self
+                    .pkg_scroll_offset
+                    .saturating_add(5)
                     .min(self.graph_layout.labels.len().saturating_sub(1));
             }
             KeyCode::Char('/') => {
@@ -395,8 +405,9 @@ impl App {
         // Handle ongoing resize drag (takes priority over everything else)
         if self.resizing_pkg {
             match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Down(MouseButton::Left) => {
-                    let new_w = col.saturating_sub(self.pkg_area.x).max(14).min(60);
+                MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Down(MouseButton::Left) => {
+                    let new_w = col.saturating_sub(self.pkg_area.x).clamp(14, 60);
                     self.pkg_panel_width = new_w;
                     return;
                 }
@@ -426,14 +437,12 @@ impl App {
         }
 
         // Check if the mouse is inside the graph canvas
-        let in_canvas = col >= inner_x
-            && col < inner_x + inner_w
-            && row >= inner_y
-            && row < inner_y + inner_h;
+        let in_canvas =
+            col >= inner_x && col < inner_x + inner_w && row >= inner_y && row < inner_y + inner_h;
 
         // Check if click is inside the timeline panel (for seek-by-click)
         let tl = self.timeline_area;
-        let tl_inner_x = tl.x + 1;  // inside border
+        let tl_inner_x = tl.x + 1; // inside border
         let tl_inner_w = tl.width.saturating_sub(3); // exclude border + padding
         let in_timeline = col >= tl.x
             && col < tl.x + tl.width
@@ -462,21 +471,21 @@ impl App {
                 }
 
                 // Map terminal coordinates to physics space
-                let (px, py) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                let (px, py) =
+                    self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
 
                 // Find the closest node within a grab radius.
                 // Scale with canvas size so drag works on large terminals too.
-                let diag = (self.graph_layout.width.powi(2) + self.graph_layout.height.powi(2)).sqrt();
+                let diag =
+                    (self.graph_layout.width.powi(2) + self.graph_layout.height.powi(2)).sqrt();
                 let grab_radius = (diag * 0.06).max(30.0);
                 let mut closest: Option<(usize, f64)> = None;
                 for (i, pos) in self.graph_layout.positions.iter().enumerate() {
                     let dx = pos.x - px;
                     let dy = pos.y - py;
                     let dist = (dx * dx + dy * dy).sqrt();
-                    if dist < grab_radius {
-                        if closest.is_none() || dist < closest.unwrap().1 {
-                            closest = Some((i, dist));
-                        }
+                    if dist < grab_radius && (closest.is_none() || dist < closest.unwrap().1) {
+                        closest = Some((i, dist));
                     }
                 }
 
@@ -493,7 +502,8 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(idx) = self.dragging_node {
                     if idx < self.graph_layout.positions.len() {
-                        let (px, py) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                        let (px, py) =
+                            self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
                         // Move the node directly to the mouse position
                         self.graph_layout.positions[idx].x = px;
                         self.graph_layout.positions[idx].y = py;
@@ -531,18 +541,24 @@ impl App {
             MouseEventKind::ScrollUp => {
                 // Scroll packages panel if mouse is over it
                 let pkg = self.pkg_area;
-                if col >= pkg.x && col < pkg.x + pkg.width
-                    && row >= pkg.y && row < pkg.y + pkg.height
+                if col >= pkg.x
+                    && col < pkg.x + pkg.width
+                    && row >= pkg.y
+                    && row < pkg.y + pkg.height
                 {
                     self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(3);
                 }
             }
             MouseEventKind::ScrollDown => {
                 let pkg = self.pkg_area;
-                if col >= pkg.x && col < pkg.x + pkg.width
-                    && row >= pkg.y && row < pkg.y + pkg.height
+                if col >= pkg.x
+                    && col < pkg.x + pkg.width
+                    && row >= pkg.y
+                    && row < pkg.y + pkg.height
                 {
-                    self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_add(3)
+                    self.pkg_scroll_offset = self
+                        .pkg_scroll_offset
+                        .saturating_add(3)
                         .min(self.graph_layout.labels.len().saturating_sub(1));
                 }
             }
@@ -596,7 +612,9 @@ impl App {
 }
 
 /// Converts a GraphSnapshot to layout data (labels + edge index pairs + edge weights).
-fn snapshot_to_layout_data(snapshot: &GraphSnapshot) -> (Vec<String>, Vec<(usize, usize)>, Vec<u32>) {
+fn snapshot_to_layout_data(
+    snapshot: &GraphSnapshot,
+) -> (Vec<String>, Vec<(usize, usize)>, Vec<u32>) {
     let labels = snapshot.nodes.clone();
 
     // Convert edges to index pairs with corresponding weights
@@ -634,8 +652,8 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(app.pkg_panel_width), // Left panel: package list (resizable)
-            Constraint::Min(30),    // Center: graph canvas
-            Constraint::Length(32), // Right panel: drift insight
+            Constraint::Min(30),                     // Center: graph canvas
+            Constraint::Length(32),                  // Right panel: drift insight
         ])
         .split(main_chunks[0]);
 
@@ -716,12 +734,19 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         let mut visible = matched.clone();
         for &(from, to) in &app.graph_layout.edges {
-            if matched.contains(&from) { visible.insert(to); }
-            if matched.contains(&to) { visible.insert(from); }
+            if matched.contains(&from) {
+                visible.insert(to);
+            }
+            if matched.contains(&to) {
+                visible.insert(from);
+            }
         }
         (matched, visible)
     } else {
-        (std::collections::HashSet::new(), std::collections::HashSet::new())
+        (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        )
     };
 
     let drift_score = app.current_drift.as_ref().map(|d| d.total).unwrap_or(50);
@@ -731,7 +756,9 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .title(if search_active {
             format!(
                 " Graph — /{} ({} found, {} visible) ",
-                app.search_query, search_matched.len(), search_visible.len()
+                app.search_query,
+                search_matched.len(),
+                search_visible.len()
             )
         } else {
             format!(
@@ -745,7 +772,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .border_style(Style::default().fg(drift_color(drift_score)))
         .style(Style::default().bg(BG_SURFACE));
 
-    let canvas_width = area.width.saturating_sub(2) as f64 * 2.0;  // Braille = 2 dots per cell horizontally
+    let canvas_width = area.width.saturating_sub(2) as f64 * 2.0; // Braille = 2 dots per cell horizontally
     let canvas_height = area.height.saturating_sub(2) as f64 * 4.0; // Braille = 4 dots per cell vertically
 
     let layout = &app.graph_layout;
@@ -772,7 +799,13 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     // ── Edge data: sort by weight so heavy edges render last (on top) ──
     // For large graphs, limit visible edges to prevent terminal buffer overflow.
     let n_nodes = layout.positions.len();
-    let max_edges = if n_nodes > 200 { 400 } else if n_nodes > 100 { 600 } else { usize::MAX };
+    let max_edges = if n_nodes > 200 {
+        400
+    } else if n_nodes > 100 {
+        600
+    } else {
+        usize::MAX
+    };
 
     let mut edge_data: Vec<(f64, f64, f64, f64, Color, u32)> = layout
         .edges
@@ -808,7 +841,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     // This prevents the "wall of text" that makes large graphs unreadable.
     let max_labels = if n_nodes > 200 {
         // ~15% of nodes get labels, at least 20
-        (n_nodes / 7).max(20).min(60)
+        (n_nodes / 7).clamp(20, 60)
     } else if n_nodes > 80 {
         (n_nodes / 3).max(20)
     } else {
@@ -818,18 +851,32 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     // Compute per-node degree (in + out) to decide which nodes get labels
     let mut degree: Vec<usize> = vec![0; n_nodes];
     for &(from, to) in &layout.edges {
-        if from < n_nodes { degree[from] += 1; }
-        if to < n_nodes { degree[to] += 1; }
+        if from < n_nodes {
+            degree[from] += 1;
+        }
+        if to < n_nodes {
+            degree[to] += 1;
+        }
     }
     // Build a set of indices whose degree is in the top-N
     let label_visible: std::collections::HashSet<usize> = {
         let mut ranked: Vec<(usize, usize)> = degree.iter().copied().enumerate().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1)); // highest degree first
-        ranked.into_iter().take(max_labels).map(|(i, _)| i).collect()
+        ranked
+            .into_iter()
+            .take(max_labels)
+            .map(|(i, _)| i)
+            .collect()
     };
 
     // Node rendering data (snapped position + label + color + is_matched).
-    let label_max_len: usize = if n_nodes > 200 { 10 } else if n_nodes > 80 { 12 } else { 14 };
+    let label_max_len: usize = if n_nodes > 200 {
+        10
+    } else if n_nodes > 80 {
+        12
+    } else {
+        14
+    };
     let node_points: Vec<(f64, f64, String, Color, bool)> = snapped
         .iter()
         .enumerate()
@@ -888,13 +935,15 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 let dx = x2 - x1;
                 let dy = y2 - y1;
                 let len = (dx * dx + dy * dy).sqrt();
-                if len < 0.001 { continue; }
+                if len < 0.001 {
+                    continue;
+                }
 
                 // Unit direction & perpendicular vectors
                 let ux = dx / len;
                 let uy = dy / len;
                 let nx = -uy;
-                let ny =  ux;
+                let ny = ux;
 
                 // ── 1) Gradient edge: dim at source → bright at target ──
                 // Adaptive segment count based on edge length
@@ -907,8 +956,10 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                     let brightness = 0.35 + 0.65 * mid_t;
                     let sc = scale_color(color, brightness);
                     ctx.draw(&CLine {
-                        x1: x1 + dx * t0, y1: y1 + dy * t0,
-                        x2: x1 + dx * t1, y2: y1 + dy * t1,
+                        x1: x1 + dx * t0,
+                        y1: y1 + dy * t0,
+                        x2: x1 + dx * t1,
+                        y2: y1 + dy * t1,
                         color: sc,
                     });
                 }
@@ -948,9 +999,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             let col = inner_left + grid_x / 2;
             let row = inner_top + grid_y / 4;
 
-            if col >= inner_left && col < inner_right
-                && row >= inner_top && row < inner_bottom
-            {
+            if col >= inner_left && col < inner_right && row >= inner_top && row < inner_bottom {
                 let marker = if *is_matched { "◆" } else { "●" };
                 buf.set_string(col, row, marker, Style::default().fg(*color).bg(BG_SURFACE));
                 if !label.is_empty() {
@@ -963,7 +1012,12 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                             label.as_str()
                         };
                         let label_fg = if *is_matched { *color } else { FG_TEXT };
-                        buf.set_string(label_col, row, text, Style::default().fg(label_fg).bg(BG_SURFACE));
+                        buf.set_string(
+                            label_col,
+                            row,
+                            text,
+                            Style::default().fg(label_fg).bg(BG_SURFACE),
+                        );
                     }
                 }
             }
@@ -974,13 +1028,20 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Renders the search overlay — slim 1-row bar at the bottom of the graph panel.
 fn render_search_overlay(frame: &mut Frame, graph_area: Rect, query: &str) {
     // Slim bar: 1 row, inside graph panel border, bottom-left
-    let bar_width = (query.len() as u16 + 4).max(20).min(graph_area.width.saturating_sub(4));
+    let bar_width = (query.len() as u16 + 4)
+        .max(20)
+        .min(graph_area.width.saturating_sub(4));
     // Position: inside the bottom border of the graph panel (1 row above border)
     let bar_y = graph_area.y + graph_area.height.saturating_sub(2);
     let bar_area = Rect::new(graph_area.x + 2, bar_y, bar_width, 1);
 
     let line = Line::from(vec![
-        Span::styled("/", Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(ACCENT_MAUVE)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(query, Style::default().fg(FG_TEXT)),
         Span::styled("█", Style::default().fg(ACCENT_MAUVE)), // cursor
     ]);
@@ -997,11 +1058,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     let status_area = Rect::new(area.x, area.height.saturating_sub(1), area.width, 1);
 
-    let play_status = if app.is_playing {
-        "> PLAY"
-    } else {
-        "|| PAUSE"
-    };
+    let play_status = if app.is_playing { "> PLAY" } else { "|| PAUSE" };
     let commit_count = app.snapshots.len();
     let fps_info = format!("frame #{}", app.frame_count);
 
@@ -1030,7 +1087,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
         spans.push(Span::styled(
             format!("/{}", app.search_query),
-            Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_MAUVE)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             " (Esc:clear)",
@@ -1063,7 +1122,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 /// Main TUI event loop — puts terminal in raw mode and restores on exit.
 pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
     use crossterm::ExecutableCommand;
-    use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
+    use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
     use crossterm::terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
@@ -1101,8 +1160,8 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
                 ])
                 .split(main_chunks[0]);
 
-            app.pkg_area = top_chunks[0];     // packages panel (for mouse scroll)
-            app.graph_area = top_chunks[1];   // graph canvas (for mouse drag)
+            app.pkg_area = top_chunks[0]; // packages panel (for mouse scroll)
+            app.graph_area = top_chunks[1]; // graph canvas (for mouse drag)
             app.timeline_area = main_chunks[1]; // timeline panel (for mouse seek)
 
             render_app(frame, &mut app);

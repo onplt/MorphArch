@@ -1,19 +1,7 @@
-// =============================================================================
-// utils.rs — MorphArch utilities
-// =============================================================================
-//
-// Logging infrastructure and error formatting:
-//
-//   init_logging()  → Initializes structured logging via tracing-subscriber
-//     - Log level configurable via RUST_LOG env var
-//     - Default level: INFO
-//     - Target info hidden (cleaner output)
-//     - No timestamps (unnecessary for a CLI tool)
-//
-//   print_error()   → Prints anyhow error chain in a user-friendly format
-//     - Each context layer shown on a separate line
-//     - Root cause highlighted
-// =============================================================================
+//! Utility functions for logging and error display.
+//!
+//! - [`init_logging`] — Initializes `tracing-subscriber` with `RUST_LOG` support.
+//! - [`print_error`] — Prints an `anyhow` error chain in a user-friendly format.
 
 use anyhow::Error;
 use tracing_subscriber::{EnvFilter, fmt};

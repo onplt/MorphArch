@@ -43,7 +43,7 @@ pub struct GraphLayout {
     pub positions: Vec<NodePosition>,
     /// Edge list: (from_index, to_index) pairs
     pub edges: Vec<(usize, usize)>,
-    /// Edge weights: weight[i] corresponds to edges[i] (import count)
+    /// Edge weights: `weight[i]` corresponds to `edges[i]` (import count)
     pub edge_weights: Vec<u32>,
     /// Node labels (module names)
     pub labels: Vec<String>,
@@ -439,16 +439,6 @@ pub fn drift_color(drift_score: u8) -> Color {
     }
 }
 
-/// Returns the edge color — Sapphire for normal, Red for highlighted.
-#[allow(dead_code)]
-pub fn edge_color(is_new: bool) -> Color {
-    if is_new {
-        Color::Rgb(243, 139, 168) // Catppuccin Red — highlighted edge
-    } else {
-        Color::Rgb(116, 199, 236) // Catppuccin Sapphire — normal edge
-    }
-}
-
 /// Returns an edge color scaled by weight (import count).
 ///
 /// - weight 1:   dim overlay (low-traffic dependency)
@@ -480,9 +470,6 @@ pub const ACCENT_LAVENDER: Color = Color::Rgb(180, 190, 254);
 pub const ACCENT_MAUVE: Color = Color::Rgb(203, 166, 247);
 /// Catppuccin Mocha overlay — secondary text
 pub const FG_OVERLAY: Color = Color::Rgb(108, 112, 134);
-/// Node halo color (Surface1 — available for subtle glow effects)
-#[allow(dead_code)]
-pub const NODE_HALO: Color = Color::Rgb(69, 71, 90);
 
 /// Catppuccin node color palette for individual node coloring
 pub const NODE_PALETTE: [Color; 8] = [
@@ -515,7 +502,10 @@ mod tests {
         assert_eq!(layout.edges.len(), 2);
         assert_eq!(layout.edge_weights.len(), 2);
         assert!(layout.ideal_length > 0.0, "Ideal length should be positive");
-        assert!((layout.temperature - 1.0).abs() < 0.001, "Initial temperature should be 1.0");
+        assert!(
+            (layout.temperature - 1.0).abs() < 0.001,
+            "Initial temperature should be 1.0"
+        );
     }
 
     #[test]

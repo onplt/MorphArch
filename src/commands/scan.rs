@@ -59,11 +59,24 @@ fn is_test_path(path: &Path) -> bool {
 
     // Directory-based patterns (any component match)
     const TEST_DIRS: &[&str] = &[
-        "/test/", "/tests/", "/testdata/", "/test_data/",
-        "/__tests__/", "/spec/", "/fixtures/", "/fixture/",
-        "/examples/", "/example/", "/benchmarks/", "/bench/",
-        "/testutil/", "/testing/", "/mock/", "/mocks/",
-        "/snapshots/", "/e2e/",
+        "/test/",
+        "/tests/",
+        "/testdata/",
+        "/test_data/",
+        "/__tests__/",
+        "/spec/",
+        "/fixtures/",
+        "/fixture/",
+        "/examples/",
+        "/example/",
+        "/benchmarks/",
+        "/bench/",
+        "/testutil/",
+        "/testing/",
+        "/mock/",
+        "/mocks/",
+        "/snapshots/",
+        "/e2e/",
     ];
     for pat in TEST_DIRS {
         if lower.contains(pat) {
@@ -73,9 +86,18 @@ fn is_test_path(path: &Path) -> bool {
 
     // Also match when path starts with these directories (no leading slash)
     const TEST_DIR_PREFIXES: &[&str] = &[
-        "test/", "tests/", "testdata/", "test_data/",
-        "__tests__/", "spec/", "fixtures/", "fixture/",
-        "examples/", "example/", "benchmarks/", "bench/",
+        "test/",
+        "tests/",
+        "testdata/",
+        "test_data/",
+        "__tests__/",
+        "spec/",
+        "fixtures/",
+        "fixture/",
+        "examples/",
+        "example/",
+        "benchmarks/",
+        "bench/",
         ".github/",
     ];
     for pat in TEST_DIR_PREFIXES {
@@ -176,9 +198,9 @@ fn normalize_import(name: &str) -> String {
     // npm: specifier → extract package name
     // Handle scoped packages: npm:@scope/pkg@version → @scope/pkg
     if let Some(rest) = name.strip_prefix("npm:") {
-        let without_version = if rest.starts_with('@') {
+        let without_version = if let Some(stripped) = rest.strip_prefix('@') {
             // Scoped: @scope/pkg@version — find the second '@' for version
-            match rest[1..].find('@') {
+            match stripped.find('@') {
                 Some(pos) => &rest[..pos + 1],
                 None => rest,
             }
@@ -236,7 +258,9 @@ fn collect_edges(
             let mut parts: Vec<&str> = Vec::new();
             for part in resolved_str.split('/') {
                 match part {
-                    ".." if !parts.is_empty() => { parts.pop(); }
+                    ".." if !parts.is_empty() => {
+                        parts.pop();
+                    }
                     "." | "" => {}
                     _ => parts.push(part),
                 }
@@ -279,7 +303,7 @@ fn collect_edges(
 pub struct ScanResult {
     pub commits_scanned: usize,
     pub graphs_created: usize,
-    /// Sprint 3: Number of drift scores calculated
+    /// Number of drift scores calculated
     pub drifts_calculated: usize,
 }
 
@@ -380,12 +404,16 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
             }
         };
 
+        let (author_name, author_email, timestamp) = match decoded.author() {
+            Ok(sig) => (sig.name.to_string(), sig.email.to_string(), sig.seconds()),
+            Err(_) => ("unknown".to_string(), "unknown".to_string(), 0),
+        };
         let commit_info = CommitInfo {
             hash: commit_hash.clone(),
-            author_name: decoded.author.name.to_string(),
-            author_email: decoded.author.email.to_string(),
+            author_name,
+            author_email,
             message: decoded.message.to_string(),
-            timestamp: decoded.author.time.seconds,
+            timestamp,
             tree_id: decoded.tree().to_string(),
         };
 
@@ -591,7 +619,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
                 source_pkgs.contains(*n)
                     || ext_importer_count
                         .get(*n)
-                        .map_or(false, |importers| importers.len() >= MIN_EXT_IMPORTERS)
+                        .is_some_and(|importers| importers.len() >= MIN_EXT_IMPORTERS)
             })
             .cloned()
             .collect();
@@ -630,7 +658,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
         prev_graph = Some(graph);
 
         // ── Progress indicator (every 25 commits or at the end) ──
-        if (ci + 1).is_multiple_of(25) || ci + 1 == total_commits {
+        if (ci + 1) % 25 == 0 || ci + 1 == total_commits {
             let elapsed = scan_start.elapsed().as_secs_f64();
             let pct = ((ci + 1) as f64 / total_commits as f64 * 100.0) as u32;
             info!(
@@ -663,18 +691,6 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
 }
 
 // =============================================================================
-// Git tree walk — reads blobs in-memory via gix
-// =============================================================================
-
-#[allow(dead_code)]
-fn walk_and_parse_tree<'repo>(
-    repo: &'repo gix::Repository,
-    tree: &gix::Tree<'repo>,
-) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    git_scanner::walk_tree_files(repo, tree)
-}
-
-// =============================================================================
 // Helper functions
 // =============================================================================
 
@@ -686,10 +702,12 @@ fn walk_and_parse_tree<'repo>(
 /// - "src/main.rs" → "src::main"
 /// - "packages/ui/index.ts" → "packages::ui::index"
 /// - "cmd/server/main.go" → "cmd::server::main"
-#[allow(dead_code)]
-pub fn path_to_module(path: &str) -> String {
+#[cfg(test)]
+fn path_to_module(path: &str) -> String {
     let path = path.replace("\\", "/");
-    let without_ext = path.rsplit_once('.').map_or(path.as_str(), |(base, _)| base);
+    let without_ext = path
+        .rsplit_once('.')
+        .map_or(path.as_str(), |(base, _)| base);
     without_ext.replace('/', "::")
 }
 

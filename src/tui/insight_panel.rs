@@ -143,7 +143,7 @@ pub fn render_insight_panel(
     frame.render_widget(paragraph, inner);
 }
 
-/// Creates a single metric line (owned — can be stored in Vec<Line>).
+/// Creates a single metric line (owned — can be stored in `Vec<Line>`).
 fn metric_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {label}: "), Style::default().fg(FG_OVERLAY)),
@@ -266,7 +266,10 @@ mod tests {
             timestamp: 0,
         };
         let rec = generate_recommendation(&drift);
-        assert!(rec.contains("cycle"), "Should recommend about cycles: {rec}");
+        assert!(
+            rec.contains("cycle"),
+            "Should recommend about cycles: {rec}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // commands/analyze.rs — Analyze command: detailed drift report
 // =============================================================================
 //
-// Sprint 3 analysis module. For the specified commit (or HEAD):
+//  For the specified commit (or HEAD):
 //   1. Fetches graph snapshot from DB
 //   2. Displays drift score and sub-metrics
 //   3. Computes temporal delta with the previous 3 commits

@@ -1,24 +1,12 @@
-// =============================================================================
-// db.rs — MorphArch SQLite database layer
-// =============================================================================
-//
-// Responsibilities:
-//   1. Open database connection (file or in-memory)
-//   2. Create table schema (migration)
-//   3. Commit CRUD: insert, list, count
-//   4. Graph snapshot CRUD: insert, list_recent, count
-//   5. Drift CRUD: insert_with_drift, list_drift_trend (Sprint 3)
-//   6. Graph snapshot lookup: get_graph_snapshot (Sprint 3)
-//   7. Bulk snapshot loading: get_recent_snapshots (Sprint 4 TUI)
-//   8. Commit message fetch: get_commit_messages_for_snapshots (Sprint 4)
-//
-// Tables:
-//   commits          → Commit metadata (Sprint 1)
-//   graph_snapshots  → Dependency graph JSON + drift JSON (Sprint 2-3)
-//
-// Compiled with SQLite "bundled" feature — no system SQLite dependency.
-// WAL mode is enabled for concurrent read performance.
-// =============================================================================
+//! SQLite persistence layer for MorphArch.
+//!
+//! Manages two tables:
+//!
+//! - **`commits`** — Git commit metadata (hash, author, message, timestamp, tree ID)
+//! - **`graph_snapshots`** — JSON-serialized dependency graphs with optional drift scores
+//!
+//! The database is compiled with the `bundled` SQLite feature, so no system
+//! SQLite library is required. WAL mode is enabled for concurrent read performance.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -42,7 +30,7 @@ impl Database {
     /// After opening the connection:
     ///   - WAL mode is enabled (for concurrent reads)
     ///   - Required tables are created (CREATE IF NOT EXISTS)
-    ///   - Sprint 3 migration (drift_json column) is applied
+    ///   - migration (drift_json column) is applied
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
@@ -70,13 +58,13 @@ impl Database {
 
     /// Creates or updates the database schema (idempotent).
     ///
-    /// Sprint 3 addition: drift_json column added to graph_snapshots table.
+    /// drift_json column added to graph_snapshots table.
     /// ALTER TABLE IF NOT EXISTS is not supported, so column existence is checked.
     fn migrate(&self) -> Result<()> {
         self.conn
             .execute_batch(
                 "
-            -- Sprint 1: Commit metadata table
+            -- Commit metadata table
             CREATE TABLE IF NOT EXISTS commits (
                 hash         TEXT PRIMARY KEY,
                 author_name  TEXT NOT NULL,
@@ -90,7 +78,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_commits_author
                 ON commits(author_email);
 
-            -- Sprint 2: Dependency graph snapshot table
+            -- Dependency graph snapshot table
             -- snapshot_json: Full JSON serialization of GraphSnapshot struct
             -- node_count/edge_count: Denormalized fields for fast queries
             CREATE TABLE IF NOT EXISTS graph_snapshots (
@@ -105,7 +93,7 @@ impl Database {
             )
             .context("Database migration failed")?;
 
-        // Sprint 3: Add drift_json column (idempotent)
+        // Add drift_json column (idempotent)
         // SQLite doesn't have "ADD COLUMN IF NOT EXISTS" — check with PRAGMA table_info
         self.migrate_drift_column()?;
 
@@ -113,7 +101,7 @@ impl Database {
         Ok(())
     }
 
-    /// Sprint 3 migration: adds drift_json column to graph_snapshots table.
+    /// migration: adds drift_json column to graph_snapshots table.
     ///
     /// Silently skips if column already exists (idempotent).
     fn migrate_drift_column(&self) -> Result<()> {
@@ -139,7 +127,7 @@ impl Database {
                     "ALTER TABLE graph_snapshots ADD COLUMN drift_json TEXT DEFAULT NULL;",
                 )
                 .context("Failed to add drift_json column")?;
-            debug!("Sprint 3 migration: drift_json column added");
+            debug!("migration: drift_json column added");
         }
 
         Ok(())
@@ -173,7 +161,7 @@ impl Database {
     }
 
     // =========================================================================
-    // Commit operations (Sprint 1)
+    // Commit operations
     // =========================================================================
 
     /// Inserts a single commit into the database (INSERT OR REPLACE — idempotent).
@@ -238,7 +226,7 @@ impl Database {
     }
 
     // =========================================================================
-    // Graph snapshot operations (Sprint 2)
+    // Graph snapshot operations
     // =========================================================================
 
     /// Saves a graph snapshot as JSON to the database.
@@ -338,7 +326,7 @@ impl Database {
     }
 
     // =========================================================================
-    // Sprint 3: Drift-aware graph snapshot operations
+    // Drift-aware graph snapshot operations
     // =========================================================================
 
     /// Retrieves a graph snapshot for a specific commit hash.
@@ -479,7 +467,7 @@ impl Database {
     }
 
     // =========================================================================
-    // Sprint 4: Bulk snapshot loading for TUI
+    // Bulk snapshot loading for TUI
     // =========================================================================
 
     /// Loads the last N graph snapshots with full JSON deserialization.
@@ -533,12 +521,15 @@ impl Database {
 
         // Load all (hash, rowid) pairs ordered by timestamp DESC
         // then pick evenly spaced indices
-        let mut stmt = self.conn.prepare(
-            "SELECT g.commit_hash
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT g.commit_hash
              FROM graph_snapshots g
              JOIN commits c ON g.commit_hash = c.hash
              ORDER BY c.timestamp DESC",
-        ).context("Failed to prepare sampled snapshots query")?;
+            )
+            .context("Failed to prepare sampled snapshots query")?;
 
         let all_hashes: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -599,7 +590,9 @@ impl Database {
                     },
                 )
                 .optional()
-                .with_context(|| format!("Failed to fetch commit info: {}", &snapshot.commit_hash))?;
+                .with_context(|| {
+                    format!("Failed to fetch commit info: {}", &snapshot.commit_hash)
+                })?;
 
             match commit_info {
                 Some((message, timestamp)) => {

@@ -2,7 +2,7 @@
 // tui/mod.rs — Ratatui TUI module declarations
 // =============================================================================
 //
-// Sprint 4 interactive terminal interface:
+// interactive terminal interface:
 //   app             → Main application state + event loop
 //   graph_renderer  → Verlet physics + Canvas graph rendering
 //   timeline        → Commit timeline slider widget

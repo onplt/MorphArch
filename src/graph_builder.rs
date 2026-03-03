@@ -1,18 +1,8 @@
-// =============================================================================
-// graph_builder.rs — Dependency graph construction with petgraph
-// =============================================================================
-//
-// Responsibilities:
-//   1. Build a directed graph (DiGraph) from node (module) and edge
-//      (dependency) lists provided by the parser
-//   2. Node deduplication — same module name maps to a single node
-//   3. Edge insertion — from → to direction
-//   4. Compute graph statistics (node_count, edge_count)
-//
-// petgraph::graph::DiGraph is used:
-//   - Node weight: String (module name)
-//   - Edge weight: () (connection info only, unweighted)
-// =============================================================================
+//! Dependency graph construction with petgraph.
+//!
+//! Builds a directed graph (`DiGraph<String, ()>`) from parsed dependency edges.
+//! Nodes are module/package names; edges represent import relationships.
+//! Self-edges and duplicate edges are automatically filtered.
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
@@ -96,7 +86,11 @@ mod tests {
         let graph = build_graph(&nodes, &edges);
 
         // "main" → "serde", "main" → "std"
-        assert_eq!(graph.node_count(), 3, "should have 3 nodes (main, serde, std)");
+        assert_eq!(
+            graph.node_count(),
+            3,
+            "should have 3 nodes (main, serde, std)"
+        );
         assert_eq!(graph.edge_count(), 2, "should have 2 edges");
     }
 
@@ -123,7 +117,11 @@ mod tests {
         let graph = build_graph(&nodes, &edges);
 
         assert_eq!(graph.node_count(), 2, "should have 2 nodes (web, core)");
-        assert_eq!(graph.edge_count(), 1, "same package pair should have one edge");
+        assert_eq!(
+            graph.edge_count(),
+            1,
+            "same package pair should have one edge"
+        );
     }
 
     #[test]

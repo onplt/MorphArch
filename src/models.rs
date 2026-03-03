@@ -1,17 +1,14 @@
-// =============================================================================
-// models.rs — MorphArch data models
-// =============================================================================
-//
-// Core data structures used throughout the application:
-//
-//   CommitInfo       → Git commit metadata (hash, author, message, time, tree)
-//   DependencyEdge   → Dependency edge between two modules
-//   GraphSnapshot    → Full dependency graph at a specific commit
-//   DriftScore       → Architecture drift score (0-100) and sub-metrics (Sprint 3)
-//   TemporalDelta    → Drift comparison between two commits (Sprint 3)
-//
-// All structs support Serialize/Deserialize (JSON storage + future API).
-// =============================================================================
+//! Core data models for MorphArch.
+//!
+//! This module defines the primary data structures:
+//!
+//! - [`CommitInfo`] — Git commit metadata
+//! - [`DependencyEdge`] — A directed dependency between two modules
+//! - [`GraphSnapshot`] — Complete dependency graph at a specific commit
+//! - [`DriftScore`] — Architecture drift score (0–100) with sub-metrics
+//! - [`TemporalDelta`] — Drift comparison between consecutive commits
+//!
+//! All types implement `Serialize` and `Deserialize` for JSON persistence.
 
 use serde::{Deserialize, Serialize};
 
@@ -94,14 +91,4 @@ pub struct TemporalDelta {
     pub edges_removed: usize,
     pub new_cycles: usize,
     pub resolved_cycles: usize,
-}
-
-/// Package/module state at a specific commit (reserved for future sprints).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageSnapshot {
-    pub commit_hash: String,
-    pub package_name: String,
-    pub version: String,
-    pub dependencies: Vec<String>,
 }

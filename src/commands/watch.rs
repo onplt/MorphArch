@@ -84,6 +84,5 @@ mod tests {
     #[test]
     fn test_default_timeline_snapshots_constant() {
         assert_eq!(DEFAULT_TIMELINE_SNAPSHOTS, 200);
-        assert!(DEFAULT_TIMELINE_SNAPSHOTS > 0);
     }
 }

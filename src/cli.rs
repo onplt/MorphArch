@@ -4,7 +4,7 @@
 //
 // Ergonomic CLI structure using clap derive macros:
 //   morpharch scan <path>        → Scan repo: commit metadata + graph + drift
-//   morpharch watch <path>       → Scan + launch animated TUI (Sprint 4)
+//   morpharch watch <path>       → Scan + launch animated TUI
 //   morpharch list-graphs        → List recent dependency graph snapshots
 //   morpharch analyze [commit]   → Show drift report for a specific commit
 //   morpharch list-drift         → Drift trend table for the last 20 commits
@@ -29,11 +29,7 @@ use std::path::PathBuf;
     about = "Monorepo architecture drift visualizer with animated TUI",
     long_about = "MorphArch scans monorepo Git history, builds per-commit dependency graphs,\n\
                   calculates architecture drift scores, and visualizes them with an\n\
-                  animated force-graph + timeline using ratatui.\n\n\
-                  Sprint 1: Git history scanning & SQLite storage.\n\
-                  Sprint 2: Dependency graph building with tree-sitter.\n\
-                  Sprint 3: Architecture drift scoring & temporal analysis.\n\
-                  Sprint 4: Animated TUI with Verlet physics force-graph.",
+                  animated force-graph + timeline using ratatui.",
     after_help = "Examples:\n  morpharch scan .          Scan repo: commits + graphs + drift scores\n  morpharch scan ../myrepo  Scan a specific repository\n  morpharch watch .         Scan + activate watch mode\n  morpharch list-graphs     Show last 10 graph snapshots\n  morpharch list-drift      Show drift score trend (last 20 commits)\n  morpharch analyze         Analyze HEAD commit drift\n  morpharch analyze main~5  Analyze specific commit drift"
 )]
 pub struct Cli {
