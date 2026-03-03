@@ -47,13 +47,19 @@ pub struct Cli {
 pub enum Commands {
     /// Scan a Git repository: commit metadata + dependency graph + drift score
     ///
-    /// Reads the last N commits (default: 500) from the Git repository at
-    /// the given path, builds a dependency graph for each commit, calculates
-    /// drift scores, and stores everything in the SQLite database.
+    /// Reads commits from the Git repository at the given path, builds a
+    /// dependency graph for each commit, calculates drift scores, and stores
+    /// everything in the SQLite database.
+    ///
+    /// Use --max-commits 0 to scan ALL commits (no limit).
     Scan {
         /// Path to the Git repository to scan
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Maximum number of commits to scan (0 = unlimited, default: unlimited)
+        #[arg(short = 'n', long, default_value = "0")]
+        max_commits: usize,
     },
 
     /// Scan the repository and launch the animated TUI
@@ -67,6 +73,16 @@ pub enum Commands {
         /// Path to the Git repository to watch
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Maximum number of commits to scan (0 = unlimited, default: unlimited)
+        #[arg(short = 'n', long, default_value = "0")]
+        max_commits: usize,
+
+        /// Maximum snapshots to load in the TUI timeline (default: 200).
+        /// When the DB has more, snapshots are sampled at even intervals
+        /// so the timeline covers the full commit history.
+        #[arg(short = 's', long, default_value = "200")]
+        max_snapshots: usize,
     },
 
     /// List recent dependency graph snapshots

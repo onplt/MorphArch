@@ -103,6 +103,14 @@ pub struct App {
     pub needs_warmup: bool,
     /// Scroll offset for the left-panel package list
     pub pkg_scroll_offset: usize,
+    /// Last known packages panel area (for mouse scroll hit-testing)
+    pub pkg_area: Rect,
+    /// Last known timeline panel area (for mouse click-to-seek)
+    pub timeline_area: Rect,
+    /// User-adjustable width of the packages panel (draggable border)
+    pub pkg_panel_width: u16,
+    /// Whether the user is currently dragging the packages panel border
+    pub resizing_pkg: bool,
 }
 
 impl App {
@@ -154,6 +162,10 @@ impl App {
             graph_area: Rect::default(),
             needs_warmup: true,
             pkg_scroll_offset: 0,
+            pkg_area: Rect::default(),
+            timeline_area: Rect::default(),
+            pkg_panel_width: 22,
+            resizing_pkg: false,
         }
     }
 
@@ -208,6 +220,43 @@ impl App {
         }
     }
 
+    /// Jumps timeline by `n` positions (positive = forward/older, negative = backward/newer).
+    /// Updates the graph if the position changed.
+    pub fn jump_commit(&mut self, n: isize) {
+        let old_idx = self.timeline.current_index;
+        self.timeline.jump_by(n);
+        if self.timeline.current_index != old_idx {
+            self.update_graph_for_current_commit();
+        }
+    }
+
+    /// Jumps to the first commit in the timeline.
+    pub fn jump_to_first(&mut self) {
+        let old_idx = self.timeline.current_index;
+        self.timeline.jump_to_start();
+        if self.timeline.current_index != old_idx {
+            self.update_graph_for_current_commit();
+        }
+    }
+
+    /// Jumps to the last commit in the timeline.
+    pub fn jump_to_last(&mut self) {
+        let old_idx = self.timeline.current_index;
+        self.timeline.jump_to_end();
+        if self.timeline.current_index != old_idx {
+            self.update_graph_for_current_commit();
+        }
+    }
+
+    /// Jumps to a specific timeline index (for mouse-click seeking).
+    pub fn seek_to(&mut self, index: usize) {
+        let old_idx = self.timeline.current_index;
+        self.timeline.jump_to(index);
+        if self.timeline.current_index != old_idx {
+            self.update_graph_for_current_commit();
+        }
+    }
+
     /// Reheats the graph layout (re-energizes with high temperature).
     ///
     /// Keeps current positions but boosts temperature so nodes explore
@@ -241,14 +290,64 @@ impl App {
 
         // Normal mode
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
                 self.should_quit = true;
+            }
+            KeyCode::Esc => {
+                // If there's an active search, clear it first; otherwise quit
+                if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                } else {
+                    self.should_quit = true;
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.next_commit();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.prev_commit();
+            }
+            // Page jump: ±10 commits
+            KeyCode::Char('J') => {
+                self.jump_commit(10);
+            }
+            KeyCode::Char('K') => {
+                self.jump_commit(-10);
+            }
+            KeyCode::Char('h') => {
+                self.jump_commit(-10);
+            }
+            KeyCode::Char('l') => {
+                self.jump_commit(10);
+            }
+            KeyCode::PageDown => {
+                self.jump_commit(10);
+            }
+            KeyCode::PageUp => {
+                self.jump_commit(-10);
+            }
+            // Home/End: first/last commit
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.jump_to_first();
+            }
+            KeyCode::End => {
+                self.jump_to_last();
+            }
+            KeyCode::Char('G') => {
+                self.jump_to_last();
+            }
+            // Auto-play speed control
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                // Faster (shorter interval), minimum 200ms
+                let ms = self.auto_play_interval.as_millis() as u64;
+                let new_ms = if ms > 500 { ms - 250 } else { (ms - 100).max(200) };
+                self.auto_play_interval = Duration::from_millis(new_ms);
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                // Slower (longer interval), maximum 5000ms
+                let ms = self.auto_play_interval.as_millis() as u64;
+                let new_ms = if ms < 500 { ms + 100 } else { (ms + 250).min(5000) };
+                self.auto_play_interval = Duration::from_millis(new_ms);
             }
             KeyCode::Char('p') | KeyCode::Char(' ') => {
                 self.is_playing = !self.is_playing;
@@ -283,6 +382,38 @@ impl App {
     ///
     /// Maps terminal coordinates to physics space to find/move the closest node.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let col = mouse.column;
+        let row = mouse.row;
+
+        // ── Panel resize: drag the right border of packages panel ──
+        // Check if mouse is on (or very near) the packages panel right border
+        let pkg_right_border = self.pkg_area.x + self.pkg_area.width;
+        let on_pkg_border = (col as i16 - pkg_right_border as i16).unsigned_abs() <= 1
+            && row >= self.pkg_area.y
+            && row < self.pkg_area.y + self.pkg_area.height;
+
+        // Handle ongoing resize drag (takes priority over everything else)
+        if self.resizing_pkg {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Down(MouseButton::Left) => {
+                    let new_w = col.saturating_sub(self.pkg_area.x).max(14).min(60);
+                    self.pkg_panel_width = new_w;
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Moved => {
+                    self.resizing_pkg = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Start resize on border click
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_pkg_border {
+            self.resizing_pkg = true;
+            return;
+        }
+
         let area = self.graph_area;
         // Inner canvas area (inside the 1-cell border)
         let inner_x = area.x + 1;
@@ -295,14 +426,31 @@ impl App {
         }
 
         // Check if the mouse is inside the graph canvas
-        let col = mouse.column;
-        let row = mouse.row;
         let in_canvas = col >= inner_x
             && col < inner_x + inner_w
             && row >= inner_y
             && row < inner_y + inner_h;
 
+        // Check if click is inside the timeline panel (for seek-by-click)
+        let tl = self.timeline_area;
+        let tl_inner_x = tl.x + 1;  // inside border
+        let tl_inner_w = tl.width.saturating_sub(3); // exclude border + padding
+        let in_timeline = col >= tl.x
+            && col < tl.x + tl.width
+            && row >= tl.y
+            && row < tl.y + tl.height
+            && tl.width > 4
+            && !self.timeline.is_empty();
+
         match mouse.kind {
+            // Timeline click → seek to position
+            MouseEventKind::Down(MouseButton::Left) if in_timeline => {
+                let rel_x = col.saturating_sub(tl_inner_x) as f64;
+                let bar_w = tl_inner_w.max(1) as f64;
+                let ratio = (rel_x / bar_w).clamp(0.0, 1.0);
+                let target = (ratio * (self.timeline.len() - 1) as f64).round() as usize;
+                self.seek_to(target);
+            }
             MouseEventKind::Down(MouseButton::Left) if in_canvas => {
                 // Release any orphaned drag first (handles missed Up events).
                 // Some terminals don't reliably deliver MouseEventKind::Up,
@@ -378,6 +526,24 @@ impl App {
                         self.graph_layout.positions[idx].pinned = false;
                         self.graph_layout.temperature = 0.01;
                     }
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                // Scroll packages panel if mouse is over it
+                let pkg = self.pkg_area;
+                if col >= pkg.x && col < pkg.x + pkg.width
+                    && row >= pkg.y && row < pkg.y + pkg.height
+                {
+                    self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(3);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let pkg = self.pkg_area;
+                if col >= pkg.x && col < pkg.x + pkg.width
+                    && row >= pkg.y && row < pkg.y + pkg.height
+                {
+                    self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_add(3)
+                        .min(self.graph_layout.labels.len().saturating_sub(1));
                 }
             }
             _ => {}
@@ -467,7 +633,7 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(22), // Left panel: package list
+            Constraint::Length(app.pkg_panel_width), // Left panel: package list (resizable)
             Constraint::Min(30),    // Center: graph canvas
             Constraint::Length(32), // Right panel: drift insight
         ])
@@ -497,9 +663,9 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
     // -- Bottom panel: Timeline --
     render_timeline(frame, main_chunks[1], &app.timeline);
 
-    // -- Search overlay --
+    // -- Search overlay (inside graph panel, bottom-left) --
     if app.show_search {
-        render_search_overlay(frame, size, &app.search_query);
+        render_search_overlay(frame, top_chunks[1], &app.search_query);
     }
 
     // -- Status bar (play/pause, fps, commit count) --
@@ -537,16 +703,44 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         app.needs_warmup = false;
     }
 
+    // ── Search filtering ──
+    // When a search query is active, show only matched nodes + their neighbors.
+    let search_active = !app.search_query.is_empty();
+    let (search_matched, search_visible) = if search_active {
+        let query_lower = app.search_query.to_lowercase();
+        let mut matched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (i, label) in app.graph_layout.labels.iter().enumerate() {
+            if label.to_lowercase().contains(&query_lower) {
+                matched.insert(i);
+            }
+        }
+        let mut visible = matched.clone();
+        for &(from, to) in &app.graph_layout.edges {
+            if matched.contains(&from) { visible.insert(to); }
+            if matched.contains(&to) { visible.insert(from); }
+        }
+        (matched, visible)
+    } else {
+        (std::collections::HashSet::new(), std::collections::HashSet::new())
+    };
+
     let drift_score = app.current_drift.as_ref().map(|d| d.total).unwrap_or(50);
 
     let temp_pct = (app.graph_layout.temperature * 100.0).round() as u32;
     let block = Block::default()
-        .title(format!(
-            " Graph [{} nodes, {} edges] T:{}% ",
-            app.graph_layout.labels.len(),
-            app.graph_layout.edges.len(),
-            temp_pct,
-        ))
+        .title(if search_active {
+            format!(
+                " Graph — /{} ({} found, {} visible) ",
+                app.search_query, search_matched.len(), search_visible.len()
+            )
+        } else {
+            format!(
+                " Graph [{} nodes, {} edges] T:{}% ",
+                app.graph_layout.labels.len(),
+                app.graph_layout.edges.len(),
+                temp_pct,
+            )
+        })
         .borders(Borders::ALL)
         .border_style(Style::default().fg(drift_color(drift_score)))
         .style(Style::default().bg(BG_SURFACE));
@@ -585,6 +779,10 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .enumerate()
         .filter_map(|(idx, &(from, to))| {
+            // When searching, hide edges whose endpoints aren't both visible
+            if search_active && (!search_visible.contains(&from) || !search_visible.contains(&to)) {
+                return None;
+            }
             if from < snapped.len() && to < snapped.len() {
                 let (x1, y1) = snapped[from];
                 let (x2, y2) = snapped[to];
@@ -630,13 +828,24 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         ranked.into_iter().take(max_labels).map(|(i, _)| i).collect()
     };
 
-    // Node rendering data (snapped position + label + color).
+    // Node rendering data (snapped position + label + color + is_matched).
     let label_max_len: usize = if n_nodes > 200 { 10 } else if n_nodes > 80 { 12 } else { 14 };
-    let node_points: Vec<(f64, f64, String, Color)> = snapped
+    let node_points: Vec<(f64, f64, String, Color, bool)> = snapped
         .iter()
         .enumerate()
-        .map(|(i, &(x, y))| {
-            let label = if label_visible.contains(&i) && i < layout.labels.len() {
+        .filter_map(|(i, &(x, y))| {
+            // When searching, hide nodes that aren't in the visible set
+            if search_active && !search_visible.contains(&i) {
+                return None;
+            }
+            let is_matched = search_active && search_matched.contains(&i);
+            // When searching, show labels on ALL visible nodes (set is small)
+            let show_label = if search_active {
+                true
+            } else {
+                label_visible.contains(&i)
+            };
+            let label = if show_label && i < layout.labels.len() {
                 let l = &layout.labels[i];
                 if l.len() > label_max_len {
                     l[..label_max_len].to_string()
@@ -646,8 +855,12 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 String::new() // no label for low-degree nodes
             };
-            let color = NODE_PALETTE[i % NODE_PALETTE.len()];
-            (x, y, label, color)
+            let color = if is_matched {
+                Color::Rgb(255, 232, 115) // bright yellow for matched nodes
+            } else {
+                NODE_PALETTE[i % NODE_PALETTE.len()]
+            };
+            Some((x, y, label, color, is_matched))
         })
         .collect();
 
@@ -725,7 +938,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
 
         let buf = frame.buffer_mut();
 
-        for (sx, sy, label, color) in &node_points {
+        for (sx, sy, label, color, is_matched) in &node_points {
             // Painter.get_point() formula (Ratatui canvas.rs:402-403):
             //   grid_x = ((x - left) * (res_x - 1) / width)  as usize
             //   grid_y = ((top  - y) * (res_y - 1) / height)  as usize
@@ -738,7 +951,8 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             if col >= inner_left && col < inner_right
                 && row >= inner_top && row < inner_bottom
             {
-                buf.set_string(col, row, "●", Style::default().fg(*color).bg(BG_SURFACE));
+                let marker = if *is_matched { "◆" } else { "●" };
+                buf.set_string(col, row, marker, Style::default().fg(*color).bg(BG_SURFACE));
                 if !label.is_empty() {
                     let label_col = col + 2;
                     if label_col < inner_right {
@@ -748,7 +962,8 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                         } else {
                             label.as_str()
                         };
-                        buf.set_string(label_col, row, text, Style::default().fg(FG_TEXT).bg(BG_SURFACE));
+                        let label_fg = if *is_matched { *color } else { FG_TEXT };
+                        buf.set_string(label_col, row, text, Style::default().fg(label_fg).bg(BG_SURFACE));
                     }
                 }
             }
@@ -756,25 +971,22 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Renders the search overlay.
-fn render_search_overlay(frame: &mut Frame, area: Rect, query: &str) {
-    let width = 40.min(area.width.saturating_sub(4));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = area.height / 2;
+/// Renders the search overlay — slim 1-row bar at the bottom of the graph panel.
+fn render_search_overlay(frame: &mut Frame, graph_area: Rect, query: &str) {
+    // Slim bar: 1 row, inside graph panel border, bottom-left
+    let bar_width = (query.len() as u16 + 4).max(20).min(graph_area.width.saturating_sub(4));
+    // Position: inside the bottom border of the graph panel (1 row above border)
+    let bar_y = graph_area.y + graph_area.height.saturating_sub(2);
+    let bar_area = Rect::new(graph_area.x + 2, bar_y, bar_width, 1);
 
-    let overlay_area = Rect::new(x, y, width, 3);
+    let line = Line::from(vec![
+        Span::styled("/", Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled(query, Style::default().fg(FG_TEXT)),
+        Span::styled("█", Style::default().fg(ACCENT_MAUVE)), // cursor
+    ]);
 
-    let search_block = Block::default()
-        .title(" Search ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT_MAUVE))
-        .style(Style::default().bg(BG_SURFACE));
-
-    let search_text = Paragraph::new(format!("/{query}"))
-        .block(search_block)
-        .style(Style::default().fg(FG_TEXT));
-
-    frame.render_widget(search_text, overlay_area);
+    let bar = Paragraph::new(line).style(Style::default().bg(BG_SURFACE));
+    frame.render_widget(bar, bar_area);
 }
 
 /// Renders the status bar (bottom line — above timeline).
@@ -793,7 +1005,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let commit_count = app.snapshots.len();
     let fps_info = format!("frame #{}", app.frame_count);
 
-    let status = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {play_status} "),
             Style::default()
@@ -811,12 +1023,38 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
         Span::styled(fps_info, Style::default().fg(FG_OVERLAY)),
-        Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            "j/k:nav  p:play  r:reheat  [/]:scroll  /:search  q:quit",
+    ];
+
+    // Show active search query in status bar
+    if !app.search_query.is_empty() {
+        spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
+        spans.push(Span::styled(
+            format!("/{}", app.search_query),
+            Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " (Esc:clear)",
             Style::default().fg(FG_OVERLAY),
-        ),
-    ]);
+        ));
+    }
+
+    // Show auto-play speed when playing
+    if app.is_playing {
+        let speed_ms = app.auto_play_interval.as_millis();
+        spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
+        spans.push(Span::styled(
+            format!("speed:{speed_ms}ms"),
+            Style::default().fg(ACCENT_BLUE),
+        ));
+    }
+
+    spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
+    spans.push(Span::styled(
+        "j/k:±1  h/l:±10  g/G:start/end  p:play  +/-:speed  /:search  q:quit",
+        Style::default().fg(FG_OVERLAY),
+    ));
+
+    let status = Line::from(spans);
 
     let status_widget = Paragraph::new(status).style(Style::default().bg(BG_BASE));
     frame.render_widget(status_widget, status_area);
@@ -857,13 +1095,15 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
             let top_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(22),
+                    Constraint::Length(app.pkg_panel_width),
                     Constraint::Min(30),
                     Constraint::Length(32),
                 ])
                 .split(main_chunks[0]);
 
-            app.graph_area = top_chunks[1];   // ← sadece bu kalsın
+            app.pkg_area = top_chunks[0];     // packages panel (for mouse scroll)
+            app.graph_area = top_chunks[1];   // graph canvas (for mouse drag)
+            app.timeline_area = main_chunks[1]; // timeline panel (for mouse seek)
 
             render_app(frame, &mut app);
         })?;

@@ -15,15 +15,11 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tracing::info;
 
-const DEFAULT_MAX_COMMITS: usize = 500;
-
 /// Runtime configuration for the MorphArch application.
 #[derive(Debug)]
 pub struct MorphArchConfig {
     /// Full path to the SQLite database file
     pub db_path: PathBuf,
-    /// Maximum commits to read per scan
-    pub max_commits: usize,
 }
 
 impl MorphArchConfig {
@@ -49,7 +45,6 @@ impl MorphArchConfig {
 
         Ok(Self {
             db_path,
-            max_commits: DEFAULT_MAX_COMMITS,
         })
     }
 }

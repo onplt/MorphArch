@@ -66,3 +66,11 @@ futures = "0.3"
 
 # Random number generation — Verlet physics initial positions
 rand = "0.8"
+
+# ── Scan Performance ───────────────────────────────────────────────────────
+
+# Data-parallel iteration — parallel blob parsing
+rayon = "1.10"
+
+# Bounded LRU cache — prevents unbounded blob cache growth
+lru = "0.12"

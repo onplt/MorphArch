@@ -51,6 +51,39 @@ impl TimelineState {
         }
     }
 
+    /// Jump forward/backward by `n` commits.
+    ///
+    /// Positive `n` jumps forward (older), negative jumps backward (newer).
+    /// Clamps to valid range.
+    pub fn jump_by(&mut self, n: isize) {
+        if self.commits.is_empty() {
+            return;
+        }
+        let max = self.commits.len() - 1;
+        let new_idx = (self.current_index as isize + n).clamp(0, max as isize) as usize;
+        self.current_index = new_idx;
+    }
+
+    /// Jump to the first commit (index 0).
+    pub fn jump_to_start(&mut self) {
+        self.current_index = 0;
+    }
+
+    /// Jump to the last commit.
+    pub fn jump_to_end(&mut self) {
+        if !self.commits.is_empty() {
+            self.current_index = self.commits.len() - 1;
+        }
+    }
+
+    /// Jump to a specific index (clamped to valid range).
+    pub fn jump_to(&mut self, index: usize) {
+        if self.commits.is_empty() {
+            return;
+        }
+        self.current_index = index.min(self.commits.len() - 1);
+    }
+
     /// Returns the current commit's hash (None = empty timeline).
     pub fn current_commit_hash(&self) -> Option<&str> {
         self.commits
@@ -82,7 +115,7 @@ impl TimelineState {
 /// Bottom line: commit hash + message
 pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState) {
     let block = Block::default()
-        .title(" Timeline (j/k) ")
+        .title(" Timeline (j/k H/L ±10  Home/End  +/-:speed  click:seek) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(FG_OVERLAY))
         .style(Style::default().bg(BG_SURFACE));
@@ -191,5 +224,59 @@ mod tests {
         assert!(state.is_empty());
         assert_eq!(state.current_commit_hash(), None);
         assert_eq!(state.len(), 0);
+    }
+
+    #[test]
+    fn test_timeline_jump_by() {
+        let commits: Vec<(String, String, i64)> = (0..20)
+            .map(|i| (format!("hash{i}"), format!("Msg {i}"), i as i64))
+            .collect();
+        let mut state = TimelineState::new(commits);
+        assert_eq!(state.current_index, 0);
+
+        // Jump forward by 10
+        state.jump_by(10);
+        assert_eq!(state.current_index, 10);
+
+        // Jump forward by 10 again — should clamp to 19
+        state.jump_by(10);
+        assert_eq!(state.current_index, 19);
+
+        // Jump backward by 5
+        state.jump_by(-5);
+        assert_eq!(state.current_index, 14);
+
+        // Jump backward past 0 — should clamp to 0
+        state.jump_by(-100);
+        assert_eq!(state.current_index, 0);
+    }
+
+    #[test]
+    fn test_timeline_jump_to_start_end() {
+        let commits: Vec<(String, String, i64)> = (0..50)
+            .map(|i| (format!("hash{i}"), format!("Msg {i}"), i as i64))
+            .collect();
+        let mut state = TimelineState::new(commits);
+
+        state.jump_to_end();
+        assert_eq!(state.current_index, 49);
+
+        state.jump_to_start();
+        assert_eq!(state.current_index, 0);
+    }
+
+    #[test]
+    fn test_timeline_jump_to() {
+        let commits: Vec<(String, String, i64)> = (0..10)
+            .map(|i| (format!("hash{i}"), format!("Msg {i}"), i as i64))
+            .collect();
+        let mut state = TimelineState::new(commits);
+
+        state.jump_to(5);
+        assert_eq!(state.current_index, 5);
+
+        // Out of bounds — should clamp
+        state.jump_to(100);
+        assert_eq!(state.current_index, 9);
     }
 }

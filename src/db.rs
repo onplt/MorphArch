@@ -456,6 +456,29 @@ impl Database {
     }
 
     // =========================================================================
+    // Incremental scan support
+    // =========================================================================
+
+    /// Returns the commit hash of the most recently scanned commit.
+    ///
+    /// Used for incremental scanning — only scan commits newer than this.
+    /// Returns `None` if no snapshots exist in the database.
+    pub fn get_latest_scanned_commit(&self) -> Result<Option<String>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT g.commit_hash FROM graph_snapshots g
+                 JOIN commits c ON g.commit_hash = c.hash
+                 ORDER BY c.timestamp DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("Failed to get latest scanned commit")?;
+        Ok(result)
+    }
+
+    // =========================================================================
     // Sprint 4: Bulk snapshot loading for TUI
     // =========================================================================
 
@@ -484,6 +507,70 @@ impl Database {
             .filter_map(|r| r.ok())
             .filter_map(|json| serde_json::from_str::<GraphSnapshot>(&json).ok())
             .collect();
+
+        Ok(snapshots)
+    }
+
+    /// Loads graph snapshots sampled evenly across the full history.
+    ///
+    /// When the DB contains more snapshots than `target_count`, this method
+    /// picks snapshots at evenly spaced intervals so the TUI timeline covers
+    /// the entire commit history instead of just the most recent N.
+    ///
+    /// The **first** (newest) and **last** (oldest) snapshots are always included.
+    ///
+    /// Returns snapshots in newest-first order (consistent with `get_recent_snapshots`).
+    pub fn get_sampled_snapshots(&self, target_count: usize) -> Result<Vec<GraphSnapshot>> {
+        let total = self.graph_snapshot_count()?;
+        if total == 0 {
+            return Ok(vec![]);
+        }
+
+        // If total fits within target, just load them all
+        if total <= target_count {
+            return self.get_recent_snapshots(total);
+        }
+
+        // Load all (hash, rowid) pairs ordered by timestamp DESC
+        // then pick evenly spaced indices
+        let mut stmt = self.conn.prepare(
+            "SELECT g.commit_hash
+             FROM graph_snapshots g
+             JOIN commits c ON g.commit_hash = c.hash
+             ORDER BY c.timestamp DESC",
+        ).context("Failed to prepare sampled snapshots query")?;
+
+        let all_hashes: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("Failed to query snapshot hashes")?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let n = all_hashes.len();
+        if n <= target_count {
+            return self.get_recent_snapshots(n);
+        }
+
+        // Pick evenly spaced indices
+        let mut picked_indices: Vec<usize> = (0..target_count)
+            .map(|i| i * (n - 1) / (target_count - 1))
+            .collect();
+        picked_indices.dedup();
+
+        // Load picked snapshots by hash
+        let mut snapshots = Vec::with_capacity(picked_indices.len());
+        for idx in &picked_indices {
+            let hash = &all_hashes[*idx];
+            if let Some(snapshot) = self.get_graph_snapshot(hash)? {
+                snapshots.push(snapshot);
+            }
+        }
+
+        info!(
+            total = n,
+            sampled = snapshots.len(),
+            "Loaded evenly sampled snapshots across full history"
+        );
 
         Ok(snapshots)
     }
