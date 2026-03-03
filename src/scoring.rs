@@ -35,16 +35,28 @@ const BASELINE_SCORE: u8 = 50;
 ///
 /// Standard monorepo convention:
 ///   - `apps/` → applications (user-facing)
-///   - `packages/` → shared libraries
+///   - `packages/`, `libs/` → shared libraries
+///   - `ext/`, `runtime/` → platform extensions
 ///
-/// Violation: dependency from `packages/` → `apps/` (library depending on app)
+/// Violation: lower-level library depending on higher-level application code.
+///
+/// Both `::` (path_to_module convention) and `/` (extract_package_name convention)
+/// prefixes are checked for maximum compatibility.
 pub const BOUNDARY_RULES: &[(&str, &str)] = &[
-    ("packages::", "apps::"), // Library → app (forbidden direction)
-    ("lib::", "apps::"),      // lib → apps (forbidden direction)
-    ("core::", "apps::"),     // core → apps (forbidden direction)
-    ("shared::", "apps::"),   // shared → apps (forbidden direction)
-    ("packages::", "cmd::"),  // packages → cmd (forbidden direction)
-    ("lib::", "cmd::"),       // lib → cmd (forbidden direction)
+    // Standard monorepo (:: delimiter — path_to_module format)
+    ("packages::", "apps::"),
+    ("lib::", "apps::"),
+    ("core::", "apps::"),
+    ("shared::", "apps::"),
+    ("packages::", "cmd::"),
+    ("lib::", "cmd::"),
+    // Directory-level packages (/ delimiter — extract_package_name format)
+    ("packages/", "apps/"),
+    ("libs/", "apps/"),
+    ("libs/", "cli/"),      // library → CLI (forbidden direction)
+    ("ext/", "cli/"),       // extension → CLI
+    ("runtime/", "cli/"),   // runtime → CLI
+    ("libs/", "runtime/"),  // library → runtime (layer violation)
 ];
 
 /// Calculates the architecture drift score for a dependency graph.
@@ -187,20 +199,36 @@ pub fn compare_graphs(
 // Helper functions — internal use
 // =============================================================================
 
+/// Computes per-node fan metrics and returns (max_fan_in, max_fan_out).
+///
+/// **max_fan_in**: the largest number of incoming edges on any single node.
+///   Identifies the most-depended-on "hub" module (e.g. a god object).
+///
+/// **max_fan_out**: the largest number of outgoing edges on any single node.
+///   Identifies the module with the most external dependencies.
+///
+/// Using max (not total) makes fan_in and fan_out independent metrics that
+/// measure architectural concentration rather than raw edge count.
 fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
-    let mut total_fan_in: usize = 0;
-    let mut total_fan_out: usize = 0;
+    let mut max_fan_in: usize = 0;
+    let mut max_fan_out: usize = 0;
 
     for node_idx in graph.node_indices() {
-        total_fan_in += graph
+        let fan_in = graph
             .neighbors_directed(node_idx, petgraph::Direction::Incoming)
             .count();
-        total_fan_out += graph
+        let fan_out = graph
             .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
             .count();
+        if fan_in > max_fan_in {
+            max_fan_in = fan_in;
+        }
+        if fan_out > max_fan_out {
+            max_fan_out = fan_out;
+        }
     }
 
-    (total_fan_in, total_fan_out)
+    (max_fan_in, max_fan_out)
 }
 
 fn count_cycles(graph: &DiGraph<String, ()>) -> usize {
@@ -226,16 +254,37 @@ fn compute_total_score(
     boundary_violations: usize,
     cognitive_complexity: f64,
 ) -> u8 {
-    let fan_component = (fan_in_delta.unsigned_abs() + fan_out_delta.unsigned_abs()) as f64;
+    // ── Component scoring ──
+    //
+    // Each component can push the score UP (bad) or DOWN (good) from the
+    // baseline of 50.  This makes it possible to reach the "Healthy" range
+    // (0-30) when the architecture is clean.
+    //
+    // Fan change: net new dependencies increase drift; removals improve it.
+    //   Large positive deltas → score rises; large negatives → score drops.
+    let fan_increase = (fan_in_delta.max(0) + fan_out_delta.max(0)) as f64;
+    let fan_decrease = ((-fan_in_delta).max(0) + (-fan_out_delta).max(0)) as f64;
+    let fan_component = fan_increase * 0.5 - fan_decrease * 0.3;
+
+    // Cycles: strong penalty for new cycles.
     let cycle_penalty = new_cycles as f64 * 15.0;
+
+    // Boundary violations: moderate penalty.
     let boundary_penalty = boundary_violations as f64 * 10.0;
-    let complexity_component = cognitive_complexity * 1.5;
+
+    // Complexity: edge density beyond a healthy threshold (3.0 edges/node)
+    // adds drift; density below the threshold REDUCES drift.
+    //   - Healthy graph: ~1-3 edges per node → complexity ≈ 10-30
+    //   - Dense graph:   ~5+ edges per node  → complexity ≈ 50+
+    const HEALTHY_COMPLEXITY: f64 = 25.0;
+    let complexity_excess = (cognitive_complexity - HEALTHY_COMPLEXITY) * 0.4;
+    // Can be negative (clean architecture pulls score down)
 
     let raw = BASELINE_SCORE as f64
-        + fan_component / 2.0
+        + fan_component
         + cycle_penalty
         + boundary_penalty
-        + complexity_component / 3.0;
+        + complexity_excess;
 
     raw.round().clamp(0.0, 100.0) as u8
 }
@@ -335,6 +384,7 @@ mod tests {
 
     #[test]
     fn test_boundary_violations() {
+        // Test :: delimiter (path_to_module format)
         let edges = vec![
             ("packages::ui::button".to_string(), "apps::web::home".to_string()),
             ("apps::web::home".to_string(), "packages::ui::button".to_string()),
@@ -347,11 +397,30 @@ mod tests {
     }
 
     #[test]
+    fn test_boundary_violations_slash_format() {
+        // Test / delimiter (extract_package_name format — used by Deno etc.)
+        let edges = vec![
+            ("libs/npm".to_string(), "cli/tools".to_string()),    // libs → cli: violation
+            ("ext/node".to_string(), "cli/lsp".to_string()),      // ext → cli: violation
+            ("cli/tools".to_string(), "ext/node".to_string()),    // cli → ext: OK
+            ("libs/core".to_string(), "runtime/ops".to_string()), // libs → runtime: violation
+            ("ext/fetch".to_string(), "ext/http".to_string()),    // ext → ext: OK
+        ];
+
+        let violations = count_boundary_violations(&edges);
+        assert_eq!(violations, 3, "Should have 3 violations (libs->cli, ext->cli, libs->runtime)");
+    }
+
+    #[test]
     fn test_fan_metrics() {
+        // make_simple_graph: A→B, A→C, B→C
+        //   A: fan_in=0, fan_out=2
+        //   B: fan_in=1, fan_out=1
+        //   C: fan_in=2, fan_out=0
         let graph = make_simple_graph();
-        let (fan_in, fan_out) = compute_fan_metrics(&graph);
-        assert_eq!(fan_in, 3);
-        assert_eq!(fan_out, 3);
+        let (max_fan_in, max_fan_out) = compute_fan_metrics(&graph);
+        assert_eq!(max_fan_in, 2, "C has highest fan-in (2)");
+        assert_eq!(max_fan_out, 2, "A has highest fan-out (2)");
     }
 
     #[test]
@@ -384,6 +453,23 @@ mod tests {
 
         let extreme = compute_total_score(100, 100, 10, 20, 500.0);
         assert_eq!(extreme, 100, "Extreme values should clamp to 100");
+    }
+
+    #[test]
+    fn test_score_can_go_below_50() {
+        // Clean architecture: no fan growth, no cycles, no violations, low complexity
+        let score = compute_total_score(-5, -3, 0, 0, 10.0);
+        assert!(
+            score < 50,
+            "Clean architecture with shrinking deps should score below 50, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_score_healthy_range() {
+        // Stable graph: zero deltas, no cycles, moderate complexity
+        let score = compute_total_score(0, 0, 0, 0, 25.0);
+        assert_eq!(score, 50, "Zero-change commit with healthy complexity should be ~50, got {score}");
     }
 
     #[test]

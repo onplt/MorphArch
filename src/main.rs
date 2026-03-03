@@ -71,13 +71,15 @@ fn run() -> Result<()> {
 
     // Dispatch to subcommand
     match cli.command {
-        Commands::Scan { path } => {
-            execute_scan(&path, &db, config.max_commits)?;
+        Commands::Scan { path, max_commits } => {
+            let limit = if max_commits == 0 { usize::MAX } else { max_commits };
+            execute_scan(&path, &db, limit)?;
         }
-        Commands::Watch { path } => {
+        Commands::Watch { path, max_commits, max_snapshots } => {
+            let limit = if max_commits == 0 { usize::MAX } else { max_commits };
             // Sprint 4: Scan + launch animated TUI
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::watch::run_watch(&path, &db, config.max_commits))?;
+            rt.block_on(commands::watch::run_watch(&path, &db, limit, max_snapshots))?;
         }
         Commands::ListGraphs => {
             execute_list_graphs(&db)?;

@@ -118,6 +118,56 @@ pub fn get_commits_in_order<'repo>(
     Ok(commits)
 }
 
+/// Returns commits from HEAD to a known commit (exclusive).
+///
+/// Used for incremental scanning — only returns new commits since the
+/// last scanned commit. Walks backwards from HEAD and stops when
+/// `stop_at_hash` is encountered.
+pub fn get_commits_since<'repo>(
+    repo: &'repo gix::Repository,
+    stop_at_hash: &str,
+    max: usize,
+) -> Result<Vec<gix::Commit<'repo>>> {
+    let head = repo
+        .head_commit()
+        .context("HEAD commit not found. The repository may be empty.")?;
+
+    let mut commits = Vec::new();
+
+    let ancestors = head
+        .ancestors()
+        .all()
+        .context("Failed to start commit history walk.")?;
+
+    for ancestor_result in ancestors {
+        if commits.len() >= max {
+            break;
+        }
+
+        let ancestor_info = match ancestor_result {
+            Ok(info) => info,
+            Err(e) => {
+                warn!(error = %e, "Failed to read a commit, skipping");
+                continue;
+            }
+        };
+
+        let hash = ancestor_info.id.to_string();
+        if hash == stop_at_hash {
+            break; // Reached the last known commit — stop here
+        }
+
+        let commit = repo
+            .find_object(ancestor_info.id)
+            .with_context(|| format!("Failed to load commit object: {}", ancestor_info.id))?
+            .into_commit();
+
+        commits.push(commit);
+    }
+
+    Ok(commits)
+}
+
 /// Recursively walks a Git tree object and returns files with their contents.
 pub fn walk_tree_files<'repo>(
     repo: &'repo gix::Repository,

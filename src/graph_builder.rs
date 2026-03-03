@@ -38,20 +38,11 @@ pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGrap
 
     // Process edges and dynamically add nodes (deduplicated)
     for edge in edges {
-        // Use from_module directly — scan.rs now provides clean package names
+        // Both from_module and to_module are already clean package names.
+        // scan.rs::collect_edges() normalizes path-like imports via
+        // extract_package_name(), so we use them directly here.
         let from_pkg = edge.from_module.clone();
-
-        // Target package name (clean up import paths: "../core" → "core")
-        let to_pkg = if edge.to_module.contains('/') || edge.to_module.contains('\\') {
-            // Path-like import — extract the last meaningful segment
-            edge.to_module
-                .rsplit('/')
-                .next()
-                .unwrap_or(&edge.to_module)
-                .to_string()
-        } else {
-            edge.to_module.clone()
-        };
+        let to_pkg = edge.to_module.clone();
 
         // Skip self-dependencies
         if from_pkg == to_pkg {

@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::models::{DriftScore, GraphSnapshot};
 
@@ -93,8 +93,8 @@ pub fn render_insight_panel(
             let violations_str = format!("{}", d.boundary_violations);
             let complexity_str = format!("{:.1}", d.cognitive_complexity);
 
-            lines.push(metric_line("Fan-in Δ", &fan_in_str));
-            lines.push(metric_line("Fan-out Δ", &fan_out_str));
+            lines.push(metric_line("Max Fan-in Δ", &fan_in_str));
+            lines.push(metric_line("Max Fan-out Δ", &fan_out_str));
             lines.push(metric_line("Cycles", &cycles_str));
             lines.push(metric_line("Violations", &violations_str));
             lines.push(metric_line("Complexity", &complexity_str));
@@ -139,7 +139,7 @@ pub fn render_insight_panel(
         }
     }
 
-    let paragraph = Paragraph::new(lines);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
     frame.render_widget(paragraph, inner);
 }
 
@@ -193,22 +193,51 @@ fn build_sparkline(snapshots: &[GraphSnapshot], current_index: usize) -> String 
 }
 
 /// Generates a short recommendation based on drift score and metrics.
+///
+/// Priority order: overall status first (healthy / critical), then specific
+/// sub-metric alerts. This prevents contradictory messages like "Healthy"
+/// status + "High complexity — refactor" recommendation.
 fn generate_recommendation(drift: &DriftScore) -> String {
-    if drift.new_cycles > 0 {
-        format!("{} cycle detected — break circular deps", drift.new_cycles)
-    } else if drift.boundary_violations > 2 {
-        "Too many boundary violations — enforce module boundaries".to_string()
-    } else if drift.fan_out_delta > 5 {
-        "High fan-out growth — consider splitting modules".to_string()
-    } else if drift.cognitive_complexity > 20.0 {
-        "High complexity — refactor large modules".to_string()
-    } else if drift.total > 60 {
-        "Drift is high — review recent architectural changes".to_string()
-    } else if drift.total <= 30 {
-        "Architecture is healthy".to_string()
-    } else {
-        "Monitor drift trend".to_string()
+    // ── Overall status takes priority ──
+    if drift.total <= 30 {
+        return "Architecture is healthy ✓".to_string();
     }
+
+    // ── Critical alerts ──
+    if drift.new_cycles > 0 {
+        return format!(
+            "{} cycle{} detected — break circular deps",
+            drift.new_cycles,
+            if drift.new_cycles > 1 { "s" } else { "" }
+        );
+    }
+
+    if drift.total > 80 {
+        return "Critical drift — immediate review needed".to_string();
+    }
+
+    // ── Specific sub-metric alerts ──
+    if drift.boundary_violations > 2 {
+        return format!(
+            "{} boundary violations — enforce module boundaries",
+            drift.boundary_violations
+        );
+    }
+
+    if drift.fan_out_delta > 5 {
+        return "High fan-out growth — consider splitting modules".to_string();
+    }
+
+    if drift.total > 60 {
+        return "Drift is high — review recent architectural changes".to_string();
+    }
+
+    // ── Moderate: complexity based advice ──
+    if drift.cognitive_complexity > 40.0 {
+        return "High edge density — consider splitting modules".to_string();
+    }
+
+    "Monitor drift trend".to_string()
 }
 
 // =============================================================================
@@ -253,6 +282,25 @@ mod tests {
         };
         let rec = generate_recommendation(&drift);
         assert!(rec.contains("healthy"), "Should recommend healthy: {rec}");
+    }
+
+    #[test]
+    fn test_generate_recommendation_healthy_overrides_complexity() {
+        // Drift ≤ 30 should show "healthy" even if complexity > 40
+        let drift = DriftScore {
+            total: 25,
+            fan_in_delta: 0,
+            fan_out_delta: 0,
+            new_cycles: 0,
+            boundary_violations: 0,
+            cognitive_complexity: 45.0,
+            timestamp: 0,
+        };
+        let rec = generate_recommendation(&drift);
+        assert!(
+            rec.contains("healthy"),
+            "Healthy status should override complexity warning: {rec}"
+        );
     }
 
     #[test]
