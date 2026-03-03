@@ -405,11 +405,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
         };
 
         let (author_name, author_email, timestamp) = match decoded.author() {
-            Ok(sig) => (
-                sig.name.to_string(),
-                sig.email.to_string(),
-                sig.seconds(),
-            ),
+            Ok(sig) => (sig.name.to_string(), sig.email.to_string(), sig.seconds()),
             Err(_) => ("unknown".to_string(), "unknown".to_string(), 0),
         };
         let commit_info = CommitInfo {
