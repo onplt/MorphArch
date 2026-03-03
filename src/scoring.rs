@@ -1,25 +1,16 @@
-// =============================================================================
-// scoring.rs — Architecture Drift Score calculation engine
-// =============================================================================
-//
-// Core module for Sprint 3. Measures the architectural "health" of the
-// dependency graph for each commit and produces a 0-100 score.
-//
-// Metrics:
-//   1. Fan-in / Fan-out change (incoming/outgoing edge count per node)
-//   2. Cyclic dependency count (petgraph SCC analysis)
-//   3. Boundary violations (package boundary crossings: apps/ <-> packages/)
-//   4. Cognitive complexity proxy = (edges/nodes)*10 + cycles*5
-//   5. Total score = normalize(0-100)
-//
-// Temporal analysis:
-//   compare_graphs() compares two consecutive commits' graphs and
-//   produces a TemporalDelta.
-//
-// Determinism:
-//   All calculations produce the same output for the same input.
-//   round() is used for consistent floating-point rounding.
-// =============================================================================
+//! Architecture drift scoring engine.
+//!
+//! Computes a 0-100 drift score for each dependency graph snapshot, measuring
+//! how much the architecture has degraded relative to the previous commit.
+//!
+//! # Metrics
+//!
+//! - Fan-in / fan-out delta: change in max incoming/outgoing edges per node
+//! - Cyclic dependencies: SCC count via Kosaraju's algorithm
+//! - Boundary violations: cross-layer dependency rule breaches
+//! - Cognitive complexity: `(edges/nodes) * 10 + cycles * 5` proxy
+//!
+//! The first scanned commit receives a baseline score of 50.
 
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::DiGraph;
@@ -53,10 +44,10 @@ pub const BOUNDARY_RULES: &[(&str, &str)] = &[
     // Directory-level packages (/ delimiter — extract_package_name format)
     ("packages/", "apps/"),
     ("libs/", "apps/"),
-    ("libs/", "cli/"),      // library → CLI (forbidden direction)
-    ("ext/", "cli/"),       // extension → CLI
-    ("runtime/", "cli/"),   // runtime → CLI
-    ("libs/", "runtime/"),  // library → runtime (layer violation)
+    ("libs/", "cli/"),     // library → CLI (forbidden direction)
+    ("ext/", "cli/"),      // extension → CLI
+    ("runtime/", "cli/"),  // runtime → CLI
+    ("libs/", "runtime/"), // library → runtime (layer violation)
 ];
 
 /// Calculates the architecture drift score for a dependency graph.
@@ -343,7 +334,10 @@ mod tests {
 
         let score = calculate_drift(&graph, None, &nodes, &edges, 1_000_000);
 
-        assert_eq!(score.total, BASELINE_SCORE, "First commit should be baseline");
+        assert_eq!(
+            score.total, BASELINE_SCORE,
+            "First commit should be baseline"
+        );
         assert_eq!(score.fan_in_delta, 0);
         assert_eq!(score.fan_out_delta, 0);
         assert_eq!(score.new_cycles, 0);
@@ -386,29 +380,44 @@ mod tests {
     fn test_boundary_violations() {
         // Test :: delimiter (path_to_module format)
         let edges = vec![
-            ("packages::ui::button".to_string(), "apps::web::home".to_string()),
-            ("apps::web::home".to_string(), "packages::ui::button".to_string()),
+            (
+                "packages::ui::button".to_string(),
+                "apps::web::home".to_string(),
+            ),
+            (
+                "apps::web::home".to_string(),
+                "packages::ui::button".to_string(),
+            ),
             ("lib::utils".to_string(), "apps::api::routes".to_string()),
-            ("packages::ui::button".to_string(), "packages::ui::theme".to_string()),
+            (
+                "packages::ui::button".to_string(),
+                "packages::ui::theme".to_string(),
+            ),
         ];
 
         let violations = count_boundary_violations(&edges);
-        assert_eq!(violations, 2, "Should have 2 violations (packages->apps, lib->apps)");
+        assert_eq!(
+            violations, 2,
+            "Should have 2 violations (packages->apps, lib->apps)"
+        );
     }
 
     #[test]
     fn test_boundary_violations_slash_format() {
         // Test / delimiter (extract_package_name format — used by Deno etc.)
         let edges = vec![
-            ("libs/npm".to_string(), "cli/tools".to_string()),    // libs → cli: violation
-            ("ext/node".to_string(), "cli/lsp".to_string()),      // ext → cli: violation
-            ("cli/tools".to_string(), "ext/node".to_string()),    // cli → ext: OK
+            ("libs/npm".to_string(), "cli/tools".to_string()), // libs → cli: violation
+            ("ext/node".to_string(), "cli/lsp".to_string()),   // ext → cli: violation
+            ("cli/tools".to_string(), "ext/node".to_string()), // cli → ext: OK
             ("libs/core".to_string(), "runtime/ops".to_string()), // libs → runtime: violation
-            ("ext/fetch".to_string(), "ext/http".to_string()),    // ext → ext: OK
+            ("ext/fetch".to_string(), "ext/http".to_string()), // ext → ext: OK
         ];
 
         let violations = count_boundary_violations(&edges);
-        assert_eq!(violations, 3, "Should have 3 violations (libs->cli, ext->cli, libs->runtime)");
+        assert_eq!(
+            violations, 3,
+            "Should have 3 violations (libs->cli, ext->cli, libs->runtime)"
+        );
     }
 
     #[test]
@@ -433,8 +442,16 @@ mod tests {
             ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
 
         let delta = compare_graphs(
-            &current, &prev, &current_nodes, &prev_nodes,
-            3, 3, 65, 50, "commit2", "commit1",
+            &current,
+            &prev,
+            &current_nodes,
+            &prev_nodes,
+            3,
+            3,
+            65,
+            50,
+            "commit2",
+            "commit1",
         );
 
         assert_eq!(delta.score_delta, 15);
@@ -469,7 +486,10 @@ mod tests {
     fn test_score_healthy_range() {
         // Stable graph: zero deltas, no cycles, moderate complexity
         let score = compute_total_score(0, 0, 0, 0, 25.0);
-        assert_eq!(score, 50, "Zero-change commit with healthy complexity should be ~50, got {score}");
+        assert_eq!(
+            score, 50,
+            "Zero-change commit with healthy complexity should be ~50, got {score}"
+        );
     }
 
     #[test]

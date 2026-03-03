@@ -1,15 +1,7 @@
-// =============================================================================
-// config.rs — MorphArch configuration management
-// =============================================================================
-//
-// Manages default configuration values and the database path.
-//
-// Database location: ~/.morpharch/morpharch.db
-//   - Directory is auto-created if it doesn't exist
-//   - Platform-independent: home directory detected via dirs crate
-//
-// max_commits: Maximum commits to scan per run (default: 500)
-// =============================================================================
+//! Configuration management for MorphArch.
+//!
+//! Manages the application data directory (`~/.morpharch/`) and database path.
+//! The directory is created automatically on first run.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -43,8 +35,6 @@ impl MorphArchConfig {
         let db_path = morpharch_dir.join("morpharch.db");
         info!(path = %db_path.display(), "Configuration loaded");
 
-        Ok(Self {
-            db_path,
-        })
+        Ok(Self { db_path })
     }
 }

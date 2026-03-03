@@ -2,12 +2,29 @@
 name = "morpharch"
 version = "0.4.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Onur <onur@morpharch.dev>"]
 description = "Monorepo architecture drift visualizer with animated TUI"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/onplt/morpharch"
+homepage = "https://github.com/onplt/morpharch"
+documentation = "https://docs.rs/morpharch"
+readme = "README.md"
+keywords = ["monorepo", "architecture", "drift", "tui", "dependency-graph"]
+categories = ["command-line-utilities", "development-tools", "visualization"]
+exclude = [
+    ".github/",
+    ".claude/",
+    "demo-monorepo/",
+    "morpharch-demo/",
+    "test-repos/",
+    "screenshots/",
+    "*.gif",
+    "*.mp4",
+]
 
 [dependencies]
-# CLI framework — ergonomic subcommand definition with derive macros
+# CLI framework
 clap = { version = "4.5", features = ["derive"] }
 
 # Git operations — gitoxide pure-Rust library
@@ -20,7 +37,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Error handling — rich error messages with context chain
+# Error handling
 anyhow = "1.0"
 
 # Serialization
@@ -30,18 +47,16 @@ serde_json = "1.0"
 # Date/time operations
 chrono = { version = "0.4", features = ["serde"] }
 
-# Platform-independent directory paths (home dir, config dir, etc.)
+# Platform-independent directory paths
 dirs = "5.0"
 
-# ── Sprint 2: Dependency Graph ──────────────────────────────────────────────
-
-# Directed graph data structure — dependency graph modeling
+# Directed graph data structure
 petgraph = { version = "0.6", features = ["serde-1", "graphmap", "stable_graph"] }
 
-# Tree-sitter — incremental parsing framework (C-based, fast)
+# Tree-sitter — incremental parsing framework
 tree-sitter = "0.22"
 
-# Language grammars — each compiles a C grammar
+# Language grammars
 tree-sitter-rust = "0.21"
 tree-sitter-typescript = "0.21"
 tree-sitter-python = "0.21"
@@ -50,27 +65,28 @@ tree-sitter-go = "0.21"
 # File system traversal
 walkdir = "2.5"
 
-# ── Sprint 4: Animated TUI ───────────────────────────────────────────────────
-
-# Terminal UI framework — Canvas widget, layout, styling
+# Terminal UI framework
 ratatui = { version = "0.29", features = ["all-widgets", "unstable"] }
 
-# Terminal backend — event handling, raw mode
+# Terminal backend
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# Async runtime — event loop, timer, spawn
+# Async runtime
 tokio = { version = "1.43", features = ["full"] }
 
 # Async stream combinators
 futures = "0.3"
 
-# Random number generation — Verlet physics initial positions
+# Random number generation
 rand = "0.8"
 
-# ── Scan Performance ───────────────────────────────────────────────────────
-
-# Data-parallel iteration — parallel blob parsing
+# Data-parallel iteration
 rayon = "1.10"
 
-# Bounded LRU cache — prevents unbounded blob cache growth
+# Bounded LRU cache
 lru = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

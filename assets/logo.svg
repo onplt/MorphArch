@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" width="100%" height="100%">
+  <defs>
+    <style>
+      :root {
+        --bg: #1e1e2e;
+        --text: #cdd6f4;
+        --text-dim: #a6adc8;
+        --node-healthy: #89b4fa; /* Sapphire */
+        --node-drift: #f38ba8;   /* Red */
+        --node-warning: #eba0ac; /* Maroon */
+        --edge-healthy: #45475a; /* Surface1 */
+        --edge-drift: #f38ba8;   /* Red */
+        --edge-bad: #fab387;     /* Peach */
+      }
+
+      /* Background */
+      .bg { fill: var(--bg); }
+
+      /* Animation keyframes for the central drifting node */
+      @keyframes swellCenter {
+        0%, 15% { r: 16px; fill: var(--node-healthy); transform: translate(0, 0); }
+        35%, 55% { r: 36px; fill: var(--node-drift); transform: translate(0, 0); }
+        38%, 42%, 46%, 50%, 54% { transform: translate(2px, -2px); }
+        40%, 44%, 48%, 52% { transform: translate(-2px, 2px); }
+        75%, 100% { r: 16px; fill: var(--node-healthy); transform: translate(0, 0); }
+      }
+
+      /* Animation for peripheral nodes vibrating and changing color */
+      @keyframes nodeVibrate {
+        0%, 15% { fill: var(--node-healthy); transform: translate(0, 0); }
+        35%, 55% { fill: var(--node-warning); }
+        38%, 42%, 46%, 50%, 54% { transform: translate(1px, -1px); }
+        40%, 44%, 48%, 52% { transform: translate(-1px, 1px); }
+        75%, 100% { fill: var(--node-healthy); transform: translate(0, 0); }
+      }
+
+      /* Animation for healthy edges tensing up */
+      @keyframes edgeTense {
+        0%, 15% { stroke: var(--edge-healthy); stroke-width: 2px; }
+        35%, 55% { stroke: var(--node-warning); stroke-width: 4px; }
+        75%, 100% { stroke: var(--edge-healthy); stroke-width: 2px; }
+      }
+
+      /* Animation for bad/cyclical edges appearing during drift */
+      @keyframes showBadEdges {
+        0%, 25% { opacity: 0; stroke-dashoffset: 100; }
+        35%, 55% { opacity: 0.8; stroke-dashoffset: 0; }
+        65%, 100% { opacity: 0; stroke-dashoffset: -100; }
+      }
+
+      /* Text animation - "Morph" shakes and turns red */
+      @keyframes textMorph {
+        0%, 15% { fill: var(--text); transform: translate(0, 0); }
+        35%, 55% { fill: var(--node-drift); }
+        38%, 42%, 46%, 50%, 54% { transform: translate(1px, 0); }
+        40%, 44%, 48%, 52% { transform: translate(-1px, 0); }
+        75%, 100% { fill: var(--text); transform: translate(0, 0); }
+      }
+
+      /* Text animation - "Arch" dims during drift */
+      @keyframes textArch {
+        0%, 15% { fill: var(--text); }
+        35%, 55% { fill: var(--text-dim); }
+        75%, 100% { fill: var(--text); }
+      }
+
+      /* Applying animations */
+      .center-node {
+        transform-origin: 300px 260px;
+        animation: swellCenter 8s infinite ease-in-out;
+      }
+      .peri-node {
+        animation: nodeVibrate 8s infinite ease-in-out;
+      }
+      .node-n1 { transform-origin: 180px 140px; }
+      .node-n2 { transform-origin: 420px 140px; }
+      .node-n3 { transform-origin: 150px 340px; }
+      .node-n4 { transform-origin: 450px 340px; }
+
+      .main-edge {
+        animation: edgeTense 8s infinite ease-in-out;
+      }
+      .bad-edge {
+        stroke: var(--edge-bad);
+        stroke-width: 2px;
+        stroke-dasharray: 8 4;
+        opacity: 0;
+        animation: showBadEdges 8s infinite ease-in-out;
+      }
+
+      .text-morph {
+        font-family: 'Courier New', Courier, monospace;
+        font-weight: 800;
+        font-size: 48px;
+        animation: textMorph 8s infinite ease-in-out;
+      }
+      .text-arch {
+        font-family: 'Courier New', Courier, monospace;
+        font-weight: 400;
+        font-size: 48px;
+        animation: textArch 8s infinite ease-in-out;
+      }
+    </style>
+  </defs>
+
+  <rect class="bg" width="600" height="600" rx="40" ry="40" />
+
+  <g id="edges">
+    <line class="main-edge" x1="300" y1="260" x2="180" y2="140" />
+    <line class="main-edge" x1="300" y1="260" x2="420" y2="140" />
+    <line class="main-edge" x1="300" y1="260" x2="150" y2="340" />
+    <line class="main-edge" x1="300" y1="260" x2="450" y2="340" />
+
+    <line class="bad-edge" x1="180" y1="140" x2="420" y2="140" />
+    <line class="bad-edge" x1="150" y1="340" x2="450" y2="340" />
+    <line class="bad-edge" x1="180" y1="140" x2="150" y2="340" />
+    <line class="bad-edge" x1="420" y1="140" x2="450" y2="340" />
+    <path class="bad-edge" d="M 180 140 Q 300 100 420 140" fill="none" />
+  </g>
+
+  <g id="nodes">
+    <circle class="center-node" cx="300" cy="260" r="16" />
+    
+    <circle class="peri-node node-n1" cx="180" cy="140" r="12" />
+    <circle class="peri-node node-n2" cx="420" cy="140" r="12" />
+    <circle class="peri-node node-n3" cx="150" cy="340" r="12" />
+    <circle class="peri-node node-n4" cx="450" cy="340" r="12" />
+  </g>
+
+  <text x="300" y="520" text-anchor="middle">
+    <tspan class="text-morph">Morph</tspan>
+    <tspan class="text-arch">Arch</tspan>
+  </text>
+</svg>

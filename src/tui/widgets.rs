@@ -26,7 +26,13 @@ use super::graph_renderer::{ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY
 /// # Parameters
 /// - `labels`: Module names in the current graph
 /// - `search_query`: Active search query (empty = no filtering)
-pub fn render_package_list(frame: &mut Frame, area: Rect, labels: &[String], search_query: &str, scroll_offset: usize) {
+pub fn render_package_list(
+    frame: &mut Frame,
+    area: Rect,
+    labels: &[String],
+    search_query: &str,
+    scroll_offset: usize,
+) {
     let block = Block::default()
         .title(format!(" Packages ({}) ", labels.len()))
         .borders(Borders::ALL)
@@ -47,14 +53,18 @@ pub fn render_package_list(frame: &mut Frame, area: Rect, labels: &[String], sea
 
     // Sort labels alphabetically (case-insensitive) for consistent display
     let mut sorted_labels: Vec<String> = labels.to_vec();
-    sorted_labels.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    sorted_labels.sort_by_key(|a| a.to_lowercase());
 
     let mut lines: Vec<Line> = Vec::new();
 
     // Apply scroll offset (clamped to valid range)
     let effective_offset = scroll_offset.min(sorted_labels.len().saturating_sub(1));
     // Reserve 1 line for the scroll indicator at the bottom
-    let list_height = if sorted_labels.len() > max_visible { max_visible.saturating_sub(1) } else { max_visible };
+    let list_height = if sorted_labels.len() > max_visible {
+        max_visible.saturating_sub(1)
+    } else {
+        max_visible
+    };
 
     for (i, label) in sorted_labels.iter().enumerate().skip(effective_offset) {
         if lines.len() >= list_height {
@@ -93,7 +103,12 @@ pub fn render_package_list(frame: &mut Frame, area: Rect, labels: &[String], sea
     if sorted_labels.len() > max_visible {
         let visible_end = (effective_offset + list_height).min(sorted_labels.len());
         lines.push(Line::from(Span::styled(
-            format!("  [{}-{}/{}] [/] scroll", effective_offset + 1, visible_end, sorted_labels.len()),
+            format!(
+                "  [{}-{}/{}] [/] scroll",
+                effective_offset + 1,
+                visible_end,
+                sorted_labels.len()
+            ),
             Style::default().fg(FG_OVERLAY),
         )));
     }

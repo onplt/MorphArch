@@ -1,24 +1,17 @@
-// =============================================================================
-// main.rs — MorphArch entry point
-// =============================================================================
-//
-// Program flow:
-//   1. Initialize logging (tracing-subscriber)
-//   2. Parse CLI arguments (clap)
-//   3. Load configuration (config — ~/.morpharch/ directory + DB path)
-//   4. Open database (SQLite — migration runs automatically)
-//   5. Execute subcommand:
-//      - scan        → Scan repo (commit + graph + drift), print results
-//      - watch       → Scan repo + launch animated TUI (Sprint 4)
-//      - list-graphs → List last N graph snapshots in table format
-//      - analyze     → Detailed drift report for a specific commit
-//      - list-drift  → Drift trend table for the last 20 commits
-//   6. On error, display a user-friendly message
-//
-// Exit codes:
-//   0 → Success
-//   1 → Error (details on stderr)
-// =============================================================================
+//! # MorphArch
+//!
+//! Monorepo architecture drift visualizer with animated TUI.
+//!
+//! MorphArch scans Git history, builds per-commit dependency graphs using
+//! tree-sitter AST parsing, calculates architecture drift scores, and renders
+//! the results as an animated force-directed graph in your terminal.
+//!
+//! ## Supported Languages
+//!
+//! - **Rust** — `use` / `extern crate` statements
+//! - **TypeScript** — `import ... from` statements
+//! - **Python** — `import` / `from ... import` statements
+//! - **Go** — `import` declarations
 
 mod cli;
 mod commands;
@@ -72,12 +65,24 @@ fn run() -> Result<()> {
     // Dispatch to subcommand
     match cli.command {
         Commands::Scan { path, max_commits } => {
-            let limit = if max_commits == 0 { usize::MAX } else { max_commits };
+            let limit = if max_commits == 0 {
+                usize::MAX
+            } else {
+                max_commits
+            };
             execute_scan(&path, &db, limit)?;
         }
-        Commands::Watch { path, max_commits, max_snapshots } => {
-            let limit = if max_commits == 0 { usize::MAX } else { max_commits };
-            // Sprint 4: Scan + launch animated TUI
+        Commands::Watch {
+            path,
+            max_commits,
+            max_snapshots,
+        } => {
+            let limit = if max_commits == 0 {
+                usize::MAX
+            } else {
+                max_commits
+            };
+            // Scan + launch animated TUI
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::watch::run_watch(&path, &db, limit, max_snapshots))?;
         }
@@ -97,7 +102,7 @@ fn run() -> Result<()> {
 
 /// Executes the scan and prints a result summary.
 ///
-/// Since Sprint 3, commit scanning + dependency graph + drift scoring
+/// commit scanning + dependency graph + drift scoring
 /// all run in a single command. `commands::scan::run_scan` orchestrates
 /// all three steps.
 fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Result<()> {
@@ -107,7 +112,7 @@ fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Re
     // Start timer
     let start = Instant::now();
 
-    // Sprint 3: commit scanning + dependency graph + drift scoring
+    // commit scanning + dependency graph + drift scoring
     let result = commands::scan::run_scan(path, db, max_commits)?;
 
     // Calculate elapsed time

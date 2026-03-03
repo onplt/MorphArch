@@ -1,22 +1,13 @@
-// =============================================================================
-// parser.rs — Tree-sitter based import/dependency extractor
-// =============================================================================
-//
-// Supported languages and patterns:
-//
-//   Rust         → use xxx::yyy, extern crate xxx
-//   TypeScript   → import ... from 'xxx', import 'xxx'
-//   Python       → import xxx, from xxx import yyy
-//   Go           → import "xxx", import ( "xxx" "yyy" )
-//
-// For each language, a tree-sitter grammar builds an AST, then relevant
-// node types are found and text-based extraction is performed.
-//
-// Performance:
-//   - tree-sitter is C-based GLR parser — very fast (ms-level)
-//   - Large files (>512KB) are skipped (likely generated/minified code)
-//   - Parser objects are created per call (cheap operation)
-// =============================================================================
+//! Tree-sitter based import and dependency extractor.
+//!
+//! Parses source files with language-specific tree-sitter grammars and extracts
+//! import/dependency edges for Rust, TypeScript, Python, and Go.
+//!
+//! # Performance
+//!
+//! - Tree-sitter is a C-based GLR parser — parsing is ms-level even for large files.
+//! - Files larger than 512 KB are skipped (likely generated or minified code).
+//! - Parser objects are created per call (cheap construction).
 
 use std::path::Path;
 use tracing::debug;
@@ -78,10 +69,7 @@ pub fn detect_language(path: &str) -> Option<Language> {
 /// - "runtime/ops/fs.rs" → "runtime/ops"
 pub fn extract_package_name(file_path: &Path) -> String {
     let path_str = file_path.to_string_lossy().replace('\\', "/");
-    let components: Vec<&str> = path_str
-        .split('/')
-        .filter(|c| !c.is_empty())
-        .collect();
+    let components: Vec<&str> = path_str.split('/').filter(|c| !c.is_empty()).collect();
 
     // Single file at root (no directory) → use file stem
     if components.len() <= 1 {
@@ -96,10 +84,7 @@ pub fn extract_package_name(file_path: &Path) -> String {
     let dirs = &components[..components.len() - 1];
 
     // Check for monorepo patterns: packages/X/... or apps/X/...
-    if let Some(pos) = dirs
-        .iter()
-        .position(|c| *c == "packages" || *c == "apps")
-    {
+    if let Some(pos) = dirs.iter().position(|c| *c == "packages" || *c == "apps") {
         if pos + 1 < dirs.len() {
             return dirs[pos + 1].to_string();
         }
@@ -154,10 +139,7 @@ pub fn parse_imports(content: &str, lang: Language, file_path: &Path) -> Vec<Str
     }
 
     let package_name = extract_package_name(file_path);
-    debug!(
-        "Parsed file: {:?} → package: {}",
-        file_path, package_name
-    );
+    debug!("Parsed file: {:?} → package: {}", file_path, package_name);
 
     // Get the tree-sitter Language object for the detected language
     let ts_lang = match lang {
@@ -466,10 +448,7 @@ mod tests {
             extract_package_name(Path::new("src/commands/mod.rs")),
             "commands"
         );
-        assert_eq!(
-            extract_package_name(Path::new("src/tui/mod.rs")),
-            "tui"
-        );
+        assert_eq!(extract_package_name(Path::new("src/tui/mod.rs")), "tui");
         // index.ts should use parent directory name
         assert_eq!(
             extract_package_name(Path::new("packages/ui/src/index.ts")),
@@ -481,10 +460,7 @@ mod tests {
             "utils"
         );
         // lib.rs in src/ should fall back to stem since parent is "src"
-        assert_eq!(
-            extract_package_name(Path::new("src/lib.rs")),
-            "lib"
-        );
+        assert_eq!(extract_package_name(Path::new("src/lib.rs")), "lib");
     }
 
     #[test]
@@ -517,15 +493,9 @@ mod tests {
             "commands/watch"
         );
         // Root-level file → file stem
-        assert_eq!(
-            extract_package_name(Path::new("main.rs")),
-            "main"
-        );
+        assert_eq!(extract_package_name(Path::new("main.rs")), "main");
         // Single directory → just that dir
-        assert_eq!(
-            extract_package_name(Path::new("cli/main.ts")),
-            "cli"
-        );
+        assert_eq!(extract_package_name(Path::new("cli/main.ts")), "cli");
     }
 
     #[test]
@@ -541,11 +511,23 @@ fn main() {}
 "#;
         let imports = parse_imports(source, Language::Rust, Path::new("src/main.rs"));
         assert!(imports.contains(&"std".to_string()), "should contain std");
-        assert!(imports.contains(&"serde".to_string()), "should contain serde");
-        assert!(imports.contains(&"anyhow".to_string()), "should contain anyhow");
+        assert!(
+            imports.contains(&"serde".to_string()),
+            "should contain serde"
+        );
+        assert!(
+            imports.contains(&"anyhow".to_string()),
+            "should contain anyhow"
+        );
         // crate and super are internal — should not be present
-        assert!(!imports.contains(&"crate".to_string()), "should not contain crate");
-        assert!(!imports.contains(&"super".to_string()), "should not contain super");
+        assert!(
+            !imports.contains(&"crate".to_string()),
+            "should not contain crate"
+        );
+        assert!(
+            !imports.contains(&"super".to_string()),
+            "should not contain super"
+        );
     }
 
     #[test]
@@ -559,10 +541,19 @@ import { helper } from '../utils';
 const x = 1;
 "#;
         let imports = parse_imports(source, Language::TypeScript, Path::new("src/index.ts"));
-        assert!(imports.contains(&"react".to_string()), "should contain react");
-        assert!(imports.contains(&"axios".to_string()), "should contain axios");
+        assert!(
+            imports.contains(&"react".to_string()),
+            "should contain react"
+        );
+        assert!(
+            imports.contains(&"axios".to_string()),
+            "should contain axios"
+        );
         // Relative imports should be resolved
-        assert!(imports.contains(&"utils".to_string()), "should contain utils");
+        assert!(
+            imports.contains(&"utils".to_string()),
+            "should contain utils"
+        );
     }
 
     #[test]
@@ -580,7 +571,10 @@ def main():
         let imports = parse_imports(source, Language::Python, Path::new("main.py"));
         assert!(imports.contains(&"os".to_string()), "should contain os");
         assert!(imports.contains(&"sys".to_string()), "should contain sys");
-        assert!(imports.contains(&"datetime".to_string()), "should contain datetime");
+        assert!(
+            imports.contains(&"datetime".to_string()),
+            "should contain datetime"
+        );
     }
 
     #[test]
