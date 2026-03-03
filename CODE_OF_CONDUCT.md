@@ -25,8 +25,7 @@ Examples of unacceptable behavior:
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported to the project maintainer at
-**onur@morpharch.dev**. All complaints will be reviewed and investigated promptly
+Instances of unacceptable behavior may be reported to the project maintainer. All complaints will be reviewed and investigated promptly
 and fairly.
 
 ## Attribution
