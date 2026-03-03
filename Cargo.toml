@@ -28,7 +28,7 @@ exclude = [
 clap = { version = "4.5", features = ["derive"] }
 
 # Git operations — gitoxide pure-Rust library
-gix = "0.70"
+gix = "0.80"
 
 # SQLite — bundled feature removes system SQLite dependency
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -84,7 +84,7 @@ rand = "0.8"
 rayon = "1.10"
 
 # Bounded LRU cache
-lru = "0.12"
+lru = "0.16"
 
 [profile.release]
 lto = true

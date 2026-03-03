@@ -404,12 +404,20 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
             }
         };
 
+        let (author_name, author_email, timestamp) = match decoded.author() {
+            Ok(sig) => (
+                sig.name.to_string(),
+                sig.email.to_string(),
+                sig.seconds(),
+            ),
+            Err(_) => ("unknown".to_string(), "unknown".to_string(), 0),
+        };
         let commit_info = CommitInfo {
             hash: commit_hash.clone(),
-            author_name: decoded.author.name.to_string(),
-            author_email: decoded.author.email.to_string(),
+            author_name,
+            author_email,
             message: decoded.message.to_string(),
-            timestamp: decoded.author.time.seconds,
+            timestamp,
             tree_id: decoded.tree().to_string(),
         };
 
