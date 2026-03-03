@@ -72,7 +72,7 @@ ratatui = { version = "0.29", features = ["all-widgets", "unstable"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.50", features = ["full"] }
 
 # Async stream combinators
 futures = "0.3"
