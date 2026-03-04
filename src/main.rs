@@ -1,30 +1,3 @@
-//! # MorphArch
-//!
-//! Monorepo architecture drift visualizer with animated TUI.
-//!
-//! MorphArch scans Git history, builds per-commit dependency graphs using
-//! tree-sitter AST parsing, calculates architecture drift scores, and renders
-//! the results as an animated force-directed graph in your terminal.
-//!
-//! ## Supported Languages
-//!
-//! - **Rust** — `use` / `extern crate` statements
-//! - **TypeScript** — `import ... from` statements
-//! - **Python** — `import` / `from ... import` statements
-//! - **Go** — `import` declarations
-
-mod cli;
-mod commands;
-mod config;
-mod db;
-mod git_scanner;
-mod graph_builder;
-mod models;
-mod parser;
-mod scoring;
-mod tui;
-mod utils;
-
 use std::process;
 use std::time::Instant;
 
@@ -32,9 +5,11 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
-use cli::{Cli, Commands};
-use config::MorphArchConfig;
-use db::Database;
+use morpharch::cli::{Cli, Commands};
+use morpharch::commands;
+use morpharch::config::MorphArchConfig;
+use morpharch::db::Database;
+use morpharch::utils;
 
 fn main() {
     // Initialize logging — before anything else
