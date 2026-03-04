@@ -57,7 +57,7 @@ petgraph = { version = "0.6", features = ["serde-1", "graphmap", "stable_graph"]
 tree-sitter = "0.24"
 
 # Language grammars
-tree-sitter-rust = "0.23"
+tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
