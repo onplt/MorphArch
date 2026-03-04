@@ -51,7 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 
 # Directed graph data structure
-petgraph = { version = "0.6", features = ["serde-1", "graphmap", "stable_graph"] }
+petgraph = { version = "0.8", features = ["serde-1", "graphmap", "stable_graph"] }
 
 # Tree-sitter — incremental parsing framework
 tree-sitter = "0.24"
