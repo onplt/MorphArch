@@ -151,6 +151,7 @@ pub fn get_commits_since<'repo>(
 ///
 /// A typical commit changes 1-3 files → 1-5 subtrees out of ~200.
 /// With caching, commit N+1 reads only the changed subtrees.
+#[derive(Default)]
 pub struct SubtreeCache {
     /// tree_oid → Vec<(relative_path, blob_oid)> for supported files
     entries: HashMap<gix::ObjectId, Vec<(String, gix::ObjectId)>>,
@@ -158,9 +159,7 @@ pub struct SubtreeCache {
 
 impl SubtreeCache {
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
+        Self::default()
     }
 }
 
