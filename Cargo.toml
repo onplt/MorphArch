@@ -31,7 +31,7 @@ clap = { version = "4.5", features = ["derive"] }
 gix = "0.80"
 
 # SQLite — bundled feature removes system SQLite dependency
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 
 # Structured logging
 tracing = "0.1"
@@ -51,7 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 
 # Directed graph data structure
-petgraph = { version = "0.6", features = ["serde-1", "graphmap", "stable_graph"] }
+petgraph = { version = "0.8", features = ["serde-1", "graphmap", "stable_graph"] }
 
 # Tree-sitter — incremental parsing framework
 tree-sitter = "0.24"
@@ -69,7 +69,7 @@ walkdir = "2.5"
 ratatui = { version = "0.29", features = ["all-widgets", "unstable"] }
 
 # Terminal backend
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }
@@ -78,7 +78,7 @@ tokio = { version = "1.50", features = ["full"] }
 futures = "0.3"
 
 # Random number generation
-rand = "0.8"
+rand = "0.9"
 
 # Data-parallel iteration
 rayon = "1.10"
