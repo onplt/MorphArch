@@ -76,7 +76,7 @@ impl GraphLayout {
         width: f64,
         height: f64,
     ) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let n = labels.len();
 
         // Place nodes in a circle with generous radius for spread
@@ -90,16 +90,16 @@ impl GraphLayout {
             .map(|(i, _)| {
                 // Distribute evenly on circle with angle jitter
                 let angle = (i as f64 / n.max(1) as f64) * std::f64::consts::TAU
-                    + rng.gen_range(-0.15..0.15);
-                let r = radius + rng.gen_range(-5.0..5.0);
+                    + rng.random_range(-0.15..0.15);
+                let r = radius + rng.random_range(-5.0..5.0);
                 let x = cx + angle.cos() * r;
                 let y = cy + angle.sin() * r;
                 // Small initial velocity for immediate motion
                 NodePosition {
                     x,
                     y,
-                    prev_x: x + rng.gen_range(-1.5..1.5),
-                    prev_y: y + rng.gen_range(-1.5..1.5),
+                    prev_x: x + rng.random_range(-1.5..1.5),
+                    prev_y: y + rng.random_range(-1.5..1.5),
                     pinned: false,
                 }
             })
@@ -194,12 +194,12 @@ impl GraphLayout {
         }
 
         // 4. Temperature-scaled micro-jitter: alive feel that fades as graph settles
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let jitter = 0.15 * self.temperature;
         if jitter > 0.001 {
             for i in 0..n {
-                fx[i] += rng.gen_range(-jitter..jitter);
-                fy[i] += rng.gen_range(-jitter..jitter);
+                fx[i] += rng.random_range(-jitter..jitter);
+                fy[i] += rng.random_range(-jitter..jitter);
             }
         }
 
@@ -273,7 +273,7 @@ impl GraphLayout {
     /// Call this after `resize()` but before warmup so the initial
     /// placement matches the actual canvas dimensions exactly.
     pub fn reinitialize_positions(&mut self) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let n = self.labels.len();
         let radius = self.width.min(self.height) * 0.35;
         let cx = self.width / 2.0;
@@ -282,15 +282,15 @@ impl GraphLayout {
         self.positions = (0..n)
             .map(|i| {
                 let angle = (i as f64 / n.max(1) as f64) * std::f64::consts::TAU
-                    + rng.gen_range(-0.15..0.15);
-                let r = radius + rng.gen_range(-5.0..5.0);
+                    + rng.random_range(-0.15..0.15);
+                let r = radius + rng.random_range(-5.0..5.0);
                 let x = cx + angle.cos() * r;
                 let y = cy + angle.sin() * r;
                 NodePosition {
                     x,
                     y,
-                    prev_x: x + rng.gen_range(-1.5..1.5),
-                    prev_y: y + rng.gen_range(-1.5..1.5),
+                    prev_x: x + rng.random_range(-1.5..1.5),
+                    prev_y: y + rng.random_range(-1.5..1.5),
                     pinned: false,
                 }
             })
@@ -369,7 +369,7 @@ impl GraphLayout {
             .map(|(l, p)| (l.as_str(), p))
             .collect();
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let cx = self.width / 2.0;
         let cy = self.height / 2.0;
 
@@ -387,13 +387,13 @@ impl GraphLayout {
                     }
                 } else {
                     // New node: random position near center with initial velocity
-                    let x = cx + rng.gen_range(-30.0..30.0);
-                    let y = cy + rng.gen_range(-30.0..30.0);
+                    let x = cx + rng.random_range(-30.0..30.0);
+                    let y = cy + rng.random_range(-30.0..30.0);
                     NodePosition {
                         x,
                         y,
-                        prev_x: x + rng.gen_range(-1.0..1.0),
-                        prev_y: y + rng.gen_range(-1.0..1.0),
+                        prev_x: x + rng.random_range(-1.0..1.0),
+                        prev_y: y + rng.random_range(-1.0..1.0),
                         pinned: false,
                     }
                 }
