@@ -141,17 +141,17 @@ pub fn parse_imports(content: &str, lang: Language, file_path: &Path) -> Vec<Str
     let package_name = extract_package_name(file_path);
     debug!("Parsed file: {:?} → package: {}", file_path, package_name);
 
-    // Get the tree-sitter Language object for the detected language
+    // Get the tree-sitter LanguageFn for the detected language
     let ts_lang = match lang {
-        Language::Rust => tree_sitter_rust::language(),
-        Language::TypeScript => tree_sitter_typescript::language_typescript(),
-        Language::Python => tree_sitter_python::language(),
-        Language::Go => tree_sitter_go::language(),
+        Language::Rust => tree_sitter_rust::LANGUAGE,
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        Language::Python => tree_sitter_python::LANGUAGE,
+        Language::Go => tree_sitter_go::LANGUAGE,
     };
 
     // Create parser and set language
     let mut parser = TsParser::new();
-    if parser.set_language(&ts_lang).is_err() {
+    if parser.set_language(&ts_lang.into()).is_err() {
         return Vec::new();
     }
 
