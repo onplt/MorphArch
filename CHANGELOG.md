@@ -24,46 +24,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stack Overflow:** Added depth limits to the Quadtree partitioning to prevent infinite recursion on overlapping node coordinates.
 - **TUI Stability:** Resolved various borrow checker and argument count issues in the graph rendering engine.
 
-## [0.4.0] - 2025-03-03
+## [1.0.1] - 2026-03-04
 
 ### Added
 
-- Animated TUI graph renderer with Verlet physics simulation
-- Mouse drag interaction for repositioning graph nodes
-- Search filtering to locate and highlight specific nodes
-- Weighted edges reflecting dependency strength
-- Drift scoring engine for quantifying architectural deviation
-- Incremental scanning to avoid re-processing unchanged files
-- Subtree-cached tree walks for faster AST traversal
-- LRU blob cache to reduce redundant I/O during analysis
-- SQLite persistence for scan results and drift history
+- **Docs.rs Support:** Added `lib.rs` and proper module structure to support documentation generation.
+- **Enhanced Documentation:** Improved README and in-code documentation for better developer onboarding.
 
-## [0.3.0] - 2025-02-15
+### Fixed
+
+- **Dependency Security:** Upgraded `gix` and `lru` to resolve audited vulnerabilities.
+- **CI/CD Fixes:** Corrected invalid GitHub Actions configurations for cargo-audit.
+
+## [1.0.0] - 2026-03-04
 
 ### Added
 
-- Drift scoring system for measuring architecture degradation over time
-- Temporal analysis of dependency changes across commits
-- Boundary violation detection for module-level architecture rules
+- **Initial Stable Release:** Complete core functionality for architecture drift visualization.
+- **Animated TUI:** Interactive terminal UI with Verlet physics-based graph rendering.
+- **Drift Scoring:** sophisticated algorithm to quantify architectural deviation across Git history.
+- **SQLite Persistence:** Durable storage for scan results, graph snapshots, and drift metrics.
+- **Multi-Language Support:** Import extraction for Rust, TypeScript, Python, and Go via tree-sitter.
 
-## [0.2.0] - 2025-02-01
-
-### Added
-
-- Dependency graph construction using tree-sitter for multi-language parsing
-- Graph data model backed by petgraph with stable node indices
-- Support for Rust, TypeScript, Python, and Go import extraction
-
-## [0.1.0] - 2025-01-15
-
-### Added
-
-- Initial git repository scanner using gitoxide
-- SQLite storage layer for persisting scan metadata
-- CLI interface with clap for command-line argument parsing
-
-[Unreleased]: https://github.com/onplt/morpharch/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/onplt/morpharch/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/onplt/morpharch/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/onplt/morpharch/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/onplt/morpharch/releases/tag/v0.1.0
+[Unreleased]: https://github.com/onplt/morpharch/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/onplt/morpharch/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/onplt/morpharch/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/onplt/morpharch/releases/tag/v1.0.0
