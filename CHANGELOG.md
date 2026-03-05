@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-03-05
+
+### Added
+
+- **Interactive Timeline Scrubbing:** Support for clicking and dragging the timeline slider with the mouse for real-time history exploration.
+- **Lazy-Loading Snapshots:** Full graph snapshots are now loaded on-demand from the database, significantly reducing memory footprint for large project histories.
+
+### Changed
+
+- **Performance Optimization:** Replaced linear node lookups with a HashMap ($O(E+N)$), eliminating latency during commit navigation.
+- **Physics Optimization:** Implemented Barnes-Hut algorithm with a Quadtree structure for physics repulsion, improving performance from $O(V^2)$ to $O(V \log V)$.
+
+### Fixed
+
+- **Stack Overflow:** Added depth limits to the Quadtree partitioning to prevent infinite recursion on overlapping node coordinates.
+- **TUI Stability:** Resolved various borrow checker and argument count issues in the graph rendering engine.
+
 ## [0.4.0] - 2025-03-03
 
 ### Added
