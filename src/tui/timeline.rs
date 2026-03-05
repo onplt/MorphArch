@@ -101,14 +101,6 @@ impl TimelineState {
         self.commits.get(self.current_index).map(|(_, _, ts)| *ts).unwrap_or(0)
     }
 
-    /// Returns the current commit's timestamp.
-    pub fn current_commit_timestamp(&self) -> i64 {
-        self.commits
-            .get(self.current_index)
-            .map(|(_, _, ts)| *ts)
-            .unwrap_or(0)
-    }
-
     /// Total commit count.
     pub fn len(&self) -> usize {
         self.commits.len()
