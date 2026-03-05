@@ -308,14 +308,32 @@ impl GraphLayout {
             fy[to] -= force * uy;
         }
 
-        // 3. Center gravity: gentle pull toward canvas center
+        // 3. Center gravity: pull toward canvas center
+        // Increased gravity (0.02 -> 0.05) to prevent disconnected nodes from escaping to corners
         let cx = self.width / 2.0;
         let cy = self.height / 2.0;
-        let gravity = 0.02;
+        let gravity = 0.05;
 
         for i in 0..n {
-            fx[i] += (cx - self.positions[i].x) * gravity;
-            fy[i] += (cy - self.positions[i].y) * gravity;
+            let dx = cx - self.positions[i].x;
+            let dy = cy - self.positions[i].y;
+            fx[i] += dx * gravity;
+            fy[i] += dy * gravity;
+
+            // 3b. Soft boundary force: push nodes away from edges more strongly
+            // as they approach the margins.
+            let margin_soft = 40.0;
+            let push_strength = 0.15;
+            if self.positions[i].x < margin_soft {
+                fx[i] += (margin_soft - self.positions[i].x) * push_strength;
+            } else if self.positions[i].x > self.width - margin_soft {
+                fx[i] -= (self.positions[i].x - (self.width - margin_soft)) * push_strength;
+            }
+            if self.positions[i].y < margin_soft {
+                fy[i] += (margin_soft - self.positions[i].y) * push_strength;
+            } else if self.positions[i].y > self.height - margin_soft {
+                fy[i] -= (self.positions[i].y - (self.height - margin_soft)) * push_strength;
+            }
         }
 
         // 4. Temperature-scaled micro-jitter: alive feel that fades as graph settles
