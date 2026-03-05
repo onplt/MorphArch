@@ -4,9 +4,9 @@
 //! Health = 100 - Debt.
 //!
 //! # Scientific Philosophy
-//! 1. **Correctness First**: Cycles and boundary violations are major architectural 
+//! 1. **Correctness First**: Cycles and boundary violations are major architectural
 //!    flaws that trigger heavy penalties.
-//! 2. **Contextual Complexity**: Large projects are naturally dense. We use a 
+//! 2. **Contextual Complexity**: Large projects are naturally dense. We use a
 //!    forgiving density threshold (3.5) to avoid penalizing necessary complexity.
 //! 3. **Scale Grace**: Small projects are exempt from density penalties.
 
@@ -37,9 +37,17 @@ pub const BOUNDARY_RULES: &[(&str, &str)] = &[
 pub fn compute_instability_metrics(graph: &DiGraph<String, ()>) -> Vec<(String, f64)> {
     let mut metrics = Vec::new();
     for node_idx in graph.node_indices() {
-        let ca = graph.neighbors_directed(node_idx, petgraph::Direction::Incoming).count();
-        let ce = graph.neighbors_directed(node_idx, petgraph::Direction::Outgoing).count();
-        let instability = if ca + ce > 0 { ce as f64 / (ca + ce) as f64 } else { 0.0 };
+        let ca = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Incoming)
+            .count();
+        let ce = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+            .count();
+        let instability = if ca + ce > 0 {
+            ce as f64 / (ca + ce) as f64
+        } else {
+            0.0
+        };
         metrics.push((graph[node_idx].clone(), instability));
     }
     metrics.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -59,12 +67,16 @@ pub fn calculate_drift(
     let edge_count = graph.edge_count();
 
     // ── 1. Contextual Density Analysis ──
-    let density = if node_count > 0 { edge_count as f64 / node_count as f64 } else { 0.0 };
-    
+    let density = if node_count > 0 {
+        edge_count as f64 / node_count as f64
+    } else {
+        0.0
+    };
+
     // Threshold of 3.5 is chosen as a healthy upper bound for complex systems.
     // Above this, every 1.0 unit of density adds 5 points of architectural debt.
     let density_debt = if node_count < 10 {
-        0.0 
+        0.0
     } else {
         (density - 3.5).max(0.0) * 5.0
     };
@@ -72,7 +84,7 @@ pub fn calculate_drift(
     // ── 2. Structural Debt (Fatal Flaws) ──
     let cycles = count_cycles(graph);
     let violations = count_boundary_violations(edges_raw);
-    
+
     // Cycles are catastrophic for modularity. -25 health points per cycle group.
     let cycle_debt = cycles as f64 * 25.0;
 
@@ -80,36 +92,39 @@ pub fn calculate_drift(
     let violation_debt = violations as f64 * 15.0;
 
     // ── 3. Final Aggregation ──
-    let total_debt = (cycle_debt + violation_debt + density_debt).round().min(100.0) as u8;
+    let total_debt = (cycle_debt + violation_debt + density_debt)
+        .round()
+        .min(100.0) as u8;
 
     // ── 4. Delta Metrics (for timeline visualization) ──
     let (current_fan_in, current_fan_out) = compute_fan_metrics(graph);
     let (fan_in_delta, fan_out_delta) = if let Some(prev) = prev_graph {
         let (prev_fan_in, prev_fan_out) = compute_fan_metrics(prev);
-        (current_fan_in as i32 - prev_fan_in as i32, current_fan_out as i32 - prev_fan_out as i32)
+        (
+            current_fan_in as i32 - prev_fan_in as i32,
+            current_fan_out as i32 - prev_fan_out as i32,
+        )
     } else {
         (0, 0)
     };
 
     debug!(
-        total_debt, 
-        cycles, 
-        violations, 
-        density, 
-        "Architectural Health assessment complete"
+        total_debt,
+        cycles, violations, density, "Architectural Health assessment complete"
     );
 
     DriftScore {
         total: total_debt,
         fan_in_delta,
         fan_out_delta,
-        new_cycles: cycles, 
+        new_cycles: cycles,
         boundary_violations: violations,
         cognitive_complexity: (density * 10.0).round() / 10.0,
         timestamp,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compare_graphs(
     current_graph: &DiGraph<String, ()>,
     prev_graph: &DiGraph<String, ()>,
@@ -151,29 +166,48 @@ fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
     let mut max_fan_in: usize = 0;
     let mut max_fan_out: usize = 0;
     for node_idx in graph.node_indices() {
-        let fan_in = graph.neighbors_directed(node_idx, petgraph::Direction::Incoming).count();
-        let fan_out = graph.neighbors_directed(node_idx, petgraph::Direction::Outgoing).count();
-        if fan_in > max_fan_in { max_fan_in = fan_in; }
-        if fan_out > max_fan_out { max_fan_out = fan_out; }
+        let fan_in = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Incoming)
+            .count();
+        let fan_out = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+            .count();
+        if fan_in > max_fan_in {
+            max_fan_in = fan_in;
+        }
+        if fan_out > max_fan_out {
+            max_fan_out = fan_out;
+        }
     }
     (max_fan_in, max_fan_out)
 }
 
 fn count_cycles(graph: &DiGraph<String, ()>) -> usize {
-    kosaraju_scc(graph).iter().filter(|scc| scc.len() > 1).count()
+    kosaraju_scc(graph)
+        .iter()
+        .filter(|scc| scc.len() > 1)
+        .count()
 }
 
 fn count_boundary_violations(edges: &[(String, String)]) -> usize {
-    edges.iter().filter(|(from, to)| {
-        BOUNDARY_RULES.iter().any(|(from_prefix, to_prefix)| {
-            from.starts_with(from_prefix) && to.starts_with(to_prefix)
+    edges
+        .iter()
+        .filter(|(from, to)| {
+            BOUNDARY_RULES.iter().any(|(from_prefix, to_prefix)| {
+                from.starts_with(from_prefix) && to.starts_with(to_prefix)
+            })
         })
-    }).count()
+        .count()
 }
 
-pub fn count_cycles_public(graph: &DiGraph<String, ()>) -> usize { count_cycles(graph) }
+pub fn count_cycles_public(graph: &DiGraph<String, ()>) -> usize {
+    count_cycles(graph)
+}
 pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, String)> {
-    edges.iter().map(|e| (e.from_module.clone(), e.to_module.clone())).collect()
+    edges
+        .iter()
+        .map(|e| (e.from_module.clone(), e.to_module.clone()))
+        .collect()
 }
 
 // =============================================================================
@@ -224,11 +258,17 @@ mod tests {
     #[test]
     fn test_calculate_health_density() {
         let mut g = DiGraph::new();
-        for i in 0..20 { g.add_node(i.to_string()); }
+        for i in 0..20 {
+            g.add_node(i.to_string());
+        }
         // Add 100 edges -> Density = 5.0
         for i in 0..20 {
             for j in 1..6 {
-                g.add_edge(petgraph::graph::NodeIndex::new(i), petgraph::graph::NodeIndex::new((i+j)%20), ());
+                g.add_edge(
+                    petgraph::graph::NodeIndex::new(i),
+                    petgraph::graph::NodeIndex::new((i + j) % 20),
+                    (),
+                );
             }
         }
         let score = calculate_drift(&g, None, &[], &[], 0);

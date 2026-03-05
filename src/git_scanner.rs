@@ -1,7 +1,7 @@
 //! Git repository scanner using gitoxide (gix).
 
+use anyhow::Result;
 use dashmap::DashMap;
-use anyhow::{Result};
 use std::path::PathBuf;
 
 pub fn get_tree_for_commit(repo: &gix::Repository, commit_hash: &str) -> Result<gix::ObjectId> {
@@ -17,22 +17,32 @@ pub fn get_commits_in_order(repo: &gix::Repository, max: usize) -> Result<Vec<gi
     let mut commits = Vec::new();
     let ancestors = head.ancestors().all()?;
     for ancestor_result in ancestors {
-        if commits.len() >= max { break; }
+        if commits.len() >= max {
+            break;
+        }
         let ancestor_info = ancestor_result?;
         commits.push(repo.find_object(ancestor_info.id)?.into_commit());
     }
     Ok(commits)
 }
 
-pub fn get_commits_since<'a>(repo: &'a gix::Repository, stop_at_hash: &str, max: usize) -> Result<Vec<gix::Commit<'a>>> {
+pub fn get_commits_since<'a>(
+    repo: &'a gix::Repository,
+    stop_at_hash: &str,
+    max: usize,
+) -> Result<Vec<gix::Commit<'a>>> {
     let head = repo.head_commit()?;
     let mut commits = Vec::new();
     let ancestors = head.ancestors().all()?;
     for ancestor_result in ancestors {
-        if commits.len() >= max { break; }
+        if commits.len() >= max {
+            break;
+        }
         let ancestor_info = ancestor_result?;
         let hash = ancestor_info.id.to_string();
-        if hash == stop_at_hash { break; }
+        if hash == stop_at_hash {
+            break;
+        }
         commits.push(repo.find_object(ancestor_info.id)?.into_commit());
     }
     Ok(commits)
@@ -44,7 +54,9 @@ pub struct SubtreeCache {
 }
 
 impl SubtreeCache {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 pub fn walk_tree_entries_cached(
@@ -53,7 +65,10 @@ pub fn walk_tree_entries_cached(
     cache: &SubtreeCache,
 ) -> Result<Vec<(PathBuf, gix::ObjectId)>> {
     let raw = walk_tree_collect(repo, tree_oid, 0, cache)?;
-    Ok(raw.into_iter().map(|(p, oid)| (PathBuf::from(p), oid)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|(p, oid)| (PathBuf::from(p), oid))
+        .collect())
 }
 
 fn walk_tree_collect(
@@ -62,7 +77,9 @@ fn walk_tree_collect(
     depth: usize,
     cache: &SubtreeCache,
 ) -> Result<Vec<(String, gix::ObjectId)>> {
-    if depth > 30 { return Ok(Vec::new()); }
+    if depth > 30 {
+        return Ok(Vec::new());
+    }
     if let Some(cached) = cache.entries.get(&tree_oid) {
         let entries: &Vec<(String, gix::ObjectId)> = cached.value();
         return Ok(entries.clone());
@@ -74,10 +91,14 @@ fn walk_tree_collect(
         let name = entry.filename.to_string();
         if entry.mode.is_tree() {
             let sub = walk_tree_collect(repo, entry.oid.to_owned(), depth + 1, cache)?;
-            for (sub_path, blob_oid) in sub { result.push((format!("{}/{}", name, sub_path), blob_oid)); }
+            for (sub_path, blob_oid) in sub {
+                result.push((format!("{}/{}", name, sub_path), blob_oid));
+            }
         } else if entry.mode.is_blob() || entry.mode.is_executable() {
             if let Some(ext) = name.rsplit('.').next() {
-                if ["rs", "ts", "tsx", "py", "go"].contains(&ext) { result.push((name, entry.oid.to_owned())); }
+                if ["rs", "ts", "tsx", "py", "go"].contains(&ext) {
+                    result.push((name, entry.oid.to_owned()));
+                }
             }
         }
     }

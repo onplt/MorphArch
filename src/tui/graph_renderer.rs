@@ -273,7 +273,7 @@ impl GraphLayout {
         }
 
         let theta = 0.7; // Barnes-Hut approximation threshold
-        
+
         // ── DYNAMIC REPULSION ──
         // High node count (e.g. 400+) needs LESS repulsion to stay within bounds.
         // Base: 1500.0
@@ -322,7 +322,7 @@ impl GraphLayout {
         // 3. Center gravity: pull toward canvas center
         let cx = self.width / 2.0;
         let cy = self.height / 2.0;
-        
+
         // Scale gravity with node count: more nodes = stronger pull to center
         let gravity = if n > 200 { 0.08 } else { 0.05 };
 

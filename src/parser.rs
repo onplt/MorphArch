@@ -1,7 +1,7 @@
 //! Tree-sitter based import and dependency extractor.
 
 use std::cell::RefCell;
-use std::path::{Path};
+use std::path::Path;
 use tracing::debug;
 use tree_sitter::{Language as TsLanguage, Node, Parser as TsParser};
 
@@ -77,13 +77,11 @@ pub fn extract_package_name(file_path: &Path) -> String {
     let meaningful = &dirs[meaningful_start..];
 
     match meaningful.len() {
-        0 => {
-            file_path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        }
+        0 => file_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
         1 => meaningful[0].to_string(),
         _ => format!("{}/{}", meaningful[0], meaningful[1]),
     }
