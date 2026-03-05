@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{
     self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use petgraph::graph::DiGraph;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -17,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::db::Database;
 use crate::models::{DriftScore, GraphSnapshot, SnapshotMetadata};
+use crate::scoring;
 
 use super::graph_renderer::{
     ACCENT_BLUE, ACCENT_LAVENDER, ACCENT_MAUVE, BG_BASE, BG_SURFACE, FG_OVERLAY, FG_TEXT,
@@ -63,6 +65,8 @@ pub struct App {
     render_cache: Option<GraphRenderCache>,
     /// Commit hash currently being loaded from DB
     pub loading_hash: Option<String>,
+    /// List of (package_name, instability_score) for the current graph
+    pub brittle_packages: Vec<(String, f64)>,
 }
 
 struct GraphRenderCache {
@@ -72,6 +76,7 @@ struct GraphRenderCache {
 
 impl App {
     pub fn new(db: Option<Database>, snapshots: Vec<GraphSnapshot>) -> Self {
+        // ... (existing constructor logic) ...
         let timeline_commits: Vec<(String, String, i64)> = snapshots
             .iter()
             .map(|s| (s.commit_hash.clone(), String::new(), s.timestamp))
@@ -136,17 +141,39 @@ impl App {
             hovered_node: None,
             render_cache: None,
             loading_hash: None,
+            brittle_packages: Vec::new(),
         };
 
         if let Some(first_meta) = app.snapshots_metadata.first() {
             let hash = first_meta.commit_hash.clone();
             app.refresh_render_cache(&hash);
+            app.compute_insights();
         }
 
         app
     }
 
+    /// Computes architectural insights like instability for the current graph.
+    pub fn compute_insights(&mut self) {
+        // Build a temporary petgraph from current layout to run metrics
+        let mut g = DiGraph::new();
+        let mut node_map = HashMap::new();
+        for label in &self.graph_layout.labels {
+            node_map.insert(label.clone(), g.add_node(label.clone()));
+        }
+        for &(from, to) in &self.graph_layout.edges {
+            if from < self.graph_layout.labels.len() && to < self.graph_layout.labels.len() {
+                let from_n = &self.graph_layout.labels[from];
+                let to_n = &self.graph_layout.labels[to];
+                g.add_edge(node_map[from_n], node_map[to_n], ());
+            }
+        }
+        let metrics = scoring::compute_instability_metrics(&g);
+        self.brittle_packages = metrics.into_iter().take(5).collect();
+    }
+
     pub fn refresh_render_cache(&mut self, _hash: &str) {
+        // ... (existing logic) ...
         let n_nodes = self.graph_layout.positions.len();
         let mut degrees = vec![0; n_nodes];
         for &(from, to) in &self.graph_layout.edges {
@@ -213,6 +240,7 @@ impl App {
         self.graph_layout.update_graph(labels, edges, weights);
         self.current_drift = snapshot.drift.clone();
         self.refresh_render_cache(&snapshot.commit_hash);
+        self.compute_insights(); // <--- Update insights here!
         self.dragging_node = None;
         self.pkg_scroll_offset = 0;
         for pos in &mut self.graph_layout.positions {
@@ -608,7 +636,7 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
         top[2],
         &app.current_drift,
         &app.snapshots_metadata,
-        app.timeline.current_index,
+        &app.brittle_packages,
     );
     render_timeline(frame, main[1], &app.timeline);
     if app.show_search {

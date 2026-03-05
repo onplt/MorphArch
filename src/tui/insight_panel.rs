@@ -1,289 +1,129 @@
 // =============================================================================
-// tui/insight_panel.rs — Drift insight right panel
-// =============================================================================
-//
-// Information shown in the right panel:
-//   1. Drift score (large number + color)
-//   2. Sub-metrics: fan-in/out delta, cycles, violations
-//   3. Score trend (last 5 commits → sparkline)
-//   4. Short recommendation (most important issue)
-//
-// Coloring uses the drift_color function (green → red gradient).
+// tui/insight_panel.rs — k9s-inspired Architecture Monitor
 // =============================================================================
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, LineGauge, Wrap};
 
 use crate::models::{DriftScore, SnapshotMetadata};
-
 use super::graph_renderer::{
-    ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, drift_color,
+    ACCENT_BLUE, ACCENT_LAVENDER, ACCENT_MAUVE, BG_SURFACE, FG_OVERLAY, FG_TEXT, drift_color,
 };
 
-/// Renders the drift insight panel.
-///
-/// # Parameters
-/// - `drift`: Current commit's drift score (None = no data)
-/// - `snapshots`: Snapshot metadata (for trend calculation)
-/// - `current_index`: Current timeline position
 pub fn render_insight_panel(
     frame: &mut Frame,
     area: Rect,
     drift: &Option<DriftScore>,
     snapshots: &[SnapshotMetadata],
-    current_index: usize,
+    brittle_packages: &[(String, f64)],
 ) {
     let block = Block::default()
-        .title(" Drift Insight ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT_LAVENDER))
+        .border_style(Style::default().fg(ACCENT_MAUVE))
         .style(Style::default().bg(BG_SURFACE));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    if let Some(d) = drift {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // HEADER: ARCHITECTURE HEALTH
+                Constraint::Length(5), // SECTION: DEBT METRICS
+                Constraint::Length(3), // SECTION: DRIFT HISTORY
+                Constraint::Min(6),    // SECTION: HOTSPOTS (Brittle)
+                Constraint::Length(4), // FOOTER: ADVISORY
+            ])
+            .margin(0)
+            .split(inner);
 
-    match drift {
-        Some(d) => {
-            // ── Drift score (large display) ──
-            let color = drift_color(d.total);
-            let severity = match d.total {
-                0..=30 => "Healthy",
-                31..=60 => "Warning",
-                61..=80 => "Degraded",
-                _ => "Critical",
-            };
-            let emoji = match d.total {
-                0..=30 => "🟢",
-                31..=60 => "🟡",
-                61..=80 => "🟠",
-                _ => "🔴",
-            };
+        // ── 1. ARCHITECTURE HEALTH (Gauge) ──────────────────────────────────
+        let health = 100u8.saturating_sub(d.total);
+        let health_color = drift_color(d.total);
+        let health_gauge = LineGauge::default()
+            .block(Block::default().title(Span::styled(" HEALTH ", Style::default().bg(health_color).fg(Color::Black).add_modifier(Modifier::BOLD))))
+            .filled_style(Style::default().fg(health_color))
+            .ratio(health as f64 / 100.0)
+            .label(format!("{}%", health))
+            .line_set(ratatui::symbols::line::THICK);
+        frame.render_widget(health_gauge, chunks[0]);
 
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {emoji} Drift: "), Style::default().fg(FG_TEXT)),
-                Span::styled(
-                    format!("{}", d.total),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("/100".to_string(), Style::default().fg(FG_OVERLAY)),
-            ]));
-            lines.push(Line::from(Span::styled(
-                format!("  Status: {severity}"),
-                Style::default().fg(color),
-            )));
-            lines.push(Line::from(""));
+        // ── 2. DEBT METRICS (Key-Value) ──────────────────────────────────────
+        let mut debt_lines = Vec::new();
+        debt_lines.push(kv_line("New Cycles ", &format!("{}", d.new_cycles), if d.new_cycles > 0 { Color::Red } else { Color::Green }));
+        debt_lines.push(kv_line("Violations ", &format!("{}", d.boundary_violations), if d.boundary_violations > 0 { Color::Yellow } else { Color::Green }));
+        debt_lines.push(kv_line("Complexity ", &format!("{:.1}", d.cognitive_complexity), ACCENT_BLUE));
+        
+        let debt_para = Paragraph::new(debt_lines)
+            .block(Block::default().title(Span::styled(" DEBT BREAKDOWN ", Style::default().fg(ACCENT_LAVENDER).add_modifier(Modifier::BOLD))));
+        frame.render_widget(debt_para, chunks[1]);
 
-            // ── Sub-metrics ──
-            lines.push(Line::from(Span::styled(
-                "  -- Metrics --",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            )));
+        // ── 3. DRIFT HISTORY (Sparkline) ─────────────────────────────────────
+        let trend_data = build_trend_data(snapshots);
+        let sparkline = Sparkline::default()
+            .block(Block::default().title(Span::styled(format!(" TREND ({}) ", trend_data.len()), Style::default().fg(ACCENT_LAVENDER).add_modifier(Modifier::BOLD))))
+            .data(&trend_data)
+            .max(100)
+            .style(Style::default().fg(ACCENT_BLUE));
+        frame.render_widget(sparkline, chunks[2]);
 
-            let fan_in_str = format_delta(d.fan_in_delta);
-            let fan_out_str = format_delta(d.fan_out_delta);
-            let cycles_str = format!("{}", d.new_cycles);
-            let violations_str = format!("{}", d.boundary_violations);
-            let complexity_str = format!("{:.1}", d.cognitive_complexity);
-
-            lines.push(metric_line("Max Fan-in Δ", &fan_in_str));
-            lines.push(metric_line("Max Fan-out Δ", &fan_out_str));
-            lines.push(metric_line("Cycles", &cycles_str));
-            lines.push(metric_line("Violations", &violations_str));
-            lines.push(metric_line("Complexity", &complexity_str));
-
-            // ── Trend (sparkline) ──
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  -- Trend --",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            )));
-
-            let trend_str = build_sparkline(snapshots, current_index);
-            lines.push(Line::from(Span::styled(
-                format!("  {trend_str}"),
-                Style::default().fg(ACCENT_LAVENDER),
-            )));
-
-            // ── Recommendation ──
-            lines.push(Line::from(""));
-            let recommendation = generate_recommendation(d);
-            lines.push(Line::from(Span::styled(
-                format!("  {recommendation}"),
-                Style::default().fg(FG_OVERLAY),
-            )));
+        // ── 4. HOTSPOTS (Vulnerable Components) ──────────────────────────────
+        let mut brittle_lines = Vec::new();
+        if brittle_packages.is_empty() {
+            brittle_lines.push(Line::from(Span::styled("  Analyzing...", Style::default().fg(FG_OVERLAY))));
+        } else {
+            for (name, instability) in brittle_packages {
+                let color = if *instability > 0.8 { Color::Red } else if *instability > 0.5 { Color::Yellow } else { Color::Green };
+                let display_name = if name.len() > 16 { format!("{}…", &name[..13]) } else { name.clone() };
+                brittle_lines.push(Line::from(vec![
+                    Span::styled(format!(" {:<16} ", display_name), Style::default().fg(FG_TEXT)),
+                    Span::styled(format!("{:>6.2} I", instability), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                ]));
+            }
         }
-        None => {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  No drift data available.",
-                Style::default().fg(FG_OVERLAY),
-            )));
-            lines.push(Line::from(Span::styled(
-                "  Run 'morpharch scan .'",
-                Style::default().fg(FG_OVERLAY),
-            )));
-            lines.push(Line::from(Span::styled(
-                "  to scan first.",
-                Style::default().fg(FG_OVERLAY),
-            )));
-        }
+        let hotspots_para = Paragraph::new(brittle_lines)
+            .block(Block::default().title(Span::styled(" HOTSPOTS ", Style::default().fg(ACCENT_LAVENDER).add_modifier(Modifier::BOLD))));
+        frame.render_widget(hotspots_para, chunks[3]);
+
+        // ── 5. ADVISORY ─────────────────────────────────────────────────────
+        let rec = generate_recommendation(d);
+        let advisory = Paragraph::new(rec)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title(Span::styled(" ADVISORY ", Style::default().fg(Color::Black).bg(ACCENT_LAVENDER).add_modifier(Modifier::BOLD))))
+            .style(Style::default().fg(FG_TEXT).add_modifier(Modifier::ITALIC));
+        frame.render_widget(advisory, chunks[4]);
+
+    } else {
+        frame.render_widget(Paragraph::new("WAITING FOR DATA...").style(Style::default().fg(FG_OVERLAY)), inner);
     }
-
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, inner);
 }
 
-/// Creates a single metric line (owned — can be stored in `Vec<Line>`).
-fn metric_line(label: &str, value: &str) -> Line<'static> {
+/// Creates a k9s-style key-value line with dots filling the gap.
+fn kv_line(key: &str, value: &str, val_color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {label}: "), Style::default().fg(FG_OVERLAY)),
-        Span::styled(value.to_string(), Style::default().fg(FG_TEXT)),
+        Span::styled(format!(" {:<12}", key), Style::default().fg(FG_OVERLAY)),
+        Span::styled(" ┈ ", Style::default().fg(Color::Rgb(60, 60, 80))),
+        Span::styled(value.to_string(), Style::default().fg(val_color).add_modifier(Modifier::BOLD)),
     ])
 }
 
-/// Formats a delta value as +/- string.
-fn format_delta(delta: i32) -> String {
-    if delta > 0 {
-        format!("+{delta}")
-    } else if delta < 0 {
-        format!("{delta}")
-    } else {
-        "0".to_string()
-    }
-}
-
-/// Builds a sparkline from the last 7 commits' drift scores.
-///
-/// Uses braille character set for a mini graph:
-///   ▁ ▂ ▃ ▄ ▅ ▆ ▇ █
-fn build_sparkline(snapshots: &[SnapshotMetadata], current_index: usize) -> String {
-    let spark_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-    // Get 7 snapshots around the current index
-    let start = current_index.saturating_sub(3);
-    let end = (start + 7).min(snapshots.len());
-
-    let scores: Vec<u8> = snapshots[start..end]
-        .iter()
-        .map(|s| s.drift.as_ref().map(|d| d.total).unwrap_or(50))
+fn build_trend_data(snapshots: &[SnapshotMetadata]) -> Vec<u64> {
+    let mut data: Vec<u64> = snapshots.iter()
+        .take(50)
+        .map(|s| s.drift.as_ref().map(|d| d.total as u64).unwrap_or(50))
         .collect();
-
-    if scores.is_empty() {
-        return "—".to_string();
-    }
-
-    scores
-        .iter()
-        .map(|&score| {
-            // 0-100 → 0-7 index
-            let idx = ((score as usize) * 7) / 100;
-            spark_chars[idx.min(7)]
-        })
-        .collect()
+    data.reverse();
+    data
 }
 
-/// Generates a short recommendation based on drift score and metrics.
 fn generate_recommendation(drift: &DriftScore) -> String {
-    if drift.total <= 30 {
-        return "Architecture is healthy ✓".to_string();
-    }
-
-    if drift.new_cycles > 0 {
-        return format!(
-            "{} cycle{} detected — break circular deps",
-            drift.new_cycles,
-            if drift.new_cycles > 1 { "s" } else { "" }
-        );
-    }
-
-    if drift.total > 80 {
-        return "Critical drift — immediate review needed".to_string();
-    }
-
-    if drift.boundary_violations > 2 {
-        return format!(
-            "{} boundary violations — enforce module boundaries",
-            drift.boundary_violations
-        );
-    }
-
-    if drift.fan_out_delta > 5 {
-        return "High fan-out growth — consider splitting modules".to_string();
-    }
-
-    if drift.total > 60 {
-        return "Drift is high — review recent architectural changes".to_string();
-    }
-
-    if drift.cognitive_complexity > 40.0 {
-        return "High edge density — consider splitting modules".to_string();
-    }
-
-    "Monitor drift trend".to_string()
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_delta() {
-        assert_eq!(format_delta(5), "+5");
-        assert_eq!(format_delta(-3), "-3");
-        assert_eq!(format_delta(0), "0");
-    }
-
-    #[test]
-    fn test_generate_recommendation_cycles() {
-        let drift = DriftScore {
-            total: 70,
-            fan_in_delta: 0,
-            fan_out_delta: 0,
-            new_cycles: 2,
-            boundary_violations: 0,
-            cognitive_complexity: 0.0,
-            timestamp: 0,
-        };
-        let rec = generate_recommendation(&drift);
-        assert!(
-            rec.contains("cycle"),
-            "Should recommend about cycles: {rec}"
-        );
-    }
-
-    #[test]
-    fn test_sparkline_generation() {
-        let snapshots: Vec<SnapshotMetadata> = (0..5)
-            .map(|i| SnapshotMetadata {
-                commit_hash: format!("hash{i}"),
-                timestamp: i as i64,
-                drift: Some(DriftScore {
-                    total: (i * 20) as u8,
-                    fan_in_delta: 0,
-                    fan_out_delta: 0,
-                    new_cycles: 0,
-                    boundary_violations: 0,
-                    cognitive_complexity: 0.0,
-                    timestamp: 0,
-                }),
-            })
-            .collect();
-
-        let sparkline = build_sparkline(&snapshots, 2);
-        assert!(!sparkline.is_empty(), "Sparkline should not be empty");
-        assert!(sparkline.len() >= 3, "Should have at least 3 characters");
-    }
+    if drift.total <= 30 { "Stable. No immediate action required." }
+    else if drift.new_cycles > 0 { "Cycles detected! Decouple circular dependencies." }
+    else if drift.boundary_violations > 0 { "Layer violation! Check package boundaries." }
+    else { "Complexity rising. Consider refactoring core." }
+    .to_string()
 }

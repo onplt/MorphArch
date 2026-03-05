@@ -35,7 +35,7 @@ pub fn detect_language(path: &str) -> Option<Language> {
     let ext = path.rsplit('.').next()?;
     match ext {
         "rs" => Some(Language::Rust),
-        "ts" | "tsx" => Some(Language::TypeScript),
+        "ts" | "tsx" | "js" | "jsx" => Some(Language::TypeScript),
         "py" => Some(Language::Python),
         "go" => Some(Language::Go),
         _ => None,
