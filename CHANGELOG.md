@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.3] - 2026-03-05
+## [1.0.4] - 2026-03-05
 
 ### Added
 
-- **Commit Date Visibility:** The timeline now displays the commit date (`YYYY-MM-DD`) alongside the hash and message for better temporal context.
+- **Interactive Hover Labels:** Mouse-over functionality reveals the full name of any node, even when hidden by label density limits, with high-contrast highlighting.
+
+### Changed
+
+- **Physics Stability:** Increased central gravity and implemented soft boundary forces to prevent disconnected nodes from bunching at corners, ensuring a clean "cloud" layout.
+- **Improved Hover Logic:** Fine-tuned the mouse-node detection radius for pixel-perfect interaction.
+
+## [1.0.3] - 2026-03-05
 
 ## [1.0.2] - 2026-03-05
 

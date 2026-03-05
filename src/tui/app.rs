@@ -121,6 +121,8 @@ pub struct App {
     pub resizing_pkg: bool,
     /// Whether the user is currently dragging the timeline slider
     pub dragging_timeline: bool,
+    /// Index of the node currently under the mouse cursor
+    pub hovered_node: Option<usize>,
 }
 
 impl App {
@@ -191,6 +193,7 @@ impl App {
             pkg_panel_width: 22,
             resizing_pkg: false,
             dragging_timeline: false,
+            hovered_node: None,
         }
     }
 
@@ -411,7 +414,7 @@ impl App {
         }
     }
 
-    /// Processes mouse events for node drag interaction.
+    /// Processes mouse events for node drag interaction and hover effects.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let col = mouse.column;
         let row = mouse.row;
@@ -544,11 +547,33 @@ impl App {
                 }
             }
             MouseEventKind::Moved => {
+                // Release drag if somehow lost
                 if let Some(idx) = self.dragging_node.take() {
                     if idx < self.graph_layout.positions.len() {
                         self.graph_layout.positions[idx].pinned = false;
                         self.graph_layout.temperature = 0.01;
                     }
+                }
+
+                // Handle hover tracking
+                if in_canvas {
+                    let (px, py) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    
+                    // Tight hover threshold (roughly the size of a character cell)
+                    let hover_threshold = 10.0; 
+                    let mut closest: Option<(usize, f64)> = None;
+                    for (i, pos) in self.graph_layout.positions.iter().enumerate() {
+                        let dx = pos.x - px;
+                        let dy = pos.y - py;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist < hover_threshold && (closest.is_none() || dist < closest.unwrap().1) {
+                            closest = Some((i, dist));
+                        }
+                    }
+                    self.hovered_node = closest.map(|(idx, _)| idx);
+                } else {
+                    self.hovered_node = None;
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -854,14 +879,24 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 return None;
             }
             let is_matched = search_active && search_matched.contains(&i);
+            let is_hovered = app.hovered_node == Some(i);
+            
+            // Show label if:
+            // 1. Search is active (we show all relevant)
+            // 2. Or it's a high-degree node (label_visible set)
+            // 3. Or it's currently hovered by mouse
             let show_label = if search_active {
                 true
             } else {
-                label_visible.contains(&i)
+                label_visible.contains(&i) || is_hovered
             };
+
             let label = if show_label && i < layout.labels.len() {
                 let l = &layout.labels[i];
-                if l.len() > label_max_len {
+                // Hovered labels get full length, others are truncated
+                if is_hovered {
+                    l.clone()
+                } else if l.len() > label_max_len {
                     l[..label_max_len].to_string()
                 } else {
                     l.clone()
@@ -871,6 +906,8 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             };
             let color = if is_matched {
                 Color::Rgb(255, 232, 115)
+            } else if is_hovered {
+                Color::White // highlight hovered node
             } else {
                 NODE_PALETTE[i % NODE_PALETTE.len()]
             };
