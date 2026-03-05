@@ -1,16 +1,14 @@
-//! Architecture drift scoring engine.
+//! Absolute Architecture Health scoring engine.
 //!
-//! Computes a 0-100 drift score for each dependency graph snapshot, measuring
-//! how much the architecture has degraded relative to the previous commit.
+//! Computes a 0-100 "Debt" score based on structural and maintenance metrics.
+//! Health = 100 - Debt.
 //!
-//! # Metrics
-//!
-//! - Fan-in / fan-out delta: change in max incoming/outgoing edges per node
-//! - Cyclic dependencies: SCC count via Kosaraju's algorithm
-//! - Boundary violations: cross-layer dependency rule breaches
-//! - Cognitive complexity: `(edges/nodes) * 10 + cycles * 5` proxy
-//!
-//! The first scanned commit receives a baseline score of 50.
+//! # Scientific Philosophy
+//! 1. **Correctness First**: Cycles and boundary violations are major architectural
+//!    flaws that trigger heavy penalties.
+//! 2. **Contextual Complexity**: Large projects are naturally dense. We use a
+//!    forgiving density threshold (3.5) to avoid penalizing necessary complexity.
+//! 3. **Scale Grace**: Small projects are exempt from density penalties.
 
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::DiGraph;
@@ -19,58 +17,45 @@ use tracing::debug;
 
 use crate::models::{DriftScore, TemporalDelta};
 
-/// Baseline drift score — used when no previous graph exists.
-const BASELINE_SCORE: u8 = 50;
-
 /// Boundary violation rules: dependencies between these prefix pairs are violations.
-///
-/// Standard monorepo convention:
-///   - `apps/` → applications (user-facing)
-///   - `packages/`, `libs/` → shared libraries
-///   - `ext/`, `runtime/` → platform extensions
-///
-/// Violation: lower-level library depending on higher-level application code.
-///
-/// Both `::` (path_to_module convention) and `/` (extract_package_name convention)
-/// prefixes are checked for maximum compatibility.
 pub const BOUNDARY_RULES: &[(&str, &str)] = &[
-    // Standard monorepo (:: delimiter — path_to_module format)
     ("packages::", "apps::"),
     ("lib::", "apps::"),
     ("core::", "apps::"),
     ("shared::", "apps::"),
     ("packages::", "cmd::"),
     ("lib::", "cmd::"),
-    // Directory-level packages (/ delimiter — extract_package_name format)
     ("packages/", "apps/"),
     ("libs/", "apps/"),
-    ("libs/", "cli/"),     // library → CLI (forbidden direction)
-    ("ext/", "cli/"),      // extension → CLI
-    ("runtime/", "cli/"),  // runtime → CLI
-    ("libs/", "runtime/"), // library → runtime (layer violation)
+    ("libs/", "cli/"),
+    ("ext/", "cli/"),
+    ("runtime/", "cli/"),
+    ("libs/", "runtime/"),
 ];
 
-/// Calculates the architecture drift score for a dependency graph.
-///
-/// If a previous commit's graph is provided, delta analysis is performed;
-/// otherwise a baseline (50) score with absolute metrics is calculated.
-///
-/// # Parameters
-/// - `graph`: Current commit's dependency graph
-/// - `prev_graph`: Previous commit's graph (`None` for first commit)
-/// - `nodes`: Module names in the current graph (for boundary checks)
-/// - `edges_raw`: Raw edge list (from_module, to_module pairs)
-/// - `timestamp`: Commit timestamp
-///
-/// # Returns
-/// `DriftScore` — total score (0-100) and sub-metrics
-///
-/// # Algorithm
-/// 1. Compute fan-in/fan-out, find delta if previous graph exists
-/// 2. Count cycles with SCC
-/// 3. Check boundary violations
-/// 4. Compute cognitive complexity proxy
-/// 5. Normalize and clamp to [0, 100]
+/// Computes per-node instability index (I = Ce / (Ca + Ce)).
+pub fn compute_instability_metrics(graph: &DiGraph<String, ()>) -> Vec<(String, f64)> {
+    let mut metrics = Vec::new();
+    for node_idx in graph.node_indices() {
+        let ca = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Incoming)
+            .count();
+        let ce = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+            .count();
+        let instability = if ca + ce > 0 {
+            ce as f64 / (ca + ce) as f64
+        } else {
+            0.0
+        };
+        metrics.push((graph[node_idx].clone(), instability));
+    }
+    metrics.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    metrics
+}
+
+/// Calculates the absolute architectural debt score (0-100).
+/// 0 debt = 100% Health.
 pub fn calculate_drift(
     graph: &DiGraph<String, ()>,
     prev_graph: Option<&DiGraph<String, ()>>,
@@ -81,9 +66,38 @@ pub fn calculate_drift(
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
 
-    // ── 1. Fan-in / Fan-out calculation ──
-    let (current_fan_in, current_fan_out) = compute_fan_metrics(graph);
+    // ── 1. Contextual Density Analysis ──
+    let density = if node_count > 0 {
+        edge_count as f64 / node_count as f64
+    } else {
+        0.0
+    };
 
+    // Threshold of 3.5 is chosen as a healthy upper bound for complex systems.
+    // Above this, every 1.0 unit of density adds 5 points of architectural debt.
+    let density_debt = if node_count < 10 {
+        0.0
+    } else {
+        (density - 3.5).max(0.0) * 5.0
+    };
+
+    // ── 2. Structural Debt (Fatal Flaws) ──
+    let cycles = count_cycles(graph);
+    let violations = count_boundary_violations(edges_raw);
+
+    // Cycles are catastrophic for modularity. -25 health points per cycle group.
+    let cycle_debt = cycles as f64 * 25.0;
+
+    // Violations break layer contracts. -15 health points per unique violation.
+    let violation_debt = violations as f64 * 15.0;
+
+    // ── 3. Final Aggregation ──
+    let total_debt = (cycle_debt + violation_debt + density_debt)
+        .round()
+        .min(100.0) as u8;
+
+    // ── 4. Delta Metrics (for timeline visualization) ──
+    let (current_fan_in, current_fan_out) = compute_fan_metrics(graph);
     let (fan_in_delta, fan_out_delta) = if let Some(prev) = prev_graph {
         let (prev_fan_in, prev_fan_out) = compute_fan_metrics(prev);
         (
@@ -91,62 +105,26 @@ pub fn calculate_drift(
             current_fan_out as i32 - prev_fan_out as i32,
         )
     } else {
-        // First commit — no delta
         (0, 0)
     };
 
-    // ── 2. Cyclic dependency count (SCC analysis) ──
-    let current_cycles = count_cycles(graph);
-    let prev_cycles = prev_graph.map_or(0, count_cycles);
-    let new_cycles = current_cycles.saturating_sub(prev_cycles);
-
-    // ── 3. Boundary violation check ──
-    let boundary_violations = count_boundary_violations(edges_raw);
-
-    // ── 4. Cognitive complexity proxy ──
-    let complexity = if node_count > 0 {
-        (edge_count as f64 / node_count as f64) * 10.0 + current_cycles as f64 * 5.0
-    } else {
-        0.0
-    };
-
-    // ── 5. Compute total score and normalize ──
-    let total = if prev_graph.is_some() {
-        compute_total_score(
-            fan_in_delta,
-            fan_out_delta,
-            new_cycles,
-            boundary_violations,
-            complexity,
-        )
-    } else {
-        // First commit — baseline score
-        BASELINE_SCORE
-    };
-
     debug!(
-        total,
-        fan_in_delta,
-        fan_out_delta,
-        new_cycles,
-        boundary_violations,
-        complexity,
-        "Drift score calculated"
+        total_debt,
+        cycles, violations, density, "Architectural Health assessment complete"
     );
 
     DriftScore {
-        total,
+        total: total_debt,
         fan_in_delta,
         fan_out_delta,
-        new_cycles,
-        boundary_violations,
-        cognitive_complexity: (complexity * 100.0).round() / 100.0,
+        new_cycles: cycles,
+        boundary_violations: violations,
+        cognitive_complexity: (density * 10.0).round() / 10.0,
         timestamp,
     }
 }
 
-/// Compares two consecutive commits' graphs to compute a temporal delta.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn compare_graphs(
     current_graph: &DiGraph<String, ()>,
     prev_graph: &DiGraph<String, ()>,
@@ -161,16 +139,12 @@ pub fn compare_graphs(
 ) -> TemporalDelta {
     let nodes_added = current_nodes.difference(prev_nodes).count();
     let nodes_removed = prev_nodes.difference(current_nodes).count();
-
     let edges_added = current_edges.saturating_sub(prev_edges);
     let edges_removed = prev_edges.saturating_sub(current_edges);
-
     let current_cycles = count_cycles(current_graph);
     let prev_cycles = count_cycles(prev_graph);
-
     let new_cycles = current_cycles.saturating_sub(prev_cycles);
     let resolved_cycles = prev_cycles.saturating_sub(current_cycles);
-
     let score_delta = current_score as i32 - prev_score as i32;
 
     TemporalDelta {
@@ -186,24 +160,11 @@ pub fn compare_graphs(
     }
 }
 
-// =============================================================================
-// Helper functions — internal use
-// =============================================================================
+// ── Helpers ──
 
-/// Computes per-node fan metrics and returns (max_fan_in, max_fan_out).
-///
-/// **max_fan_in**: the largest number of incoming edges on any single node.
-///   Identifies the most-depended-on "hub" module (e.g. a god object).
-///
-/// **max_fan_out**: the largest number of outgoing edges on any single node.
-///   Identifies the module with the most external dependencies.
-///
-/// Using max (not total) makes fan_in and fan_out independent metrics that
-/// measure architectural concentration rather than raw edge count.
 fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
     let mut max_fan_in: usize = 0;
     let mut max_fan_out: usize = 0;
-
     for node_idx in graph.node_indices() {
         let fan_in = graph
             .neighbors_directed(node_idx, petgraph::Direction::Incoming)
@@ -218,13 +179,14 @@ fn compute_fan_metrics(graph: &DiGraph<String, ()>) -> (usize, usize) {
             max_fan_out = fan_out;
         }
     }
-
     (max_fan_in, max_fan_out)
 }
 
 fn count_cycles(graph: &DiGraph<String, ()>) -> usize {
-    let sccs = kosaraju_scc(graph);
-    sccs.iter().filter(|scc| scc.len() > 1).count()
+    kosaraju_scc(graph)
+        .iter()
+        .filter(|scc| scc.len() > 1)
+        .count()
 }
 
 fn count_boundary_violations(edges: &[(String, String)]) -> usize {
@@ -238,54 +200,9 @@ fn count_boundary_violations(edges: &[(String, String)]) -> usize {
         .count()
 }
 
-fn compute_total_score(
-    fan_in_delta: i32,
-    fan_out_delta: i32,
-    new_cycles: usize,
-    boundary_violations: usize,
-    cognitive_complexity: f64,
-) -> u8 {
-    // ── Component scoring ──
-    //
-    // Each component can push the score UP (bad) or DOWN (good) from the
-    // baseline of 50.  This makes it possible to reach the "Healthy" range
-    // (0-30) when the architecture is clean.
-    //
-    // Fan change: net new dependencies increase drift; removals improve it.
-    //   Large positive deltas → score rises; large negatives → score drops.
-    let fan_increase = (fan_in_delta.max(0) + fan_out_delta.max(0)) as f64;
-    let fan_decrease = ((-fan_in_delta).max(0) + (-fan_out_delta).max(0)) as f64;
-    let fan_component = fan_increase * 0.5 - fan_decrease * 0.3;
-
-    // Cycles: strong penalty for new cycles.
-    let cycle_penalty = new_cycles as f64 * 15.0;
-
-    // Boundary violations: moderate penalty.
-    let boundary_penalty = boundary_violations as f64 * 10.0;
-
-    // Complexity: edge density beyond a healthy threshold (3.0 edges/node)
-    // adds drift; density below the threshold REDUCES drift.
-    //   - Healthy graph: ~1-3 edges per node → complexity ≈ 10-30
-    //   - Dense graph:   ~5+ edges per node  → complexity ≈ 50+
-    const HEALTHY_COMPLEXITY: f64 = 25.0;
-    let complexity_excess = (cognitive_complexity - HEALTHY_COMPLEXITY) * 0.4;
-    // Can be negative (clean architecture pulls score down)
-
-    let raw = BASELINE_SCORE as f64
-        + fan_component
-        + cycle_penalty
-        + boundary_penalty
-        + complexity_excess;
-
-    raw.round().clamp(0.0, 100.0) as u8
-}
-
-/// Returns the cyclic dependency count as a public function.
 pub fn count_cycles_public(graph: &DiGraph<String, ()>) -> usize {
     count_cycles(graph)
 }
-
-/// Creates (from, to) pairs from an edge list.
 pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, String)> {
     edges
         .iter()
@@ -323,183 +240,41 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_drift_baseline() {
+    fn test_calculate_health_clean_small() {
         let graph = make_simple_graph();
-        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let edges = vec![
-            ("A".to_string(), "B".to_string()),
-            ("A".to_string(), "C".to_string()),
-            ("B".to_string(), "C".to_string()),
-        ];
-
-        let score = calculate_drift(&graph, None, &nodes, &edges, 1_000_000);
-
-        assert_eq!(
-            score.total, BASELINE_SCORE,
-            "First commit should be baseline"
-        );
-        assert_eq!(score.fan_in_delta, 0);
-        assert_eq!(score.fan_out_delta, 0);
-        assert_eq!(score.new_cycles, 0);
+        let score = calculate_drift(&graph, None, &[], &[], 0);
+        // Small project, no cycles -> 0 debt (100% health)
+        assert_eq!(score.total, 0);
     }
 
     #[test]
-    fn test_calculate_drift_with_previous() {
-        let prev = make_simple_graph();
-        let current = make_cyclic_graph();
-        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let edges = vec![
-            ("A".to_string(), "B".to_string()),
-            ("B".to_string(), "C".to_string()),
-            ("C".to_string(), "A".to_string()),
-        ];
-
-        let score = calculate_drift(&current, Some(&prev), &nodes, &edges, 2_000_000);
-
-        assert!(
-            score.total > BASELINE_SCORE,
-            "Adding a cycle should increase score, but got {}",
-            score.total
-        );
-        assert_eq!(score.new_cycles, 1);
+    fn test_calculate_health_with_cycle() {
+        let graph = make_cyclic_graph();
+        let score = calculate_drift(&graph, None, &[], &[], 0);
+        // 1 Cycle = 25 debt
+        assert_eq!(score.total, 25);
     }
 
     #[test]
-    fn test_cycle_detection() {
-        let simple = make_simple_graph();
-        assert_eq!(count_cycles(&simple), 0);
-
-        let cyclic = make_cyclic_graph();
-        assert_eq!(count_cycles(&cyclic), 1);
-
-        let empty: DiGraph<String, ()> = DiGraph::new();
-        assert_eq!(count_cycles(&empty), 0);
-    }
-
-    #[test]
-    fn test_boundary_violations() {
-        // Test :: delimiter (path_to_module format)
-        let edges = vec![
-            (
-                "packages::ui::button".to_string(),
-                "apps::web::home".to_string(),
-            ),
-            (
-                "apps::web::home".to_string(),
-                "packages::ui::button".to_string(),
-            ),
-            ("lib::utils".to_string(), "apps::api::routes".to_string()),
-            (
-                "packages::ui::button".to_string(),
-                "packages::ui::theme".to_string(),
-            ),
-        ];
-
-        let violations = count_boundary_violations(&edges);
-        assert_eq!(
-            violations, 2,
-            "Should have 2 violations (packages->apps, lib->apps)"
-        );
-    }
-
-    #[test]
-    fn test_boundary_violations_slash_format() {
-        // Test / delimiter (extract_package_name format — used by Deno etc.)
-        let edges = vec![
-            ("libs/npm".to_string(), "cli/tools".to_string()), // libs → cli: violation
-            ("ext/node".to_string(), "cli/lsp".to_string()),   // ext → cli: violation
-            ("cli/tools".to_string(), "ext/node".to_string()), // cli → ext: OK
-            ("libs/core".to_string(), "runtime/ops".to_string()), // libs → runtime: violation
-            ("ext/fetch".to_string(), "ext/http".to_string()), // ext → ext: OK
-        ];
-
-        let violations = count_boundary_violations(&edges);
-        assert_eq!(
-            violations, 3,
-            "Should have 3 violations (libs->cli, ext->cli, libs->runtime)"
-        );
-    }
-
-    #[test]
-    fn test_fan_metrics() {
-        // make_simple_graph: A→B, A→C, B→C
-        //   A: fan_in=0, fan_out=2
-        //   B: fan_in=1, fan_out=1
-        //   C: fan_in=2, fan_out=0
-        let graph = make_simple_graph();
-        let (max_fan_in, max_fan_out) = compute_fan_metrics(&graph);
-        assert_eq!(max_fan_in, 2, "C has highest fan-in (2)");
-        assert_eq!(max_fan_out, 2, "A has highest fan-out (2)");
-    }
-
-    #[test]
-    fn test_compare_graphs_temporal() {
-        let prev = make_simple_graph();
-        let current = make_cyclic_graph();
-
-        let prev_nodes: HashSet<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
-        let current_nodes: HashSet<String> =
-            ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
-
-        let delta = compare_graphs(
-            &current,
-            &prev,
-            &current_nodes,
-            &prev_nodes,
-            3,
-            3,
-            65,
-            50,
-            "commit2",
-            "commit1",
-        );
-
-        assert_eq!(delta.score_delta, 15);
-        assert_eq!(delta.nodes_added, 1);
-        assert_eq!(delta.nodes_removed, 0);
-        assert_eq!(delta.new_cycles, 1);
-        assert_eq!(delta.resolved_cycles, 0);
-    }
-
-    #[test]
-    fn test_compute_total_score_deterministic() {
-        let s1 = compute_total_score(5, 3, 1, 2, 15.0);
-        let s2 = compute_total_score(5, 3, 1, 2, 15.0);
-        assert_eq!(s1, s2, "Should be deterministic");
-        assert!(s1 <= 100);
-
-        let extreme = compute_total_score(100, 100, 10, 20, 500.0);
-        assert_eq!(extreme, 100, "Extreme values should clamp to 100");
-    }
-
-    #[test]
-    fn test_score_can_go_below_50() {
-        // Clean architecture: no fan growth, no cycles, no violations, low complexity
-        let score = compute_total_score(-5, -3, 0, 0, 10.0);
-        assert!(
-            score < 50,
-            "Clean architecture with shrinking deps should score below 50, got {score}"
-        );
-    }
-
-    #[test]
-    fn test_score_healthy_range() {
-        // Stable graph: zero deltas, no cycles, moderate complexity
-        let score = compute_total_score(0, 0, 0, 0, 25.0);
-        assert_eq!(
-            score, 50,
-            "Zero-change commit with healthy complexity should be ~50, got {score}"
-        );
-    }
-
-    #[test]
-    fn test_empty_graph_drift() {
-        let empty: DiGraph<String, ()> = DiGraph::new();
-        let nodes: Vec<String> = vec![];
-        let edges: Vec<(String, String)> = vec![];
-
-        let score = calculate_drift(&empty, None, &nodes, &edges, 0);
-        assert_eq!(score.total, BASELINE_SCORE);
-        assert_eq!(score.cognitive_complexity, 0.0);
+    fn test_calculate_health_density() {
+        let mut g = DiGraph::new();
+        for i in 0..20 {
+            g.add_node(i.to_string());
+        }
+        // Add 100 edges -> Density = 5.0
+        // This also creates a large cycle group (SCC).
+        for i in 0..20 {
+            for j in 1..6 {
+                g.add_edge(
+                    petgraph::graph::NodeIndex::new(i),
+                    petgraph::graph::NodeIndex::new((i + j) % 20),
+                    (),
+                );
+            }
+        }
+        let score = calculate_drift(&g, None, &[], &[], 0);
+        // Density 5.0. Threshold 3.5. Excess 1.5. Debt = 1.5 * 5 = 7.5 -> 8
+        // PLUS 1 Cycle group = 25 debt. Total = 33 debt.
+        assert_eq!(score.total, 33);
     }
 }

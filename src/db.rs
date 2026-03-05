@@ -449,15 +449,14 @@ impl Database {
 
     /// Returns the commit hash of the most recently scanned commit.
     ///
-    /// Used for incremental scanning — only scan commits newer than this.
-    /// Returns `None` if no snapshots exist in the database.
+    /// Uses ROWID to get the absolute last entry inserted into the database,
+    /// which is the most reliable way to determine the current scan head
+    /// regardless of Git commit timestamps.
     pub fn get_latest_scanned_commit(&self) -> Result<Option<String>> {
         let result = self
             .conn
             .query_row(
-                "SELECT g.commit_hash FROM graph_snapshots g
-                 JOIN commits c ON g.commit_hash = c.hash
-                 ORDER BY c.timestamp DESC LIMIT 1",
+                "SELECT commit_hash FROM graph_snapshots ORDER BY ROWID DESC LIMIT 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
