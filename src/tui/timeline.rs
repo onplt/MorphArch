@@ -93,12 +93,17 @@ impl TimelineState {
 
     /// Returns the current commit's message.
     pub fn current_commit_message(&self) -> Option<&str> {
-        self.commits.get(self.current_index).map(|(_, m, _)| m.as_str())
+        self.commits
+            .get(self.current_index)
+            .map(|(_, m, _)| m.as_str())
     }
 
     /// Returns the current commit's timestamp.
     pub fn current_commit_timestamp(&self) -> i64 {
-        self.commits.get(self.current_index).map(|(_, _, ts)| *ts).unwrap_or(0)
+        self.commits
+            .get(self.current_index)
+            .map(|(_, _, ts)| *ts)
+            .unwrap_or(0)
     }
 
     /// Total commit count.

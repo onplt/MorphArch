@@ -559,15 +559,17 @@ impl App {
                 if in_canvas {
                     let (px, py) =
                         self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                    
+
                     // Tight hover threshold (roughly the size of a character cell)
-                    let hover_threshold = 10.0; 
+                    let hover_threshold = 10.0;
                     let mut closest: Option<(usize, f64)> = None;
                     for (i, pos) in self.graph_layout.positions.iter().enumerate() {
                         let dx = pos.x - px;
                         let dy = pos.y - py;
                         let dist = (dx * dx + dy * dy).sqrt();
-                        if dist < hover_threshold && (closest.is_none() || dist < closest.unwrap().1) {
+                        if dist < hover_threshold
+                            && (closest.is_none() || dist < closest.unwrap().1)
+                        {
                             closest = Some((i, dist));
                         }
                     }
@@ -880,7 +882,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             let is_matched = search_active && search_matched.contains(&i);
             let is_hovered = app.hovered_node == Some(i);
-            
+
             // Show label if:
             // 1. Search is active (we show all relevant)
             // 2. Or it's a high-degree node (label_visible set)
