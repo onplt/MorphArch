@@ -93,9 +93,12 @@ impl TimelineState {
 
     /// Returns the current commit's message.
     pub fn current_commit_message(&self) -> Option<&str> {
-        self.commits
-            .get(self.current_index)
-            .map(|(_, m, _)| m.as_str())
+        self.commits.get(self.current_index).map(|(_, m, _)| m.as_str())
+    }
+
+    /// Returns the current commit's timestamp.
+    pub fn current_commit_timestamp(&self) -> i64 {
+        self.commits.get(self.current_index).map(|(_, _, ts)| *ts).unwrap_or(0)
     }
 
     /// Total commit count.
@@ -157,6 +160,15 @@ pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState) {
         message.to_string()
     };
 
+    let timestamp = state.current_commit_timestamp();
+    let date_str = if timestamp > 0 {
+        chrono::DateTime::from_timestamp(timestamp, 0)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "-----".to_string())
+    } else {
+        "-----".to_string()
+    };
+
     let lines = vec![
         Line::from(vec![
             Span::styled(" ", Style::default().fg(FG_TEXT)),
@@ -169,6 +181,7 @@ pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState) {
                     .fg(ACCENT_LAVENDER)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!("{date_str} "), Style::default().fg(FG_OVERLAY)),
             Span::styled(format!("{short_hash} "), Style::default().fg(ACCENT_BLUE)),
             Span::styled(truncated_msg, Style::default().fg(FG_TEXT)),
         ]),
