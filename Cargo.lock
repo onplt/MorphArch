@@ -2064,6 +2064,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.29.0",
+ "dashmap",
  "dirs",
  "futures",
  "gix",

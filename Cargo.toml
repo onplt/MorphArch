@@ -83,6 +83,9 @@ rand = "0.9"
 # Data-parallel iteration
 rayon = "1.10"
 
+# Concurrent HashMap for parallel scanning
+dashmap = "6.1"
+
 # Bounded LRU cache
 lru = "0.16"
 

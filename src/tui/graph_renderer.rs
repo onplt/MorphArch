@@ -273,7 +273,18 @@ impl GraphLayout {
         }
 
         let theta = 0.7; // Barnes-Hut approximation threshold
-        let repulsion_const = self.repulsion * temp_scale;
+        
+        // ── DYNAMIC REPULSION ──
+        // High node count (e.g. 400+) needs LESS repulsion to stay within bounds.
+        // Base: 1500.0
+        // N=100 -> 1500.0
+        // N=400 -> ~700.0
+        let dynamic_repulsion = if n > 100 {
+            (self.repulsion * (100.0 / n as f64).sqrt()).max(400.0)
+        } else {
+            self.repulsion
+        };
+        let repulsion_const = dynamic_repulsion * temp_scale;
 
         for i in 0..n {
             let mut f = (0.0, 0.0);
@@ -309,10 +320,11 @@ impl GraphLayout {
         }
 
         // 3. Center gravity: pull toward canvas center
-        // Increased gravity (0.02 -> 0.05) to prevent disconnected nodes from escaping to corners
         let cx = self.width / 2.0;
         let cy = self.height / 2.0;
-        let gravity = 0.05;
+        
+        // Scale gravity with node count: more nodes = stronger pull to center
+        let gravity = if n > 200 { 0.08 } else { 0.05 };
 
         for i in 0..n {
             let dx = cx - self.positions[i].x;
@@ -322,8 +334,8 @@ impl GraphLayout {
 
             // 3b. Soft boundary force: push nodes away from edges more strongly
             // as they approach the margins.
-            let margin_soft = 40.0;
-            let push_strength = 0.15;
+            let margin_soft = 50.0;
+            let push_strength = 0.25; // Increased from 0.15 to prevent wall-clumping
             if self.positions[i].x < margin_soft {
                 fx[i] += (margin_soft - self.positions[i].x) * push_strength;
             } else if self.positions[i].x > self.width - margin_soft {
