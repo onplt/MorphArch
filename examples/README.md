@@ -17,10 +17,10 @@ morpharch scan /path/to/monorepo -n 100
 # Launch the animated TUI
 morpharch watch /path/to/monorepo
 
-# Analyze drift for the current HEAD
+# Analyze architecture for the current HEAD
 morpharch analyze
 
-# View drift trend
+# View health trend
 morpharch list-drift
 ```
 
@@ -62,7 +62,7 @@ morpharch watch . -n 100 -s 50
 | `Esc` | Exit search / quit |
 | `q` | Quit |
 
-## Drift Analysis
+## Architecture Analysis
 
 ```bash
 # Analyze the current HEAD commit
@@ -74,7 +74,7 @@ morpharch analyze abc1234
 # Analyze a relative reference
 morpharch analyze main~10
 
-# View the drift trend over the last 20 commits
+# View the health trend over the last 20 commits
 morpharch list-drift
 
 # List stored graph snapshots
@@ -83,14 +83,14 @@ morpharch list-graphs
 
 ## CI Integration
 
-Add MorphArch to your CI pipeline to track drift over time:
+Add MorphArch to your CI pipeline to track health over time:
 
 ```yaml
-# .github/workflows/drift-check.yml
-name: Drift Check
+# .github/workflows/health-check.yml
+name: Architecture Health Check
 on: [push]
 jobs:
-  drift:
+  health:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -5,7 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-03-05
+
+### Added
+
+- **JavaScript & JSX Support:** Expanded AST parsing to include `.js` and `.jsx` files, enabling architecture analysis for a wider range of monorepos.
+- **k9s-Inspired Dashboard:** Redesigned the TUI insight panel with high-fidelity "Mission Control" aesthetics, featuring key-value alignment, stylized block headers, and clear section separators.
+- **Scientific Absolute Health Scoring:** Transitioned from relative drift to a 0-100 absolute health scale. Higher scores now represent better structural integrity.
+- **Vulnerable Components Table:** Real-time hotspots analysis in the TUI, listing packages with high instability (Uncle Bob's metric) and coupling risk.
+
+### Changed
+
+- **Fair Complexity Thresholds:** Tuned the coupling density penalty to a base threshold of 3.5 connections per package, providing grace for naturally complex large-scale projects like Deno.
+- **Scoring Weight Adjustment:** Prioritized structural correctness (cycles and layer violations) as primary health detractors (-25 and -15 pts respectively).
+- **History Trend Visualization:** Fixed sparkline scaling issues to ensure historical trends remain visually meaningful even during periods of architectural stability.
+
+### Fixed
+
+- **Terminology Alignment:** Unified terminology across the TUI and documentation, moving from "Drift" to "Health" and "Architectural Debt".
+- **Clippy Type Complexity:** Refactored parallel scanning results into clean type aliases to satisfy strict linting rules.
 
 ## [1.0.4] - 2026-03-05
 
@@ -60,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite Persistence:** Durable storage for scan results, graph snapshots, and drift metrics.
 - **Multi-Language Support:** Import extraction for Rust, TypeScript, Python, and Go via tree-sitter.
 
-[Unreleased]: https://github.com/onplt/morpharch/compare/v1.0.3...HEAD
+[1.1.0]: https://github.com/onplt/morpharch/compare/v1.0.4...v1.1.0
+[1.0.4]: https://github.com/onplt/morpharch/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/onplt/morpharch/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/onplt/morpharch/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/onplt/morpharch/compare/v1.0.0...v1.0.1

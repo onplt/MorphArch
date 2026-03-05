@@ -262,6 +262,7 @@ mod tests {
             g.add_node(i.to_string());
         }
         // Add 100 edges -> Density = 5.0
+        // This also creates a large cycle group (SCC).
         for i in 0..20 {
             for j in 1..6 {
                 g.add_edge(
@@ -273,6 +274,7 @@ mod tests {
         }
         let score = calculate_drift(&g, None, &[], &[], 0);
         // Density 5.0. Threshold 3.5. Excess 1.5. Debt = 1.5 * 5 = 7.5 -> 8
-        assert_eq!(score.total, 8);
+        // PLUS 1 Cycle group = 25 debt. Total = 33 debt.
+        assert_eq!(score.total, 33);
     }
 }
