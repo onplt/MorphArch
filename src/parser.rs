@@ -1,7 +1,7 @@
 //! Tree-sitter based import and dependency extractor.
 
 use std::cell::RefCell;
-use std::path::{Component, Path};
+use std::path::{Path};
 use tracing::debug;
 use tree_sitter::{Language as TsLanguage, Node, Parser as TsParser};
 
@@ -17,7 +17,6 @@ pub enum Language {
 const MAX_FILE_SIZE: usize = 512 * 1024;
 
 // Thread-local parser storage to reuse parser instances across files in the same thread.
-// This avoids expensive re-allocation and re-setting the language per file.
 thread_local! {
     static RUST_PARSER: RefCell<TsParser> = RefCell::new(create_parser(tree_sitter_rust::LANGUAGE.into()));
     static TS_PARSER: RefCell<TsParser> = RefCell::new(create_parser(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
@@ -43,41 +42,48 @@ pub fn detect_language(path: &str) -> Option<Language> {
     }
 }
 
+/// Original simple package extraction logic from main branch.
 pub fn extract_package_name(file_path: &Path) -> String {
-    let components: Vec<_> = file_path
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str(),
-            _ => None,
-        })
-        .collect();
+    let path_str = file_path.to_string_lossy().replace('\\', "/");
+    let components: Vec<&str> = path_str.split('/').filter(|c| !c.is_empty()).collect();
 
+    // Single file at root (no directory) → use file stem
     if components.len() <= 1 {
         return file_path
             .file_stem()
-            .map_or_else(|| "".to_string(), |s| s.to_string_lossy().to_string());
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
     }
 
+    // Directory components only (exclude the file name at the end)
     let dirs = &components[..components.len() - 1];
 
-    if let Some(pos) = dirs.iter().position(|&c| c == "packages" || c == "apps") {
+    // Check for monorepo patterns: packages/X/... or apps/X/...
+    if let Some(pos) = dirs.iter().position(|c| *c == "packages" || *c == "apps") {
         if pos + 1 < dirs.len() {
             return dirs[pos + 1].to_string();
         }
     }
 
+    // Skip common meaningless root directories
     const SKIP_ROOTS: &[&str] = &["src", "lib", "internal"];
-    let m_start = if !dirs.is_empty() && SKIP_ROOTS.contains(&dirs[0]) {
+    let meaningful_start = if !dirs.is_empty() && SKIP_ROOTS.contains(&dirs[0]) {
         1
     } else {
         0
     };
-    let meaningful = &dirs[m_start..];
+
+    let meaningful = &dirs[meaningful_start..];
 
     match meaningful.len() {
-        0 => file_path
-            .file_stem()
-            .map_or_else(|| "".to_string(), |s| s.to_string_lossy().to_string()),
+        0 => {
+            file_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        }
         1 => meaningful[0].to_string(),
         _ => format!("{}/{}", meaningful[0], meaningful[1]),
     }
@@ -91,7 +97,6 @@ pub fn parse_imports(content: &str, lang: Language, _file_path: &Path) -> Vec<St
 
     let source = content.as_bytes();
 
-    // Use thread-local parser to avoid re-allocation
     let tree = match lang {
         Language::Rust => RUST_PARSER.with(|p| p.borrow_mut().parse(content, None)),
         Language::TypeScript => TS_PARSER.with(|p| p.borrow_mut().parse(content, None)),

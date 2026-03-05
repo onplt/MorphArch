@@ -96,8 +96,6 @@ struct ScanContext {
 pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanResult> {
     let repo_handle = gix::discover(path).with_context(|| format!("Failed to open repo: {}", path.display()))?;
     
-    // ── 1. FAST HEAD CHECK ──
-    // If the current HEAD is already in the database, we don't need to do anything.
     let head_commit = repo_handle.head_commit().context("Failed to get HEAD")?;
     let head_hash = head_commit.id().to_string();
     
@@ -123,7 +121,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
     };
     commits_raw.reverse();
 
-    let commit_hashes: Vec<String> = commits_raw.iter().map(|c| c.id().to_string()).collect();
+    let commit_hashes: Vec<String> = commit_hashes_from_commits(&commits_raw);
     
     let mut prev_graph: Option<DiGraph<String, ()>> = None;
     if let Some(ref last_hash) = last_commit {
@@ -147,7 +145,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
     for chunk in commit_hashes.chunks(200) {
         db.begin_transaction()?;
         
-        let chunk_results: Vec<Result<(CommitInfo, Vec<DependencyEdge>, HashSet<String>)>> = chunk.par_iter().map(|hash: &String| {
+        let chunk_results: Vec<Result<(CommitInfo, Vec<DependencyEdge>, HashSet<String>, HashSet<String>)>> = chunk.par_iter().map(|hash: &String| {
             let repo = ctx.repo.to_thread_local();
             let commit_oid = gix::ObjectId::from_hex(hash.as_bytes())?;
             let commit_obj = repo.find_object(commit_oid)?.into_commit();
@@ -164,12 +162,15 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
             
             let mut all_nodes = HashSet::new();
             let mut all_edges = Vec::new();
+            let mut source_pkgs = HashSet::new();
             let mut parse_jobs = Vec::new();
 
             for (file_path, blob_oid) in entries {
                 if is_test_path(&file_path) { continue; }
                 let source_pkg = parser::extract_package_name(&file_path);
+                source_pkgs.insert(source_pkg.clone());
                 all_nodes.insert(source_pkg.clone());
+                
                 let oid_key: [u8; 20] = blob_oid.as_bytes().try_into().unwrap_or([0u8; 20]);
 
                 if let Some(cached) = ctx.blob_import_cache.get(&oid_key) {
@@ -187,18 +188,17 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
                 }
             }
 
-            let source_pkgs: HashSet<String> = all_nodes.clone();
             for (source_pkg, oid_key, content, file_path, lang) in parse_jobs {
                 let imports = parser::parse_imports(&content, lang, &file_path);
                 ctx.blob_import_cache.insert(oid_key, imports.clone());
                 collect_edges(&source_pkg, &imports, &file_path.to_string_lossy().replace('\\', "/"), &mut all_nodes, &mut all_edges);
             }
 
-            Ok((commit_info, all_edges, source_pkgs))
+            Ok((commit_info, all_edges, source_pkgs, all_nodes))
         }).collect();
 
         for res in chunk_results {
-            let (commit_info, all_edges, source_pkgs): (CommitInfo, Vec<DependencyEdge>, HashSet<String>) = res?;
+            let (commit_info, all_edges, source_pkgs, all_nodes) = res?;
             db.insert_commit(&commit_info)?;
 
             let mut edge_weight_map: HashMap<(String, String), DependencyEdge> = HashMap::with_capacity(all_edges.len());
@@ -215,9 +215,9 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
                 }
             }
 
-            let kept_nodes: HashSet<String> = source_pkgs.iter().chain(
-                ext_importers.iter().filter(|(_, importers)| importers.len() >= 3).map(|(n, _)| n)
-            ).cloned().collect();
+            let kept_nodes: HashSet<String> = all_nodes.iter().filter(|n| {
+                source_pkgs.contains(*n) || ext_importers.get(*n).is_some_and(|importers| importers.len() >= 3)
+            }).cloned().collect();
 
             let final_edges: Vec<DependencyEdge> = merged_edges.into_iter()
                 .filter(|e| kept_nodes.contains(&e.from_module) && kept_nodes.contains(&e.to_module)).collect();
@@ -243,4 +243,8 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
     }
 
     Ok(ScanResult { commits_scanned: total_commits, graphs_created, drifts_calculated })
+}
+
+fn commit_hashes_from_commits(commits: &[gix::Commit]) -> Vec<String> {
+    commits.iter().map(|c| c.id().to_string()).collect()
 }
