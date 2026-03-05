@@ -86,6 +86,9 @@ rayon = "1.10"
 # Bounded LRU cache
 lru = "0.16"
 
+# Image rendering and GIF encoding for movie export
+image = { version = "0.24", default-features = false, features = ["gif"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

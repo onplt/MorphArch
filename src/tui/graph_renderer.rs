@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Force-directed graph layout using Verlet integration:
-//   1. Repulsion: Coulomb — all node pairs repel (K / d^2)
+//   1. Repulsion: Barnes-Hut — optimized O(V log V) repulsion using Quadtree
 //   2. Attraction: Hooke spring — edge-connected nodes attract toward ideal length
 //   3. Center gravity: Gentle pull toward canvas center prevents drift
 //   4. Micro-jitter: Temperature-scaled random perturbation for organic feel
@@ -14,7 +14,7 @@
 // The ideal edge length adapts dynamically to node count and canvas area,
 // ensuring good layouts for both small (3 nodes) and large (100+) graphs.
 //
-// Performance: O(V^2) repulsion + O(E) attraction — <4ms at 500 nodes
+// Performance: O(V log V) repulsion + O(E) attraction
 //
 // Coloring: Green -> red gradient based on drift score (Catppuccin Mocha)
 // =============================================================================
@@ -35,6 +35,129 @@ pub struct NodePosition {
     pub prev_y: f64,
     /// Whether the node is pinned (for mouse drag)
     pub pinned: bool,
+}
+
+/// Barnes-Hut Quadtree for O(V log V) repulsion.
+struct Quadtree {
+    mass: f64,
+    com_x: f64,
+    com_y: f64,
+    x: f64,
+    y: f64,
+    size: f64,
+    children: Option<Box<[Quadtree; 4]>>,
+    node_idx: Option<usize>,
+    depth: usize,
+}
+
+const MAX_QUADTREE_DEPTH: usize = 20;
+
+impl Quadtree {
+    fn new(x: f64, y: f64, size: f64, depth: usize) -> Self {
+        Self {
+            mass: 0.0,
+            com_x: 0.0,
+            com_y: 0.0,
+            x,
+            y,
+            size,
+            children: None,
+            node_idx: None,
+            depth,
+        }
+    }
+
+    fn insert(&mut self, idx: usize, px: f64, py: f64) {
+        // If this node already has mass but no children, we need to split
+        // or just add to the current node if we've reached max depth.
+        if self.mass > 0.0 && self.children.is_none() {
+            // Check depth to prevent infinite recursion if positions are identical
+            if self.depth >= MAX_QUADTREE_DEPTH {
+                // At max depth, just update center of mass/mass but don't split.
+                // This essentially treats the nodes as a single mass at this point.
+                let new_mass = self.mass + 1.0;
+                self.com_x = (self.com_x * self.mass + px) / new_mass;
+                self.com_y = (self.com_y * self.mass + py) / new_mass;
+                self.mass = new_mass;
+                return;
+            }
+
+            let half = self.size / 2.0;
+            let d = self.depth + 1;
+            let mut children = Box::new([
+                Quadtree::new(self.x, self.y, half, d),
+                Quadtree::new(self.x + half, self.y, half, d),
+                Quadtree::new(self.x, self.y + half, half, d),
+                Quadtree::new(self.x + half, self.y + half, half, d),
+            ]);
+
+            if let Some(old_idx) = self.node_idx.take() {
+                let ox = self.com_x;
+                let oy = self.com_y;
+                let q = self.get_quadrant(ox, oy);
+                children[q].insert(old_idx, ox, oy);
+            }
+            self.children = Some(children);
+        }
+
+        let q = self.get_quadrant(px, py);
+        if let Some(children) = &mut self.children {
+            children[q].insert(idx, px, py);
+        } else {
+            // First node in this leaf
+            self.node_idx = Some(idx);
+            self.com_x = px;
+            self.com_y = py;
+        }
+
+        // Update center of mass
+        let new_mass = self.mass + 1.0;
+        self.com_x = (self.com_x * self.mass + px) / new_mass;
+        self.com_y = (self.com_y * self.mass + py) / new_mass;
+        self.mass = new_mass;
+    }
+
+    fn get_quadrant(&self, px: f64, py: f64) -> usize {
+        let mid_x = self.x + self.size / 2.0;
+        let mid_y = self.y + self.size / 2.0;
+        match (px >= mid_x, py >= mid_y) {
+            (false, false) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (true, true) => 3,
+        }
+    }
+
+    fn compute_repulsion(
+        &self,
+        idx: usize,
+        px: f64,
+        py: f64,
+        theta: f64,
+        repulsion_const: f64,
+        fx: &mut f64,
+        fy: &mut f64,
+    ) {
+        if self.mass == 0.0 || (self.node_idx == Some(idx)) {
+            return;
+        }
+
+        let dx = self.com_x - px;
+        let dy = self.com_y - py;
+        let dist_sq = dx * dx + dy * dy;
+        let dist = dist_sq.sqrt().max(0.5);
+
+        // Barnes-Hut criterion: s / d < theta
+        if self.children.is_none() || (self.size / dist < theta) {
+            let force = (repulsion_const * self.mass) / dist_sq.max(1.0);
+            *fx -= force * (dx / dist);
+            *fy -= force * (dy / dist);
+        } else if let Some(children) = &self.children {
+            for child in children.iter() {
+                child.compute_repulsion(idx, px, py, theta, repulsion_const, fx, fy);
+            }
+        }
+    }
 }
 
 /// Force-directed graph layout engine using Verlet integration.
@@ -125,7 +248,7 @@ impl GraphLayout {
     /// Advances one Verlet physics step.
     ///
     /// # Algorithm
-    /// 1. Coulomb repulsion for every node pair (O(V^2))
+    /// 1. Barnes-Hut repulsion using Quadtree (O(V log V))
     /// 2. Hooke spring attraction for every edge (O(E))
     /// 3. Center gravity pull (O(V))
     /// 4. Temperature-scaled micro-jitter (O(V))
@@ -144,23 +267,26 @@ impl GraphLayout {
         // Temperature-scaled force multiplier (hot = stronger forces for exploration)
         let temp_scale = 0.5 + self.temperature * 0.5; // range [0.5, 1.0]
 
-        // 1. Repulsion (Coulomb): every pair repels
+        // 1. Barnes-Hut Repulsion: build quadtree then compute forces
+        let q_size = self.width.max(self.height).max(1.0);
+        let mut qt = Quadtree::new(0.0, 0.0, q_size, 0);
+        for (i, pos) in self.positions.iter().enumerate() {
+            qt.insert(i, pos.x, pos.y);
+        }
+
+        let theta = 0.7; // Barnes-Hut approximation threshold
+        let repulsion_const = self.repulsion * temp_scale;
+
         for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = self.positions[i].x - self.positions[j].x;
-                let dy = self.positions[i].y - self.positions[j].y;
-                let dist_sq = dx * dx + dy * dy;
-                let dist = dist_sq.sqrt().max(0.5);
-
-                let force = self.repulsion * temp_scale / dist_sq.max(1.0);
-                let ux = dx / dist;
-                let uy = dy / dist;
-
-                fx[i] += force * ux;
-                fy[i] += force * uy;
-                fx[j] -= force * ux;
-                fy[j] -= force * uy;
-            }
+            qt.compute_repulsion(
+                i,
+                self.positions[i].x,
+                self.positions[i].y,
+                theta,
+                repulsion_const,
+                &mut fx[i],
+                &mut fy[i],
+            );
         }
 
         // 2. Attraction (Hooke spring): connected nodes attract toward ideal length

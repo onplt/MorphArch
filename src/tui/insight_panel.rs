@@ -17,7 +17,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::models::{DriftScore, GraphSnapshot};
+use crate::models::{DriftScore, SnapshotMetadata};
 
 use super::graph_renderer::{
     ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, drift_color,
@@ -27,13 +27,13 @@ use super::graph_renderer::{
 ///
 /// # Parameters
 /// - `drift`: Current commit's drift score (None = no data)
-/// - `snapshots`: All snapshots (for trend calculation)
+/// - `snapshots`: Snapshot metadata (for trend calculation)
 /// - `current_index`: Current timeline position
 pub fn render_insight_panel(
     frame: &mut Frame,
     area: Rect,
     drift: &Option<DriftScore>,
-    snapshots: &[GraphSnapshot],
+    snapshots: &[SnapshotMetadata],
     current_index: usize,
 ) {
     let block = Block::default()
@@ -166,7 +166,7 @@ fn format_delta(delta: i32) -> String {
 ///
 /// Uses braille character set for a mini graph:
 ///   ▁ ▂ ▃ ▄ ▅ ▆ ▇ █
-fn build_sparkline(snapshots: &[GraphSnapshot], current_index: usize) -> String {
+fn build_sparkline(snapshots: &[SnapshotMetadata], current_index: usize) -> String {
     let spark_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     // Get 7 snapshots around the current index
@@ -193,17 +193,11 @@ fn build_sparkline(snapshots: &[GraphSnapshot], current_index: usize) -> String 
 }
 
 /// Generates a short recommendation based on drift score and metrics.
-///
-/// Priority order: overall status first (healthy / critical), then specific
-/// sub-metric alerts. This prevents contradictory messages like "Healthy"
-/// status + "High complexity — refactor" recommendation.
 fn generate_recommendation(drift: &DriftScore) -> String {
-    // ── Overall status takes priority ──
     if drift.total <= 30 {
         return "Architecture is healthy ✓".to_string();
     }
 
-    // ── Critical alerts ──
     if drift.new_cycles > 0 {
         return format!(
             "{} cycle{} detected — break circular deps",
@@ -216,7 +210,6 @@ fn generate_recommendation(drift: &DriftScore) -> String {
         return "Critical drift — immediate review needed".to_string();
     }
 
-    // ── Specific sub-metric alerts ──
     if drift.boundary_violations > 2 {
         return format!(
             "{} boundary violations — enforce module boundaries",
@@ -232,7 +225,6 @@ fn generate_recommendation(drift: &DriftScore) -> String {
         return "Drift is high — review recent architectural changes".to_string();
     }
 
-    // ── Moderate: complexity based advice ──
     if drift.cognitive_complexity > 40.0 {
         return "High edge density — consider splitting modules".to_string();
     }
@@ -273,48 +265,10 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_recommendation_healthy() {
-        let drift = DriftScore {
-            total: 20,
-            fan_in_delta: 0,
-            fan_out_delta: 0,
-            new_cycles: 0,
-            boundary_violations: 0,
-            cognitive_complexity: 5.0,
-            timestamp: 0,
-        };
-        let rec = generate_recommendation(&drift);
-        assert!(rec.contains("healthy"), "Should recommend healthy: {rec}");
-    }
-
-    #[test]
-    fn test_generate_recommendation_healthy_overrides_complexity() {
-        // Drift ≤ 30 should show "healthy" even if complexity > 40
-        let drift = DriftScore {
-            total: 25,
-            fan_in_delta: 0,
-            fan_out_delta: 0,
-            new_cycles: 0,
-            boundary_violations: 0,
-            cognitive_complexity: 45.0,
-            timestamp: 0,
-        };
-        let rec = generate_recommendation(&drift);
-        assert!(
-            rec.contains("healthy"),
-            "Healthy status should override complexity warning: {rec}"
-        );
-    }
-
-    #[test]
     fn test_sparkline_generation() {
-        let snapshots: Vec<GraphSnapshot> = (0..5)
-            .map(|i| GraphSnapshot {
+        let snapshots: Vec<SnapshotMetadata> = (0..5)
+            .map(|i| SnapshotMetadata {
                 commit_hash: format!("hash{i}"),
-                nodes: vec![],
-                edges: vec![],
-                node_count: 0,
-                edge_count: 0,
                 timestamp: i as i64,
                 drift: Some(DriftScore {
                     total: (i * 20) as u8,

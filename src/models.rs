@@ -56,6 +56,14 @@ pub struct GraphSnapshot {
     pub drift: Option<DriftScore>,
 }
 
+/// Lighter version of GraphSnapshot for UI lists and timelines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotMetadata {
+    pub commit_hash: String,
+    pub timestamp: i64,
+    pub drift: Option<DriftScore>,
+}
+
 /// Architecture drift score — measures graph "health" (0-100).
 ///
 /// Score 0 = perfect architecture, 100 = fully chaotic.

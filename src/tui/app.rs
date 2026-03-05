@@ -28,6 +28,7 @@
 //   Click+Drag -> Move any node (pins during drag, unpins on release)
 // =============================================================================
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -40,7 +41,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::models::{DriftScore, GraphSnapshot};
+use crate::db::Database;
+use crate::models::{DriftScore, GraphSnapshot, SnapshotMetadata};
 
 use super::graph_renderer::{
     ACCENT_BLUE, ACCENT_LAVENDER, ACCENT_MAUVE, BG_BASE, BG_SURFACE, FG_OVERLAY, FG_TEXT,
@@ -52,30 +54,34 @@ use super::widgets::render_package_list;
 
 /// Returns the number of physics steps scaled inversely with node count.
 ///
-/// O(N²) repulsion makes large graphs extremely expensive per step.
+/// Barnes-Hut O(N log N) repulsion is much cheaper than O(N²).
 /// This helper keeps total work roughly constant regardless of graph size:
 ///
-///   N ≤ 50  → full `base` steps  (small graphs settle instantly)
-///   N > 50  → base × 50 / N      (budget scales down linearly)
+///   N ≤ 100 → full `base` steps  (small graphs settle instantly)
+///   N > 100 → base × 100 / N     (budget scales down linearly)
 ///
 /// The result is clamped to `[min, base]` so we always make *some*
 /// progress but never exceed the original budget.
 fn adaptive_steps(n_nodes: usize, base: usize, min: usize) -> usize {
-    if n_nodes <= 50 {
+    if n_nodes <= 100 {
         base
     } else {
-        (base * 50 / n_nodes).clamp(min, base)
+        (base * 100 / n_nodes).clamp(min, base)
     }
 }
 
 /// Main TUI application state
 pub struct App {
+    /// SQLite database for lazy-loading snapshots
+    pub db: Option<Database>,
     /// Verlet physics engine for graph layout
     pub graph_layout: GraphLayout,
     /// Timeline slider state
     pub timeline: TimelineState,
-    /// Loaded graph snapshots (index = timeline index)
-    pub snapshots: Vec<GraphSnapshot>,
+    /// Metadata for all sampled snapshots in the timeline
+    pub snapshots_metadata: Vec<SnapshotMetadata>,
+    /// Cache of loaded full graph snapshots
+    pub snapshot_cache: HashMap<String, GraphSnapshot>,
     /// Current commit's drift score
     pub current_drift: Option<DriftScore>,
     /// Auto-play active
@@ -113,13 +119,16 @@ pub struct App {
     pub pkg_panel_width: u16,
     /// Whether the user is currently dragging the packages panel border
     pub resizing_pkg: bool,
+    /// Whether the user is currently dragging the timeline slider
+    pub dragging_timeline: bool,
 }
 
 impl App {
     /// Creates a new TUI application.
     ///
-    /// `snapshots` are graph snapshots loaded from the database (newest -> oldest).
-    pub fn new(snapshots: Vec<GraphSnapshot>) -> Self {
+    /// `snapshots` are initial full snapshots. If `db` is provided,
+    /// further snapshots can be loaded lazily if they were only provided as metadata.
+    pub fn new(db: Option<Database>, snapshots: Vec<GraphSnapshot>) -> Self {
         let timeline_commits: Vec<(String, String, i64)> = snapshots
             .iter()
             .map(|s| (s.commit_hash.clone(), String::new(), s.timestamp))
@@ -127,27 +136,42 @@ impl App {
 
         let timeline = TimelineState::new(timeline_commits);
 
-        // Initial graph layout
-        let (labels, edges, weights) = if let Some(first) = snapshots.first() {
-            snapshot_to_layout_data(first)
+        let snapshots_metadata: Vec<SnapshotMetadata> = snapshots
+            .iter()
+            .map(|s| SnapshotMetadata {
+                commit_hash: s.commit_hash.clone(),
+                timestamp: s.timestamp,
+                drift: s.drift.clone(),
+            })
+            .collect();
+
+        let mut snapshot_cache = HashMap::new();
+        for s in snapshots {
+            snapshot_cache.insert(s.commit_hash.clone(), s);
+        }
+
+        // Initial graph layout from first snapshot
+        let (labels, edges, weights) = if let Some(first_meta) = snapshots_metadata.first() {
+            if let Some(first) = snapshot_cache.get(&first_meta.commit_hash) {
+                snapshot_to_layout_data(first)
+            } else {
+                (vec![], vec![], vec![])
+            }
         } else {
             (vec![], vec![], vec![])
         };
 
-        // Placeholder dimensions — will be resized to actual canvas on first render.
-        // Using a square avoids aspect-ratio distortion during the initial resize.
         let graph_layout = GraphLayout::new(labels, edges, weights, 500.0, 500.0);
-        // Warmup is deferred to the first render frame (needs_warmup flag)
-        // so the physics simulation runs at the real canvas dimensions.
-
-        let current_drift = snapshots.first().and_then(|s| s.drift.clone());
+        let current_drift = snapshots_metadata.first().and_then(|m| m.drift.clone());
 
         let now = Instant::now();
 
         Self {
+            db,
             graph_layout,
             timeline,
-            snapshots,
+            snapshots_metadata,
+            snapshot_cache,
             current_drift,
             is_playing: false,
             show_search: false,
@@ -166,34 +190,47 @@ impl App {
             timeline_area: Rect::default(),
             pkg_panel_width: 22,
             resizing_pkg: false,
+            dragging_timeline: false,
         }
     }
 
     /// Updates timeline commit info from external source.
-    ///
-    /// The watch command fetches commit messages from the DB and sets them here.
     pub fn set_timeline_commits(&mut self, commits: Vec<(String, String, i64)>) {
         self.timeline = TimelineState::new(commits);
     }
 
     /// Updates the graph for the current timeline position's snapshot.
+    /// Loads from DB if not in cache (lazy loading).
     fn update_graph_for_current_commit(&mut self) {
         let idx = self.timeline.current_index;
-        if let Some(snapshot) = self.snapshots.get(idx) {
+        let meta = match self.snapshots_metadata.get(idx) {
+            Some(m) => m,
+            None => return,
+        };
+
+        // Try cache first
+        let hash = meta.commit_hash.clone();
+        if !self.snapshot_cache.contains_key(&hash) {
+            if let Some(db) = &self.db {
+                if let Ok(Some(snapshot)) = db.get_graph_snapshot(&hash) {
+                    self.snapshot_cache.insert(hash.clone(), snapshot);
+                }
+            }
+        }
+
+        if let Some(snapshot) = self.snapshot_cache.get(&hash) {
             let (labels, edges, weights) = snapshot_to_layout_data(snapshot);
             self.graph_layout.update_graph(labels, edges, weights);
             self.current_drift = snapshot.drift.clone();
             // Cancel any in-progress drag and reset scroll
             self.dragging_node = None;
             self.pkg_scroll_offset = 0;
-            // Zero out velocity for all nodes to prevent momentum-induced
-            // edge trails when jumping between commits
+            // Zero out velocity for all nodes
             for pos in &mut self.graph_layout.positions {
                 pos.prev_x = pos.x;
                 pos.prev_y = pos.y;
             }
-            // Heavy warmup to fully settle the layout, then center and freeze.
-            // Steps scale inversely with node count (O(N²) repulsion).
+            // Warmup
             let n = self.graph_layout.positions.len();
             let steps = adaptive_steps(n, 300, 3);
             self.graph_layout.multi_step(steps);
@@ -220,8 +257,7 @@ impl App {
         }
     }
 
-    /// Jumps timeline by `n` positions (positive = forward/older, negative = backward/newer).
-    /// Updates the graph if the position changed.
+    /// Jumps timeline by `n` positions.
     pub fn jump_commit(&mut self, n: isize) {
         let old_idx = self.timeline.current_index;
         self.timeline.jump_by(n);
@@ -257,10 +293,7 @@ impl App {
         }
     }
 
-    /// Reheats the graph layout (re-energizes with high temperature).
-    ///
-    /// Keeps current positions but boosts temperature so nodes explore
-    /// and find a potentially better equilibrium.
+    /// Reheats the graph layout.
     pub fn reheat_layout(&mut self) {
         self.graph_layout.reheat();
     }
@@ -294,7 +327,6 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Esc => {
-                // If there's an active search, clear it first; otherwise quit
                 if !self.search_query.is_empty() {
                     self.search_query.clear();
                 } else {
@@ -307,7 +339,6 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.prev_commit();
             }
-            // Page jump: ±10 commits
             KeyCode::Char('J') => {
                 self.jump_commit(10);
             }
@@ -326,7 +357,6 @@ impl App {
             KeyCode::PageUp => {
                 self.jump_commit(-10);
             }
-            // Home/End: first/last commit
             KeyCode::Home | KeyCode::Char('g') => {
                 self.jump_to_first();
             }
@@ -336,9 +366,7 @@ impl App {
             KeyCode::Char('G') => {
                 self.jump_to_last();
             }
-            // Auto-play speed control
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                // Faster (shorter interval), minimum 200ms
                 let ms = self.auto_play_interval.as_millis() as u64;
                 let new_ms = if ms > 500 {
                     ms - 250
@@ -348,7 +376,6 @@ impl App {
                 self.auto_play_interval = Duration::from_millis(new_ms);
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
-                // Slower (longer interval), maximum 5000ms
                 let ms = self.auto_play_interval.as_millis() as u64;
                 let new_ms = if ms < 500 {
                     ms + 100
@@ -362,15 +389,12 @@ impl App {
                 self.last_auto_advance = Instant::now();
             }
             KeyCode::Char('r') => {
-                // Reheat: re-energize the simulation without changing positions
                 self.reheat_layout();
             }
             KeyCode::Char('[') => {
-                // Scroll package list up
                 self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(5);
             }
             KeyCode::Char(']') => {
-                // Scroll package list down
                 self.pkg_scroll_offset = self
                     .pkg_scroll_offset
                     .saturating_add(5)
@@ -380,7 +404,6 @@ impl App {
                 self.show_search = true;
                 self.search_query.clear();
             }
-            // Ctrl+C also quits
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
@@ -389,20 +412,15 @@ impl App {
     }
 
     /// Processes mouse events for node drag interaction.
-    ///
-    /// Maps terminal coordinates to physics space to find/move the closest node.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let col = mouse.column;
         let row = mouse.row;
 
-        // ── Panel resize: drag the right border of packages panel ──
-        // Check if mouse is on (or very near) the packages panel right border
         let pkg_right_border = self.pkg_area.x + self.pkg_area.width;
         let on_pkg_border = (col as i16 - pkg_right_border as i16).unsigned_abs() <= 1
             && row >= self.pkg_area.y
             && row < self.pkg_area.y + self.pkg_area.height;
 
-        // Handle ongoing resize drag (takes priority over everything else)
         if self.resizing_pkg {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left)
@@ -419,14 +437,12 @@ impl App {
             }
         }
 
-        // Start resize on border click
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_pkg_border {
             self.resizing_pkg = true;
             return;
         }
 
         let area = self.graph_area;
-        // Inner canvas area (inside the 1-cell border)
         let inner_x = area.x + 1;
         let inner_y = area.y + 1;
         let inner_w = area.width.saturating_sub(2);
@@ -436,14 +452,12 @@ impl App {
             return;
         }
 
-        // Check if the mouse is inside the graph canvas
         let in_canvas =
             col >= inner_x && col < inner_x + inner_w && row >= inner_y && row < inner_y + inner_h;
 
-        // Check if click is inside the timeline panel (for seek-by-click)
         let tl = self.timeline_area;
-        let tl_inner_x = tl.x + 1; // inside border
-        let tl_inner_w = tl.width.saturating_sub(3); // exclude border + padding
+        let tl_inner_x = tl.x + 1;
+        let tl_inner_w = tl.width.saturating_sub(3);
         let in_timeline = col >= tl.x
             && col < tl.x + tl.width
             && row >= tl.y
@@ -452,30 +466,38 @@ impl App {
             && !self.timeline.is_empty();
 
         match mouse.kind {
-            // Timeline click → seek to position
+            // Timeline drag start
             MouseEventKind::Down(MouseButton::Left) if in_timeline => {
+                self.dragging_timeline = true;
+                self.is_playing = false; // pause when dragging
                 let rel_x = col.saturating_sub(tl_inner_x) as f64;
                 let bar_w = tl_inner_w.max(1) as f64;
                 let ratio = (rel_x / bar_w).clamp(0.0, 1.0);
                 let target = (ratio * (self.timeline.len() - 1) as f64).round() as usize;
                 self.seek_to(target);
             }
+            // Timeline dragging
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_timeline => {
+                let rel_x = col.saturating_sub(tl_inner_x) as f64;
+                let bar_w = tl_inner_w.max(1) as f64;
+                let ratio = (rel_x / bar_w).clamp(0.0, 1.0);
+                let target = (ratio * (self.timeline.len() - 1) as f64).round() as usize;
+                self.seek_to(target);
+            }
+            // Timeline drag end
+            MouseEventKind::Up(MouseButton::Left) if self.dragging_timeline => {
+                self.dragging_timeline = false;
+            }
             MouseEventKind::Down(MouseButton::Left) if in_canvas => {
-                // Release any orphaned drag first (handles missed Up events).
-                // Some terminals don't reliably deliver MouseEventKind::Up,
-                // leaving dragging_node set and the old node permanently pinned.
                 if let Some(old_idx) = self.dragging_node.take() {
                     if old_idx < self.graph_layout.positions.len() {
                         self.graph_layout.positions[old_idx].pinned = false;
                     }
                 }
 
-                // Map terminal coordinates to physics space
                 let (px, py) =
                     self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
 
-                // Find the closest node within a grab radius.
-                // Scale with canvas size so drag works on large terminals too.
                 let diag =
                     (self.graph_layout.width.powi(2) + self.graph_layout.height.powi(2)).sqrt();
                 let grab_radius = (diag * 0.06).max(30.0);
@@ -492,8 +514,6 @@ impl App {
                 if let Some((idx, _)) = closest {
                     self.dragging_node = Some(idx);
                     self.graph_layout.positions[idx].pinned = true;
-                    // Low temperature for gentle spring forces during drag.
-                    // Physics runs during drag regardless of T (via tick_physics check).
                     if self.graph_layout.temperature < 0.05 {
                         self.graph_layout.temperature = 0.05;
                     }
@@ -504,7 +524,6 @@ impl App {
                     if idx < self.graph_layout.positions.len() {
                         let (px, py) =
                             self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                        // Move the node directly to the mouse position
                         self.graph_layout.positions[idx].x = px;
                         self.graph_layout.positions[idx].y = py;
                         self.graph_layout.positions[idx].prev_x = px;
@@ -515,22 +534,16 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 if let Some(idx) = self.dragging_node.take() {
                     if idx < self.graph_layout.positions.len() {
-                        // Keep the released node pinned during burst-settle so it
-                        // stays exactly where the user placed it. Only connected
-                        // nodes adjust their positions around it.
                         let n = self.graph_layout.positions.len();
                         let steps = adaptive_steps(n, 80, 5);
                         self.graph_layout.temperature = 0.15;
                         self.graph_layout.multi_step(steps);
-                        // Now unpin and freeze the entire graph.
                         self.graph_layout.positions[idx].pinned = false;
                         self.graph_layout.temperature = 0.01;
                     }
                 }
             }
             MouseEventKind::Moved => {
-                // Mouse moved without any button held.  If we still have an
-                // active drag, the Up event was lost — release it now.
                 if let Some(idx) = self.dragging_node.take() {
                     if idx < self.graph_layout.positions.len() {
                         self.graph_layout.positions[idx].pinned = false;
@@ -539,7 +552,6 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
-                // Scroll packages panel if mouse is over it
                 let pkg = self.pkg_area;
                 if col >= pkg.x
                     && col < pkg.x + pkg.width
@@ -579,7 +591,6 @@ impl App {
         let norm_x = (col.saturating_sub(inner_x) as f64) / inner_w.max(1) as f64;
         let norm_y = (row.saturating_sub(inner_y) as f64) / inner_h.max(1) as f64;
         let px = norm_x * self.graph_layout.width;
-        // Y is inverted: terminal row 0 = top = physics height
         let py = (1.0 - norm_y) * self.graph_layout.height;
         (px, py)
     }
@@ -590,17 +601,13 @@ impl App {
             self.next_commit();
             self.last_auto_advance = Instant::now();
 
-            // Stop at last commit
             if self.timeline.current_index + 1 >= self.timeline.len() {
                 self.is_playing = false;
             }
         }
     }
 
-    /// Advances physics (multiple sub-steps for smooth, visible motion).
-    /// Skips physics entirely when the graph has settled (T < 2%) and no
-    /// drag is in progress, so the graph is completely static once cooled.
-    /// Steps scale with node count to maintain ~30 fps even for large graphs.
+    /// Advances physics.
     pub fn tick_physics(&mut self) {
         if self.graph_layout.temperature >= 0.02 || self.dragging_node.is_some() {
             let n = self.graph_layout.positions.len();
@@ -611,19 +618,24 @@ impl App {
     }
 }
 
-/// Converts a GraphSnapshot to layout data (labels + edge index pairs + edge weights).
+/// Converts a GraphSnapshot to layout data.
 fn snapshot_to_layout_data(
     snapshot: &GraphSnapshot,
 ) -> (Vec<String>, Vec<(usize, usize)>, Vec<u32>) {
     let labels = snapshot.nodes.clone();
 
-    // Convert edges to index pairs with corresponding weights
+    let label_to_idx: std::collections::HashMap<&String, usize> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l, i))
+        .collect();
+
     let mut edges: Vec<(usize, usize)> = Vec::new();
     let mut weights: Vec<u32> = Vec::new();
 
     for e in &snapshot.edges {
-        let from_idx = labels.iter().position(|l| l == &e.from_module);
-        let to_idx = labels.iter().position(|l| l == &e.to_module);
+        let from_idx = label_to_idx.get(&e.from_module).copied();
+        let to_idx = label_to_idx.get(&e.to_module).copied();
         if let (Some(f), Some(t)) = (from_idx, to_idx) {
             edges.push((f, t));
             weights.push(e.weight);
@@ -637,27 +649,23 @@ fn snapshot_to_layout_data(
 pub fn render_app(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
 
-    // Background color — fill entire screen
     let background = Block::default().style(Style::default().bg(BG_BASE));
     frame.render_widget(background, size);
 
-    // Main vertical split: [top panels | timeline]
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(4)])
         .split(size);
 
-    // Top horizontal split: [package list | graph | drift insight]
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(app.pkg_panel_width), // Left panel: package list (resizable)
-            Constraint::Min(30),                     // Center: graph canvas
-            Constraint::Length(32),                  // Right panel: drift insight
+            Constraint::Length(app.pkg_panel_width),
+            Constraint::Min(30),
+            Constraint::Length(32),
         ])
         .split(main_chunks[0]);
 
-    // -- Left panel: Package list --
     render_package_list(
         frame,
         top_chunks[0],
@@ -666,39 +674,26 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
         app.pkg_scroll_offset,
     );
 
-    // -- Center: Graph Canvas --
     render_graph_canvas(frame, top_chunks[1], app);
 
-    // -- Right panel: Drift Insight --
     render_insight_panel(
         frame,
         top_chunks[2],
         &app.current_drift,
-        &app.snapshots,
+        &app.snapshots_metadata,
         app.timeline.current_index,
     );
 
-    // -- Bottom panel: Timeline --
     render_timeline(frame, main_chunks[1], &app.timeline);
 
-    // -- Search overlay (inside graph panel, bottom-left) --
     if app.show_search {
         render_search_overlay(frame, top_chunks[1], &app.search_query);
     }
 
-    // -- Status bar (play/pause, fps, commit count) --
     render_status_bar(frame, size, app);
 }
 
-/// Renders the Graph Canvas with Verlet physics positions.
-///
-/// Features:
-/// - Weight-based edge coloring (dim for low-traffic, bright for heavy dependencies)
-/// - Single line per edge (minimal ANSI payload — prevents xterm.js frame dropping)
-/// - Clean single dot per node (no braille circle artifacts)
-/// - Individual node colors from Catppuccin palette
-/// - Drift-colored panel border
-/// - Temperature gauge in title
+/// Renders the Graph Canvas.
 pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     let canvas_w = (area.width.saturating_sub(2) as f64) * 2.0;
     let canvas_h = (area.height.saturating_sub(2) as f64) * 4.0;
@@ -707,10 +702,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         app.graph_layout.resize(canvas_w, canvas_h);
     }
 
-    // Deferred warmup: place nodes and run physics at the real canvas dimensions.
-    // This avoids the aspect-ratio distortion from hardcoded initial dimensions.
-    // Steps scale inversely with node count to keep warmup under ~100ms even for
-    // large graphs (500+ nodes).
     if app.needs_warmup {
         let n = app.graph_layout.positions.len();
         let steps = adaptive_steps(n, 300, 3);
@@ -721,8 +712,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         app.needs_warmup = false;
     }
 
-    // ── Search filtering ──
-    // When a search query is active, show only matched nodes + their neighbors.
     let search_active = !app.search_query.is_empty();
     let (search_matched, search_visible) = if search_active {
         let query_lower = app.search_query.to_lowercase();
@@ -772,32 +761,25 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .border_style(Style::default().fg(drift_color(drift_score)))
         .style(Style::default().bg(BG_SURFACE));
 
-    let canvas_width = area.width.saturating_sub(2) as f64 * 2.0; // Braille = 2 dots per cell horizontally
-    let canvas_height = area.height.saturating_sub(2) as f64 * 4.0; // Braille = 4 dots per cell vertically
+    let canvas_width = area.width.saturating_sub(2) as f64 * 2.0;
+    let canvas_height = area.height.saturating_sub(2) as f64 * 4.0;
 
     let layout = &app.graph_layout;
 
-    // Snap each node position to the terminal cell center so that
-    // edge lines and ● text markers share the exact same cell.
-    // Without snapping, ctx.print() rounds to the cell grid while
-    // braille lines use sub-cell precision — causing a visible gap.
     let snapped: Vec<(f64, f64)> = layout
         .positions
         .iter()
         .map(|pos| {
             let raw_x = (pos.x / layout.width) * canvas_width;
             let raw_y = (pos.y / layout.height) * canvas_height;
-            // Cell dimensions in braille-dot units
-            let cell_w = 2.0_f64; // 2 braille dots per cell horizontally
-            let cell_h = 4.0_f64; // 4 braille dots per cell vertically
+            let cell_w = 2.0_f64;
+            let cell_h = 4.0_f64;
             let sx = (raw_x / cell_w).floor() * cell_w + cell_w / 2.0;
             let sy = (raw_y / cell_h).floor() * cell_h + cell_h / 2.0;
             (sx, sy)
         })
         .collect();
 
-    // ── Edge data: sort by weight so heavy edges render last (on top) ──
-    // For large graphs, limit visible edges to prevent terminal buffer overflow.
     let n_nodes = layout.positions.len();
     let max_edges = if n_nodes > 200 {
         400
@@ -812,7 +794,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .enumerate()
         .filter_map(|(idx, &(from, to))| {
-            // When searching, hide edges whose endpoints aren't both visible
             if search_active && (!search_visible.contains(&from) || !search_visible.contains(&to)) {
                 return None;
             }
@@ -828,27 +809,20 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    // Sort by weight ascending → heavy edges drawn last (visually on top)
     edge_data.sort_by_key(|e| e.5);
-    // Keep only top-weight edges when graph is large
     if edge_data.len() > max_edges {
         let skip = edge_data.len() - max_edges;
         edge_data = edge_data.into_iter().skip(skip).collect();
     }
 
-    // ── Label density control ──
-    // When N > 80, only show labels for the most-connected (highest degree) nodes.
-    // This prevents the "wall of text" that makes large graphs unreadable.
     let max_labels = if n_nodes > 200 {
-        // ~15% of nodes get labels, at least 20
         (n_nodes / 7).clamp(20, 60)
     } else if n_nodes > 80 {
         (n_nodes / 3).max(20)
     } else {
-        n_nodes // small graphs: label everything
+        n_nodes
     };
 
-    // Compute per-node degree (in + out) to decide which nodes get labels
     let mut degree: Vec<usize> = vec![0; n_nodes];
     for &(from, to) in &layout.edges {
         if from < n_nodes {
@@ -858,10 +832,9 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             degree[to] += 1;
         }
     }
-    // Build a set of indices whose degree is in the top-N
     let label_visible: std::collections::HashSet<usize> = {
         let mut ranked: Vec<(usize, usize)> = degree.iter().copied().enumerate().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1)); // highest degree first
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
         ranked
             .into_iter()
             .take(max_labels)
@@ -869,7 +842,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             .collect()
     };
 
-    // Node rendering data (snapped position + label + color + is_matched).
     let label_max_len: usize = if n_nodes > 200 {
         10
     } else if n_nodes > 80 {
@@ -881,17 +853,11 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .enumerate()
         .filter_map(|(i, &(x, y))| {
-            // When searching, hide nodes that aren't in the visible set
             if search_active && !search_visible.contains(&i) {
                 return None;
             }
             let is_matched = search_active && search_matched.contains(&i);
-            // When searching, show labels on ALL visible nodes (set is small)
-            let show_label = if search_active {
-                true
-            } else {
-                label_visible.contains(&i)
-            };
+            let show_label = if search_active { true } else { label_visible.contains(&i) };
             let label = if show_label && i < layout.labels.len() {
                 let l = &layout.labels[i];
                 if l.len() > label_max_len {
@@ -900,10 +866,10 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                     l.clone()
                 }
             } else {
-                String::new() // no label for low-degree nodes
+                String::new()
             };
             let color = if is_matched {
-                Color::Rgb(255, 232, 115) // bright yellow for matched nodes
+                Color::Rgb(255, 232, 115)
             } else {
                 NODE_PALETTE[i % NODE_PALETTE.len()]
             };
@@ -911,7 +877,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    // ── Helper: scale an RGB color's brightness ────────────────────
     fn scale_color(c: Color, factor: f64) -> Color {
         match c {
             Color::Rgb(r, g, b) => Color::Rgb(
@@ -939,20 +904,11 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                     continue;
                 }
 
-                // Unit direction & perpendicular vectors
-                let ux = dx / len;
-                let uy = dy / len;
-                let nx = -uy;
-                let ny = ux;
-
-                // ── 1) Gradient edge: dim at source → bright at target ──
-                // Adaptive segment count based on edge length
                 let segs = (len / 18.0).clamp(4.0, 14.0) as usize;
                 for s in 0..segs {
                     let t0 = s as f64 / segs as f64;
                     let t1 = (s + 1) as f64 / segs as f64;
                     let mid_t = (t0 + t1) / 2.0;
-                    // Brightness ramps from 35 % (source) to 100 % (target)
                     let brightness = 0.35 + 0.65 * mid_t;
                     let sc = scale_color(color, brightness);
                     ctx.draw(&CLine {
@@ -963,24 +919,16 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                         color: sc,
                     });
                 }
-
-                // Gradient already conveys direction (dim → bright)
-                let _ = (nx, ny); // suppress unused warnings
             }
-            // Node labels rendered OUTSIDE Canvas (see below) to avoid
-            // ctx.print() vs braille Painter Y-mapping mismatch.
         });
 
     frame.render_widget(canvas, area);
 
-    // -- Draw node markers + labels directly on the frame buffer --
-    // We replicate the Painter.get_point() formula so ● lands in the
-    // exact same terminal cell as the braille line endpoint.
     let inner_w_cells = area.width.saturating_sub(2);
     let inner_h_cells = area.height.saturating_sub(2);
     if inner_w_cells > 0 && inner_h_cells > 0 && canvas_width > 0.0 && canvas_height > 0.0 {
-        let res_x = inner_w_cells as f64 * 2.0; // braille horizontal resolution
-        let res_y = inner_h_cells as f64 * 4.0; // braille vertical resolution
+        let res_x = inner_w_cells as f64 * 2.0;
+        let res_y = inner_h_cells as f64 * 4.0;
 
         let inner_left = area.x + 1;
         let inner_top = area.y + 1;
@@ -990,9 +938,6 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         let buf = frame.buffer_mut();
 
         for (sx, sy, label, color, is_matched) in &node_points {
-            // Painter.get_point() formula (Ratatui canvas.rs:402-403):
-            //   grid_x = ((x - left) * (res_x - 1) / width)  as usize
-            //   grid_y = ((top  - y) * (res_y - 1) / height)  as usize
             let grid_x = (*sx * (res_x - 1.0) / canvas_width) as u16;
             let grid_y = ((canvas_height - *sy) * (res_y - 1.0) / canvas_height) as u16;
 
@@ -1025,32 +970,25 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Renders the search overlay — slim 1-row bar at the bottom of the graph panel.
+/// Renders the search overlay.
 fn render_search_overlay(frame: &mut Frame, graph_area: Rect, query: &str) {
-    // Slim bar: 1 row, inside graph panel border, bottom-left
     let bar_width = (query.len() as u16 + 4)
         .max(20)
         .min(graph_area.width.saturating_sub(4));
-    // Position: inside the bottom border of the graph panel (1 row above border)
     let bar_y = graph_area.y + graph_area.height.saturating_sub(2);
     let bar_area = Rect::new(graph_area.x + 2, bar_y, bar_width, 1);
 
     let line = Line::from(vec![
-        Span::styled(
-            "/",
-            Style::default()
-                .fg(ACCENT_MAUVE)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("/", Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD)),
         Span::styled(query, Style::default().fg(FG_TEXT)),
-        Span::styled("█", Style::default().fg(ACCENT_MAUVE)), // cursor
+        Span::styled("█", Style::default().fg(ACCENT_MAUVE)),
     ]);
 
     let bar = Paragraph::new(line).style(Style::default().bg(BG_SURFACE));
     frame.render_widget(bar, bar_area);
 }
 
-/// Renders the status bar (bottom line — above timeline).
+/// Renders the status bar.
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 2 {
         return;
@@ -1059,52 +997,35 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let status_area = Rect::new(area.x, area.height.saturating_sub(1), area.width, 1);
 
     let play_status = if app.is_playing { "> PLAY" } else { "|| PAUSE" };
-    let commit_count = app.snapshots.len();
+    let commit_count = app.snapshots_metadata.len();
     let fps_info = format!("frame #{}", app.frame_count);
 
     let mut spans = vec![
         Span::styled(
             format!(" {play_status} "),
             Style::default()
-                .fg(if app.is_playing {
-                    ACCENT_BLUE
-                } else {
-                    FG_OVERLAY
-                })
+                .fg(if app.is_playing { ACCENT_BLUE } else { FG_OVERLAY })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            format!("{commit_count} commits"),
-            Style::default().fg(ACCENT_LAVENDER),
-        ),
+        Span::styled(format!("{commit_count} commits"), Style::default().fg(ACCENT_LAVENDER)),
         Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
         Span::styled(fps_info, Style::default().fg(FG_OVERLAY)),
     ];
 
-    // Show active search query in status bar
     if !app.search_query.is_empty() {
         spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
         spans.push(Span::styled(
             format!("/{}", app.search_query),
-            Style::default()
-                .fg(ACCENT_MAUVE)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            " (Esc:clear)",
-            Style::default().fg(FG_OVERLAY),
-        ));
+        spans.push(Span::styled(" (Esc:clear)", Style::default().fg(FG_OVERLAY)));
     }
 
-    // Show auto-play speed when playing
     if app.is_playing {
         let speed_ms = app.auto_play_interval.as_millis();
         spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
-        spans.push(Span::styled(
-            format!("speed:{speed_ms}ms"),
-            Style::default().fg(ACCENT_BLUE),
-        ));
+        spans.push(Span::styled(format!("speed:{speed_ms}ms"), Style::default().fg(ACCENT_BLUE)));
     }
 
     spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
@@ -1114,12 +1035,11 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     ));
 
     let status = Line::from(spans);
-
     let status_widget = Paragraph::new(status).style(Style::default().bg(BG_BASE));
     frame.render_widget(status_widget, status_area);
 }
 
-/// Main TUI event loop — puts terminal in raw mode and restores on exit.
+/// Main TUI event loop.
 pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
     use crossterm::ExecutableCommand;
     use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -1130,7 +1050,6 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
     use ratatui::backend::CrosstermBackend;
     use std::io;
 
-    // Initialize terminal with mouse capture enabled
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(EnableMouseCapture)?;
@@ -1141,11 +1060,9 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
     let tick_rate = app.tick_rate;
 
     loop {
-        // -- Render --
         terminal.draw(|frame| {
             let size = frame.area();
 
-            // Sadece mouse mapping için layout hesapla (resize yapma!)
             let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(10), Constraint::Length(4)])
@@ -1160,17 +1077,14 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
                 ])
                 .split(main_chunks[0]);
 
-            app.pkg_area = top_chunks[0]; // packages panel (for mouse scroll)
-            app.graph_area = top_chunks[1]; // graph canvas (for mouse drag)
-            app.timeline_area = main_chunks[1]; // timeline panel (for mouse seek)
+            app.pkg_area = top_chunks[0];
+            app.graph_area = top_chunks[1];
+            app.timeline_area = main_chunks[1];
 
             render_app(frame, &mut app);
         })?;
 
-        // -- Event polling --
-        let timeout = tick_rate
-            .checked_sub(app.last_tick.elapsed())
-            .unwrap_or(Duration::ZERO);
+        let timeout = tick_rate.checked_sub(app.last_tick.elapsed()).unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
             match event::read()? {
@@ -1184,20 +1098,17 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
             }
         }
 
-        // -- Tick --
         if app.last_tick.elapsed() >= tick_rate {
             app.tick_physics();
             app.tick_auto_play();
             app.last_tick = Instant::now();
         }
 
-        // -- Quit check --
         if app.should_quit {
             break;
         }
     }
 
-    // Restore terminal — disable mouse capture before leaving
     disable_raw_mode()?;
     io::stdout().execute(DisableMouseCapture)?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -1246,8 +1157,8 @@ mod tests {
 
     #[test]
     fn test_app_creation_empty() {
-        let app = App::new(vec![]);
-        assert!(app.snapshots.is_empty());
+        let app = App::new(None, vec![]);
+        assert!(app.snapshots_metadata.is_empty());
         assert!(app.timeline.is_empty());
         assert!(!app.is_playing);
         assert!(!app.should_quit);
@@ -1260,11 +1171,13 @@ mod tests {
             make_test_snapshot("aaa", vec!["A", "B"], 30),
             make_test_snapshot("bbb", vec!["A", "B", "C"], 45),
         ];
-        let app = App::new(snapshots);
+        let app = App::new(None, snapshots);
 
-        assert_eq!(app.snapshots.len(), 2);
+        assert_eq!(app.snapshots_metadata.len(), 2);
         assert_eq!(app.graph_layout.labels.len(), 2);
         assert_eq!(app.timeline.len(), 2);
+        assert!(app.snapshot_cache.contains_key("aaa"));
+        assert!(app.snapshot_cache.contains_key("bbb"));
     }
 
     #[test]
@@ -1274,7 +1187,7 @@ mod tests {
             make_test_snapshot("bbb", vec!["A", "B", "C"], 45),
             make_test_snapshot("ccc", vec!["X", "Y"], 60),
         ];
-        let mut app = App::new(snapshots);
+        let mut app = App::new(None, snapshots);
 
         assert_eq!(app.timeline.current_index, 0);
 
@@ -1292,7 +1205,7 @@ mod tests {
 
     #[test]
     fn test_app_key_handling_quit() {
-        let mut app = App::new(vec![]);
+        let mut app = App::new(None, vec![]);
 
         assert!(!app.should_quit);
         app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1301,7 +1214,7 @@ mod tests {
 
     #[test]
     fn test_app_key_handling_play_toggle() {
-        let mut app = App::new(vec![]);
+        let mut app = App::new(None, vec![]);
 
         assert!(!app.is_playing);
         app.handle_key(KeyCode::Char('p'), KeyModifiers::NONE);
@@ -1313,40 +1226,31 @@ mod tests {
     #[test]
     fn test_app_reheat() {
         let snapshots = vec![make_test_snapshot("aaa", vec!["A", "B"], 30)];
-        let mut app = App::new(snapshots);
+        let mut app = App::new(None, snapshots);
 
-        // Cool down the graph
         for _ in 0..200 {
             app.tick_physics();
         }
         let cold_temp = app.graph_layout.temperature;
 
-        // Press 'r' to reheat
         app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
-        assert!(
-            app.graph_layout.temperature > cold_temp,
-            "Temperature should increase after reheat key"
-        );
+        assert!(app.graph_layout.temperature > cold_temp);
     }
 
     #[test]
     fn test_app_search_mode() {
-        let mut app = App::new(vec![]);
+        let mut app = App::new(None, vec![]);
 
-        // Enter search mode
         app.handle_key(KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(app.show_search);
 
-        // Type characters
         app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE);
         app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
         assert_eq!(app.search_query, "te");
 
-        // Backspace
         app.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
         assert_eq!(app.search_query, "t");
 
-        // ESC to exit
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.show_search);
         assert!(app.search_query.is_empty());
@@ -1365,45 +1269,9 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_to_layout_data_weighted() {
-        let snapshot = GraphSnapshot {
-            commit_hash: "w01".to_string(),
-            nodes: vec!["A".to_string(), "B".to_string(), "C".to_string()],
-            edges: vec![
-                DependencyEdge {
-                    from_module: "A".to_string(),
-                    to_module: "B".to_string(),
-                    file_path: "test.rs".to_string(),
-                    line: 1,
-                    weight: 5,
-                },
-                DependencyEdge {
-                    from_module: "B".to_string(),
-                    to_module: "C".to_string(),
-                    file_path: "test.rs".to_string(),
-                    line: 2,
-                    weight: 2,
-                },
-            ],
-            node_count: 3,
-            edge_count: 2,
-            timestamp: 1_000_000,
-            drift: None,
-        };
-        let (labels, edges, weights) = snapshot_to_layout_data(&snapshot);
-
-        assert_eq!(labels.len(), 3);
-        assert_eq!(edges.len(), 2);
-        assert_eq!(weights, vec![5, 2]);
-    }
-
-    #[test]
     fn test_terminal_to_physics() {
-        let app = App::new(vec![]);
-        // Default layout is 500x500 (square placeholder)
+        let app = App::new(None, vec![]);
         let (px, py) = app.terminal_to_physics(50, 25, 0, 0, 100, 50);
-        // norm_x = 50/100 = 0.5, norm_y = 25/50 = 0.5
-        // px = 0.5 * 500 = 250, py = (1 - 0.5) * 500 = 250
         assert!((px - 250.0).abs() < 0.1);
         assert!((py - 250.0).abs() < 0.1);
     }
