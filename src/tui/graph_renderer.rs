@@ -131,30 +131,28 @@ impl Quadtree {
     fn compute_repulsion(
         &self,
         idx: usize,
-        px: f64,
-        py: f64,
+        pos: (f64, f64),
         theta: f64,
         repulsion_const: f64,
-        fx: &mut f64,
-        fy: &mut f64,
+        force: &mut (f64, f64),
     ) {
         if self.mass == 0.0 || (self.node_idx == Some(idx)) {
             return;
         }
 
-        let dx = self.com_x - px;
-        let dy = self.com_y - py;
+        let dx = self.com_x - pos.0;
+        let dy = self.com_y - pos.1;
         let dist_sq = dx * dx + dy * dy;
         let dist = dist_sq.sqrt().max(0.5);
 
         // Barnes-Hut criterion: s / d < theta
         if self.children.is_none() || (self.size / dist < theta) {
-            let force = (repulsion_const * self.mass) / dist_sq.max(1.0);
-            *fx -= force * (dx / dist);
-            *fy -= force * (dy / dist);
+            let f = (repulsion_const * self.mass) / dist_sq.max(1.0);
+            force.0 -= f * (dx / dist);
+            force.1 -= f * (dy / dist);
         } else if let Some(children) = &self.children {
             for child in children.iter() {
-                child.compute_repulsion(idx, px, py, theta, repulsion_const, fx, fy);
+                child.compute_repulsion(idx, pos, theta, repulsion_const, force);
             }
         }
     }
@@ -278,15 +276,16 @@ impl GraphLayout {
         let repulsion_const = self.repulsion * temp_scale;
 
         for i in 0..n {
+            let mut f = (0.0, 0.0);
             qt.compute_repulsion(
                 i,
-                self.positions[i].x,
-                self.positions[i].y,
+                (self.positions[i].x, self.positions[i].y),
                 theta,
                 repulsion_const,
-                &mut fx[i],
-                &mut fy[i],
+                &mut f,
             );
+            fx[i] += f.0;
+            fy[i] += f.1;
         }
 
         // 2. Attraction (Hooke spring): connected nodes attract toward ideal length
