@@ -624,11 +624,8 @@ fn snapshot_to_layout_data(
 ) -> (Vec<String>, Vec<(usize, usize)>, Vec<u32>) {
     let labels = snapshot.nodes.clone();
 
-    let label_to_idx: std::collections::HashMap<&String, usize> = labels
-        .iter()
-        .enumerate()
-        .map(|(i, l)| (l, i))
-        .collect();
+    let label_to_idx: std::collections::HashMap<&String, usize> =
+        labels.iter().enumerate().map(|(i, l)| (l, i)).collect();
 
     let mut edges: Vec<(usize, usize)> = Vec::new();
     let mut weights: Vec<u32> = Vec::new();
@@ -857,7 +854,11 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 return None;
             }
             let is_matched = search_active && search_matched.contains(&i);
-            let show_label = if search_active { true } else { label_visible.contains(&i) };
+            let show_label = if search_active {
+                true
+            } else {
+                label_visible.contains(&i)
+            };
             let label = if show_label && i < layout.labels.len() {
                 let l = &layout.labels[i];
                 if l.len() > label_max_len {
@@ -979,7 +980,12 @@ fn render_search_overlay(frame: &mut Frame, graph_area: Rect, query: &str) {
     let bar_area = Rect::new(graph_area.x + 2, bar_y, bar_width, 1);
 
     let line = Line::from(vec![
-        Span::styled("/", Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(ACCENT_MAUVE)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(query, Style::default().fg(FG_TEXT)),
         Span::styled("█", Style::default().fg(ACCENT_MAUVE)),
     ]);
@@ -1004,11 +1010,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             format!(" {play_status} "),
             Style::default()
-                .fg(if app.is_playing { ACCENT_BLUE } else { FG_OVERLAY })
+                .fg(if app.is_playing {
+                    ACCENT_BLUE
+                } else {
+                    FG_OVERLAY
+                })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
-        Span::styled(format!("{commit_count} commits"), Style::default().fg(ACCENT_LAVENDER)),
+        Span::styled(
+            format!("{commit_count} commits"),
+            Style::default().fg(ACCENT_LAVENDER),
+        ),
         Span::styled(" | ", Style::default().fg(FG_OVERLAY)),
         Span::styled(fps_info, Style::default().fg(FG_OVERLAY)),
     ];
@@ -1017,15 +1030,23 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
         spans.push(Span::styled(
             format!("/{}", app.search_query),
-            Style::default().fg(ACCENT_MAUVE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_MAUVE)
+                .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(" (Esc:clear)", Style::default().fg(FG_OVERLAY)));
+        spans.push(Span::styled(
+            " (Esc:clear)",
+            Style::default().fg(FG_OVERLAY),
+        ));
     }
 
     if app.is_playing {
         let speed_ms = app.auto_play_interval.as_millis();
         spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
-        spans.push(Span::styled(format!("speed:{speed_ms}ms"), Style::default().fg(ACCENT_BLUE)));
+        spans.push(Span::styled(
+            format!("speed:{speed_ms}ms"),
+            Style::default().fg(ACCENT_BLUE),
+        ));
     }
 
     spans.push(Span::styled(" | ", Style::default().fg(FG_OVERLAY)));
@@ -1084,7 +1105,9 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
             render_app(frame, &mut app);
         })?;
 
-        let timeout = tick_rate.checked_sub(app.last_tick.elapsed()).unwrap_or(Duration::ZERO);
+        let timeout = tick_rate
+            .checked_sub(app.last_tick.elapsed())
+            .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
             match event::read()? {
