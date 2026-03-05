@@ -59,7 +59,7 @@ fn run() -> Result<()> {
             };
             // Scan + launch animated TUI
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::watch::run_watch(&path, &db, limit, max_snapshots))?;
+            rt.block_on(commands::watch::run_watch(&path, db, limit, max_snapshots))?;
         }
         Commands::ListGraphs => {
             execute_list_graphs(&db)?;

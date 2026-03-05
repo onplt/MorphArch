@@ -1,6 +1,6 @@
 [package]
 name = "morpharch"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Onur <onur@morpharch.dev>"]
@@ -85,6 +85,9 @@ rayon = "1.10"
 
 # Bounded LRU cache
 lru = "0.16"
+
+# Image rendering and GIF encoding for movie export
+image = { version = "0.24", default-features = false, features = ["gif"] }
 
 [profile.release]
 lto = true

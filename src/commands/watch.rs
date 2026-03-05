@@ -26,19 +26,15 @@ use crate::tui::app::{App, run_tui};
 const DEFAULT_TIMELINE_SNAPSHOTS: usize = 200;
 
 /// Runs the watch command: scan + TUI launch.
-///
-/// `max_snapshots` controls how many graph snapshots are loaded into the
-/// TUI timeline. When the DB has more snapshots than this limit, they
-/// are sampled at even intervals so the timeline covers the full history.
 pub async fn run_watch(
     repo_path: &Path,
-    db: &Database,
+    db: Database,
     max_commits: usize,
     max_snapshots: usize,
 ) -> Result<()> {
     // ── 1. Scan the repository ──
     info!(path = %repo_path.display(), "Watch: Scanning repository");
-    let scan_result = run_scan(repo_path, db, max_commits)?;
+    let scan_result = run_scan(repo_path, &db, max_commits)?;
     info!(
         commits = scan_result.commits_scanned,
         graphs = scan_result.graphs_created,
@@ -46,7 +42,9 @@ pub async fn run_watch(
         "Watch: Scan complete"
     );
 
-    // ── 2. Load snapshots (sampled evenly across full history) ──
+    // ── 2. Load initial snapshots ──
+    // Sampling still happens, but we only load what's needed for initial view.
+    // App now handles lazy-loading more snapshots from the DB as the user navigates.
     let snapshots = db
         .get_sampled_snapshots(max_snapshots)
         .context("Failed to load graph snapshots")?;
@@ -56,7 +54,7 @@ pub async fn run_watch(
         return Ok(());
     }
 
-    info!(count = snapshots.len(), "Watch: Snapshots loaded");
+    info!(count = snapshots.len(), "Watch: Initial snapshots loaded");
 
     // ── 3. Fetch commit info (for timeline) ──
     let timeline_commits: Vec<(String, String, i64)> = db
@@ -64,7 +62,8 @@ pub async fn run_watch(
         .context("Failed to fetch commit info")?;
 
     // ── 4. Create and launch TUI ──
-    let mut app = App::new(snapshots);
+    // We move the DB into App for lazy loading
+    let mut app = App::new(Some(db), snapshots);
     app.set_timeline_commits(timeline_commits);
 
     info!("Watch: Launching TUI");
