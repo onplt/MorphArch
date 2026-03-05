@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Interactive Timeline Scrubbing:** Support for clicking and dragging the timeline slider with the mouse for real-time history exploration.
+- **Commit Date Visibility:** The timeline now displays the commit date (`YYYY-MM-DD`) alongside the hash and message for better temporal context.
 - **Lazy-Loading Snapshots:** Full graph snapshots are now loaded on-demand from the database, significantly reducing memory footprint for large project histories.
 
 ### Changed
