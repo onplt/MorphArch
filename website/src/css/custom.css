@@ -1,0 +1,471 @@
+/**
+ * Any CSS included here will be globally available.
+ */
+
+:root {
+  --ifm-color-primary: #7aa2f7;
+  --ifm-color-primary-dark: #3d59a1;
+  --ifm-color-primary-darker: #364f90;
+  --ifm-color-primary-darkest: #2d4177;
+  --ifm-color-primary-light: #bb9af7;
+  --ifm-color-primary-lighter: #c0caf5;
+  --ifm-color-primary-lightest: #ffffff;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  
+  /* Backgrounds */
+  --ifm-background-color: #1a1b26;
+  --site-bg-grid: rgba(122, 162, 247, 0.03);
+}
+
+[data-theme='dark'] {
+  --ifm-background-color: #1a1b26;
+  --ifm-footer-background-color: #16161e;
+}
+
+.hero--primary {
+  --ifm-hero-background-color: var(--ifm-background-color);
+  background: radial-gradient(circle at 20% 50%, #24283b 0%, #1a1b26 100%);
+  border-bottom: 1px solid rgba(122, 162, 247, 0.1);
+  position: relative;
+  padding: 6rem 0;
+  overflow: hidden;
+}
+
+.hero--primary::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: 
+    linear-gradient(var(--site-bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--site-bg-grid) 1px, transparent 1px);
+  background-size: 50px 50px;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.hero-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  text-align: left;
+}
+
+@media (max-width: 996px) {
+  .hero-content {
+    flex-direction: column;
+    text-align: center;
+  }
+  
+  .hero-text {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  
+  .hero__title {
+    font-size: 3.5rem;
+  }
+
+  .hero__subtitle {
+    text-align: center;
+  }
+}
+
+/* How it Works Section */
+.section-title {
+  text-align: center;
+  margin-bottom: 4rem;
+}
+
+.section-title h2 {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #7aa2f7;
+}
+
+.step-card {
+  padding: 2rem;
+  background: #1f2335;
+  border-radius: 16px;
+  border: 1px solid rgba(122, 162, 247, 0.1);
+  height: 100%;
+  position: relative;
+}
+
+/* Scroll Animation Classes */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: all 0.8s cubic-bezier(0.5, 0, 0, 1);
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Bottom CTA Section */
+.bottom-cta {
+  padding: 8rem 0;
+  background: radial-gradient(circle at center, #24283b 0%, #1a1b26 100%);
+  text-align: center;
+  border-top: 1px solid rgba(122, 162, 247, 0.1);
+}
+
+.bottom-cta h2 {
+  font-size: 3rem;
+  font-weight: 800;
+  margin-bottom: 1.5rem;
+  background: linear-gradient(to right, #7aa2f7, #bb9af7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Compatibility Section */
+.compatibility-section {
+  padding: 4rem 0;
+  background: #16161e;
+  border-top: 1px solid rgba(122, 162, 247, 0.05);
+  border-bottom: 1px solid rgba(122, 162, 247, 0.05);
+}
+
+.comp-grid {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 3rem;
+  flex-wrap: wrap;
+  opacity: 0.6;
+}
+
+.comp-item {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #a9b1d6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Visual Comparison Section */
+.comparison-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 2rem;
+  margin-top: 3rem;
+  flex-wrap: wrap;
+}
+
+.comparison-card {
+  text-align: center;
+  flex: 1;
+  min-width: 300px;
+  max-width: 450px;
+}
+
+.comparison-image {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  transition: transform 0.3s;
+}
+
+.comparison-image:hover {
+  transform: scale(1.02);
+}
+
+.comparison-arrow {
+  font-size: 3rem;
+  color: #565f89;
+}
+
+@media (max-width: 768px) {
+  .comparison-arrow {
+    transform: rotate(90deg);
+  }
+}
+
+.faq-item {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: rgba(122, 162, 247, 0.03);
+  border-radius: 12px;
+  border: 1px solid rgba(122, 162, 247, 0.1);
+}
+
+.faq-item h3 {
+  color: #7aa2f7;
+  margin-bottom: 0.5rem;
+}
+
+/* Performance Section */
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 2rem;
+  margin-top: 3rem;
+}
+
+.perf-card {
+  padding: 2rem;
+  background: rgba(158, 206, 106, 0.05);
+  border: 1px solid rgba(158, 206, 106, 0.2);
+  border-radius: 16px;
+  text-align: center;
+}
+
+.perf-value {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #9ece6a;
+  display: block;
+}
+
+.perf-label {
+  color: #565f89;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+/* Persona Section */
+.persona-section {
+  padding: 8rem 0;
+  background: #16161e;
+}
+
+.persona-card {
+  height: 100%;
+  padding: 2.5rem;
+  background: #1a1b26;
+  border-radius: 20px;
+  border: 1px solid rgba(122, 162, 247, 0.1);
+  transition: border-color 0.3s;
+}
+
+.persona-card:hover {
+  border-color: #7aa2f7;
+}
+
+/* Roadmap Section */
+.roadmap-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 800px;
+  margin: 3rem auto 0;
+}
+
+.roadmap-item {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  padding: 1.5rem;
+  background: rgba(187, 154, 247, 0.05);
+  border: 1px solid rgba(187, 154, 247, 0.1);
+  border-radius: 12px;
+}
+
+.roadmap-status {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: bold;
+  text-transform: uppercase;
+}
+
+.status-planned { background: rgba(86, 95, 137, 0.3); color: #565f89; }
+.status-progress { background: rgba(122, 162, 247, 0.2); color: #7aa2f7; }
+
+/* Contribution Section */
+.contribute-section {
+  padding: 6rem 0;
+  background: linear-gradient(180deg, #16161e 0%, #1a1b26 100%);
+  text-align: center;
+}
+
+.github-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 2rem;
+  background: #24283b;
+  border: 1px solid #414868;
+  border-radius: 50px;
+  color: #c0caf5;
+  text-decoration: none;
+  transition: all 0.3s;
+  margin-top: 2rem;
+}
+
+.github-card:hover {
+  transform: scale(1.05);
+  border-color: #bb9af7;
+  color: #bb9af7;
+}
+
+.hero__title {
+  font-size: 5rem;
+  line-height: 1;
+  margin-bottom: 1rem;
+  background: linear-gradient(to right, #7aa2f7, #bb9af7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 800;
+}
+
+.hero__subtitle {
+  font-weight: 400;
+  color: #a9b1d6;
+  max-width: 600px;
+  margin: 0 0 2rem 0;
+  line-height: 1.6;
+}
+
+/* Terminal Mockup */
+.terminal-window {
+  flex: 1.2;
+  background: #16161e;
+  border-radius: 12px;
+  border: 1px solid rgba(122, 162, 247, 0.2);
+  box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  overflow: hidden;
+  font-family: var(--ifm-font-family-monospace);
+  max-width: 600px;
+  animation: float 6s ease-in-out infinite;
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-15px); }
+  100% { transform: translateY(0px); }
+}
+
+.terminal-header {
+  background: #1f2335;
+  padding: 10px 15px;
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid rgba(122, 162, 247, 0.1);
+}
+
+.dot { height: 12px; width: 12px; border-radius: 50%; }
+.red { background: #f7768e; }
+.yellow { background: #e0af68; }
+.green { background: #9ece6a; }
+
+.terminal-body {
+  padding: 20px;
+  color: #c0caf5;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.t-blue { color: #7aa2f7; }
+.t-green { color: #9ece6a; }
+.t-purple { color: #bb9af7; }
+
+.badges {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 1.5rem;
+}
+
+.badges img {
+  height: 20px;
+}
+
+.install-command-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 2rem;
+}
+
+.install-command {
+  background: rgba(122, 162, 247, 0.1);
+  border: 1px solid rgba(122, 162, 247, 0.3);
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  display: inline-block;
+  color: #c0caf5;
+}
+
+.copy-button {
+  background: rgba(122, 162, 247, 0.1);
+  border: 1px solid rgba(122, 162, 247, 0.2);
+  color: #7aa2f7;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: all 0.2s;
+}
+
+.copy-button:hover {
+  background: rgba(122, 162, 247, 0.2);
+  border-color: #7aa2f7;
+}
+
+.ecosystem-section {
+  margin-top: 2rem;
+  opacity: 0.8;
+}
+
+.ecosystem-logos {
+  display: flex;
+  gap: 15px;
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: #565f89;
+  align-items: center;
+}
+
+.ecosystem-badge {
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 20px;
+  border: 1px solid rgba(122, 162, 247, 0.1);
+  color: #9aa5ce;
+}
+
+.featureIcon {
+  padding: 1.5rem;
+  background: linear-gradient(135deg, rgba(122, 162, 247, 0.1) 0%, rgba(187, 154, 247, 0.05) 100%);
+  border-radius: 24px;
+  border: 1px solid rgba(122, 162, 247, 0.15);
+  margin-bottom: 1.5rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  transition: all 0.3s ease;
+}
+
+/* Documentation Enhancements */
+.theme-doc-sidebar-item-link-active {
+  background-color: rgba(122, 162, 247, 0.1) !important;
+  color: #7aa2f7 !important;
+  font-weight: bold;
+}
+
+.theme-doc-sidebar-item-category-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  color: #565f89;
+  margin-top: 1rem;
+}
+
+/* Custom code block styling in docs */
+.theme-code-block {
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  border: 1px solid rgba(122, 162, 247, 0.1);
+}
+
+.docItemContainer_node_modules-\@docusaurus-theme-classic-lib-theme-DocItem-Layout-styles-module {
+  padding-bottom: 4rem;
+}
