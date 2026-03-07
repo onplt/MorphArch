@@ -18,6 +18,10 @@ const config: Config = {
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'warn',
 
+  clientModules: [
+    require.resolve('./src/analytics.ts'),
+  ],
+
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],
