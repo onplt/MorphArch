@@ -780,6 +780,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             };
             let cell = &mut buf[(col, row)];
             cell.set_symbol(if is_m { "◆" } else { "●" }).set_fg(color);
+            
             if show_l {
                 let label = &layout.labels[i];
                 let text = if is_h {
@@ -789,12 +790,27 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     label.as_str()
                 };
-                buf.set_string(
-                    col + 2,
-                    row,
-                    text,
-                    Style::default().fg(if is_m { color } else { FG_TEXT }),
-                );
+                let text_len = text.chars().count() as u16;
+
+                // Adaptive Label Placement:
+                // If node is in the right 25% of the screen, flip label to the left.
+                let is_right_edge = col > area.x + (area.width * 3 / 4);
+                let (label_x, can_render) = if is_right_edge {
+                    let lx = col.saturating_sub(text_len + 1);
+                    (lx, lx > area.x)
+                } else {
+                    let lx = col + 2;
+                    (lx, lx + text_len < area.x + area.width - 1)
+                };
+
+                if can_render {
+                    buf.set_string(
+                        label_x,
+                        row,
+                        text,
+                        Style::default().fg(if is_m { color } else { FG_TEXT }),
+                    );
+                }
             }
         }
     }
