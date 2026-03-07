@@ -36,6 +36,10 @@ pub struct Cli {
     /// Subcommand to execute
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Enable verbose logging (shows INFO level logs)
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
 }
 
 /// Available subcommands
