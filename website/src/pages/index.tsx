@@ -25,6 +25,8 @@ function useScrollReveal() {
   }, []);
 }
 
+import useBaseUrl from '@docusaurus/useBaseUrl';
+
 function TerminalMockup() {
   return (
     <div className="terminal-window">
@@ -35,7 +37,7 @@ function TerminalMockup() {
         <div style={{ marginLeft: '10px', fontSize: '12px', color: '#565f89' }}>morpharch demo</div>
       </div>
       <img 
-        src="/img/demo.gif" 
+        src={useBaseUrl('/img/demo.gif')} 
         alt="MorphArch TUI Demo" 
         style={{ width: '100%', display: 'block' }} 
       />
