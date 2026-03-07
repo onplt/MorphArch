@@ -21,6 +21,10 @@ results as an animated force-directed graph in your terminal.
 It supports Nx, Turborepo, pnpm workspaces, and Cargo workspaces out of the
 box, with language-level import extraction for Rust, TypeScript, JavaScript, Python, and Go.
 
+<p align="center">
+  <img src="website/static/img/demo.gif" alt="MorphArch TUI Demo" width="800">
+</p>
+
 ---
 
 ## Features
