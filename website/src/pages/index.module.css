@@ -1,0 +1,17 @@
+.hero--primary {
+  background-color: #1a1b26; /* Tokyo Night Dark */
+  color: #c0caf5;
+  padding: 4rem 0;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+[data-theme='dark'] .hero--primary {
+  background-color: #1a1b26;
+}
+
+.featureSvg {
+  height: 120px;
+  width: 120px;
+}

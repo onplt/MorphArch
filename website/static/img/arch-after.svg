@@ -1,0 +1,27 @@
+<svg width="400" height="300" viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="400" height="300" rx="12" fill="#16161e" stroke="#9ece6a" stroke-width="2" stroke-opacity="0.3"/>
+  <text x="20" y="30" font-family="Arial" font-size="14" fill="#9ece6a" font-weight="bold">MORPHARCH OPTIMIZED</text>
+  
+  <g stroke="#7aa2f7" stroke-width="1.5" opacity="0.6">
+    <!-- Top Layer to Mid -->
+    <line x1="200" y1="60" x2="100" y2="150" />
+    <line x1="200" y1="60" x2="300" y2="150" />
+    <!-- Mid to Bottom -->
+    <line x1="100" y1="150" x2="100" y2="240" />
+    <line x1="300" y1="150" x2="300" y2="240" />
+    <line x1="100" y1="150" x2="200" y2="240" />
+    <line x1="300" y1="150" x2="200" y2="240" />
+  </g>
+
+  <!-- App Layer -->
+  <circle cx="200" cy="60" r="12" fill="#7aa2f7" />
+  
+  <!-- Libs Layer -->
+  <circle cx="100" cy="150" r="10" fill="#bb9af7" />
+  <circle cx="300" cy="150" r="10" fill="#bb9af7" />
+  
+  <!-- Shared Layer -->
+  <circle cx="100" cy="240" r="8" fill="#9ece6a" />
+  <circle cx="200" cy="240" r="8" fill="#9ece6a" />
+  <circle cx="300" cy="240" r="8" fill="#9ece6a" />
+</svg>
