@@ -159,8 +159,8 @@ pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState) {
     let hash = state.current_commit_hash().unwrap_or("?");
     let short_hash = if hash.len() >= 7 { &hash[..7] } else { hash };
     let message = state.current_commit_message().unwrap_or("");
-    let truncated_msg = if message.len() > 50 {
-        format!("{}…", &message[..49])
+    let truncated_msg = if message.chars().count() > 50 {
+        format!("{}…", message.chars().take(49).collect::<String>())
     } else {
         message.to_string()
     };
