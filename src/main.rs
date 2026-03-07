@@ -12,11 +12,14 @@ use morpharch::db::Database;
 use morpharch::utils;
 
 fn main() {
-    // Initialize logging — before anything else
-    utils::init_logging();
+    // Parse CLI arguments first to check for verbose flag
+    let cli = Cli::parse();
+
+    // Initialize logging with the verbose flag
+    utils::init_logging(cli.verbose);
 
     // Run business logic; on error, print and exit
-    if let Err(err) = run() {
+    if let Err(err) = run(cli) {
         utils::print_error(&err);
         process::exit(1);
     }
@@ -26,10 +29,7 @@ fn main() {
 ///
 /// This separation ensures all errors are caught at a single point (main)
 /// and displayed in a user-friendly format.
-fn run() -> Result<()> {
-    // Parse CLI arguments
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<()> {
     // Load configuration (~/.morpharch/ directory created automatically)
     let config = MorphArchConfig::load()?;
     info!(db_path = %config.db_path.display(), "Configuration ready");

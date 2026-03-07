@@ -7,9 +7,15 @@ use anyhow::Error;
 use tracing_subscriber::{EnvFilter, fmt};
 
 /// Initializes the structured logging infrastructure.
-pub fn init_logging() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("morpharch=info"));
+pub fn init_logging(verbose: bool) {
+    let default_level = if verbose {
+        "morpharch=info"
+    } else {
+        "morpharch=warn"
+    };
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
 
     fmt()
         .with_env_filter(filter)
