@@ -780,7 +780,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             };
             let cell = &mut buf[(col, row)];
             cell.set_symbol(if is_m { "◆" } else { "●" }).set_fg(color);
-            
+
             if show_l {
                 let label = &layout.labels[i];
                 let text = if is_h {
