@@ -31,6 +31,7 @@ test-repos/
 *.mp4
 *.webm
 *.cast
+demo.tape
 screenshots/
 
 # Logs
