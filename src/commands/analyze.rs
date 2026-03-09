@@ -140,30 +140,40 @@ fn resolve_commit(repo_path: &Path, commit_ish: Option<&str>) -> Result<String> 
 
 fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) {
     let (emoji, level) = match drift.total {
-        0..=30 => ("  ", "Healthy"),
-        31..=60 => ("  ", "Warning"),
-        61..=80 => ("  ", "Degraded"),
+        0..=15 => ("  ", "Excellent"),
+        16..=30 => ("  ", "Healthy"),
+        31..=55 => ("  ", "Warning"),
+        56..=80 => ("  ", "Degraded"),
         _ => ("  ", "Critical"),
     };
 
     println!("{emoji} Drift Score: {}/100 ({level})", drift.total);
+    println!("     Health: {}%", 100u8.saturating_sub(drift.total));
     println!();
     println!("  Graph Statistics:");
     println!("     Node (module) count:      {node_count}");
     println!("     Edge (dependency) count:   {edge_count}");
     println!();
-    println!("  Sub-Metrics:");
-    println!("     Fan-in change:            {:+}", drift.fan_in_delta);
-    println!("     Fan-out change:           {:+}", drift.fan_out_delta);
-    println!("     New cyclic dependencies:  {}", drift.new_cycles);
+    println!("  Component Breakdown (6-factor analysis):");
     println!(
-        "     Boundary violations:      {}",
-        drift.boundary_violations
+        "     Cycles       (30%):  {:5.1}/100  {} SCCs",
+        drift.cycle_debt, drift.new_cycles
     );
     println!(
-        "     Cognitive complexity:     {:.2}",
-        drift.cognitive_complexity
+        "     Layering     (25%):  {:5.1}/100  {} back-edges",
+        drift.layering_debt, drift.boundary_violations
     );
+    println!("     Hub/God      (15%):  {:5.1}/100", drift.hub_debt);
+    println!("     Coupling     (12%):  {:5.1}/100", drift.coupling_debt);
+    println!("     Cognitive    (10%):  {:5.1}/100", drift.cognitive_debt);
+    println!(
+        "     Instability   (8%):  {:5.1}/100",
+        drift.instability_debt
+    );
+    println!();
+    println!("  Delta Metrics:");
+    println!("     Fan-in change (median):   {:+}", drift.fan_in_delta);
+    println!("     Fan-out change (median):  {:+}", drift.fan_out_delta);
 }
 
 fn print_boundary_details(edges: &[crate::models::DependencyEdge]) {
@@ -213,44 +223,71 @@ fn print_recommendations(drift: &Option<DriftScore>) {
 
     let mut suggestions = Vec::new();
 
-    if d.new_cycles > 0 {
+    if d.cycle_debt > 20.0 {
         suggestions.push(format!(
-            "   {} new cyclic dependency(ies). Apply Dependency Inversion \
-             principle — break cycles with interfaces/traits.",
-            d.new_cycles
+            "   {} circular dependency group(s) detected (score: {:.0}/100). \
+             Some modules depend on each other in loops — breaking these cycles \
+             with interfaces or traits will make the code easier to maintain.",
+            d.new_cycles, d.cycle_debt
         ));
     }
 
-    if d.boundary_violations > 0 {
+    if d.layering_debt > 20.0 {
         suggestions.push(format!(
-            "   {} boundary violation(s). Library layers (packages/lib) \
-             should not depend on application layers (apps/cmd).",
-            d.boundary_violations
+            "   {} extra edge(s) inside dependency cycles (score: {:.0}/100). \
+             The dependency flow isn't clean — organizing layers to depend \
+             only in one direction would improve clarity.",
+            d.boundary_violations, d.layering_debt
         ));
     }
 
-    if d.fan_out_delta > 5 {
-        suggestions.push(
-            "   High fan-out growth. Modules are adding too many external dependencies. \
-             Consider a Facade pattern or module consolidation."
-                .to_string(),
-        );
+    if d.hub_debt > 20.0 {
+        suggestions.push(format!(
+            "   Some modules are doing too much (score: {:.0}/100). They connect to \
+             many others in both directions. Splitting them into smaller, \
+             focused modules would reduce the blast radius of changes.",
+            d.hub_debt
+        ));
     }
 
-    if d.cognitive_complexity > 20.0 {
-        suggestions.push(
-            "   High cognitive complexity. The graph is too dense — consider splitting \
-             modules into smaller, focused pieces."
-                .to_string(),
-        );
+    if d.coupling_debt > 20.0 {
+        suggestions.push(format!(
+            "   Modules are more tightly connected than expected (score: {:.0}/100). \
+             Adding abstractions between heavily coupled modules would \
+             improve flexibility and make changes safer.",
+            d.coupling_debt
+        ));
     }
 
-    if d.total <= 30 {
-        suggestions.push("   Architecture looks healthy! Keep it up.".to_string());
+    if d.cognitive_debt > 20.0 {
+        suggestions.push(format!(
+            "   The dependency structure is complex (score: {:.0}/100). \
+             There are more connections than needed. Simplifying the wiring \
+             would make the architecture easier to understand and navigate.",
+            d.cognitive_debt
+        ));
+    }
+
+    if d.instability_debt > 20.0 {
+        suggestions.push(format!(
+            "   Some core modules are fragile (score: {:.0}/100). They depend \
+             heavily on others, so upstream changes may cascade through them. \
+             Adding abstractions would help stabilize them.",
+            d.instability_debt
+        ));
+    }
+
+    if d.total <= 15 {
+        suggestions.push(
+            "   Architecture looks great — clean structure with minimal coupling.".to_string(),
+        );
+    } else if d.total <= 30 {
+        suggestions
+            .push("   Overall healthy architecture with minor areas for improvement.".to_string());
     }
 
     if suggestions.is_empty() {
-        suggestions.push("   Overall status is acceptable.".to_string());
+        suggestions.push("   Architecture is in an acceptable state.".to_string());
     }
 
     for suggestion in &suggestions {

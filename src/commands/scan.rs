@@ -251,7 +251,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
 
     let commit_hashes: Vec<String> = commit_hashes_from_commits(&commits_raw);
 
-    let mut prev_graph: Option<DiGraph<String, ()>> = None;
+    let mut prev_graph: Option<DiGraph<String, u32>> = None;
     if let Some(ref last_hash) = last_commit {
         if let Some(snapshot) = db.get_graph_snapshot(last_hash)? {
             let nodes: HashSet<String> = snapshot.nodes.into_iter().collect();
@@ -402,13 +402,8 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
 
             let graph = graph_builder::build_graph(&kept_nodes, &final_edges);
             let nodes_vec: Vec<String> = kept_nodes.into_iter().collect();
-            let drift = scoring::calculate_drift(
-                &graph,
-                prev_graph.as_ref(),
-                &nodes_vec,
-                &scoring::edges_to_pairs(&final_edges),
-                commit_info.timestamp,
-            );
+            let drift =
+                scoring::calculate_drift(&graph, prev_graph.as_ref(), commit_info.timestamp);
 
             db.insert_graph_snapshot(&GraphSnapshot {
                 commit_hash: commit_info.hash,

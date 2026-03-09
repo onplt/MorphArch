@@ -5,7 +5,6 @@
 // Left panel package list and other helper widgets:
 //   - render_package_list: Module/package list from current graph
 //   - truncate_str: Truncate long strings
-//   - format_timestamp: Unix timestamp → readable date
 //
 // This module is imported by other tui modules.
 // =============================================================================
@@ -124,24 +123,16 @@ pub fn truncate_str(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    if s.len() <= max_width {
+
+    let char_count = s.chars().count();
+    if char_count <= max_width {
         s.to_string()
     } else if max_width <= 1 {
         "…".to_string()
     } else {
-        format!("{}…", &s[..max_width - 1])
+        let truncated: String = s.chars().take(max_width - 1).collect();
+        format!("{}…", truncated)
     }
-}
-
-/// Converts a Unix timestamp to a readable date string.
-///
-/// Format: "YYYY-MM-DD HH:MM"
-/// Invalid timestamps return "?".
-#[allow(dead_code)]
-pub fn format_timestamp(timestamp: i64) -> String {
-    chrono::DateTime::from_timestamp(timestamp, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "?".to_string())
 }
 
 // =============================================================================
@@ -179,15 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn test_format_timestamp_valid() {
-        // 2024-01-01 00:00:00 UTC
-        let result = format_timestamp(1_704_067_200);
-        assert!(result.contains("2024"), "Year should be 2024: {result}");
+    fn test_truncate_str_multibyte_emoji() {
+        // "→" is 3 bytes, "🚀" is 4 bytes. If it slices by bytes, it would panic.
+        let msg = "chore: upgrade → faster 🚀 speed";
+        assert_eq!(truncate_str(msg, 20), "chore: upgrade → fa…");
     }
 
     #[test]
-    fn test_format_timestamp_zero() {
-        let result = format_timestamp(0);
-        assert!(result.contains("1970"), "Epoch start: {result}");
+    fn test_truncate_str_multibyte_exact() {
+        let msg = "test→";
+        assert_eq!(truncate_str(msg, 5), "test→");
+        assert_eq!(truncate_str(msg, 4), "tes…");
     }
 }

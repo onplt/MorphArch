@@ -22,8 +22,7 @@ Extracted imports are mapped to workspace packages.
 
 ### 4. Evaluation (Scoring)
 The graph is passed through our mathematical evaluation engine:
-- **SCC Analysis**: Detects circularity.
-- **Layer Check**: Validates boundary rules.
+- **Debt Calculation**: A 6-component scale-aware algorithm (Cycle, Layering, Hub, Coupling, Cognitive, Instability) computes the absolute health score.
 - **Physics Layout**: Generates initial coordinates for the **Verlet Physics** engine used in the TUI.
 
 ---

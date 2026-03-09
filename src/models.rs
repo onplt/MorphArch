@@ -6,7 +6,6 @@
 //! - [`DependencyEdge`] — A directed dependency between two modules
 //! - [`GraphSnapshot`] — Complete dependency graph at a specific commit
 //! - [`DriftScore`] — Architecture drift score (0–100) with sub-metrics
-//! - [`TemporalDelta`] — Drift comparison between consecutive commits
 //!
 //! All types implement `Serialize` and `Deserialize` for JSON persistence.
 
@@ -67,36 +66,47 @@ pub struct SnapshotMetadata {
 /// Architecture drift score — measures graph "health" (0-100).
 ///
 /// Score 0 = perfect architecture, 100 = fully chaotic.
-/// Baseline (first commit or no previous graph) = 50.
+/// Uses a 6-component scale-aware algorithm:
+///   - Cycle Debt (30%): SCC count + cyclic node fraction + largest SCC
+///   - Layering Debt (25%): Back-edge ratio in topological ordering
+///   - Hub Debt (15%): True god modules (high in AND out) detection
+///   - Coupling Debt (12%): Weighted coupling intensity using edge weights
+///   - Cognitive Debt (10%): Shannon entropy + edge excess ratio
+///   - Instability Debt (8%): Refined Martin metric (leaf packages excluded)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftScore {
     /// Total drift score (0 = clean, 100 = chaotic)
     pub total: u8,
-    /// Average fan-in change (positive = increasing dependencies)
+    /// Median fan-in change (positive = increasing dependencies)
     pub fan_in_delta: i32,
-    /// Average fan-out change (positive = increasing external deps)
+    /// Median fan-out change (positive = increasing external deps)
     pub fan_out_delta: i32,
-    /// New circular dependency count
+    /// Circular dependency (SCC) count
     pub new_cycles: usize,
-    /// Package boundary violation count
+    /// Back-edge count in topological layering (real boundary violations)
     pub boundary_violations: usize,
-    /// Cognitive complexity proxy: (edges/nodes)*10 + cycles*5
+    /// Cognitive complexity: Shannon entropy + edge excess ratio
     pub cognitive_complexity: f64,
     /// Score computation timestamp
     pub timestamp: i64,
-}
 
-/// Drift comparison between two consecutive commits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct TemporalDelta {
-    pub prev_commit_hash: String,
-    pub current_commit_hash: String,
-    pub score_delta: i32,
-    pub nodes_added: usize,
-    pub nodes_removed: usize,
-    pub edges_added: usize,
-    pub edges_removed: usize,
-    pub new_cycles: usize,
-    pub resolved_cycles: usize,
+    // ── 6-Component Sub-Scores (0.0 - 100.0 each) ──
+    /// Cycle debt sub-score (weight: 30%)
+    #[serde(default)]
+    pub cycle_debt: f64,
+    /// Layering debt sub-score (weight: 25%)
+    #[serde(default)]
+    pub layering_debt: f64,
+    /// Hub debt sub-score (weight: 15%)
+    #[serde(default)]
+    pub hub_debt: f64,
+    /// Coupling debt sub-score (weight: 12%)
+    #[serde(default)]
+    pub coupling_debt: f64,
+    /// Cognitive debt sub-score (weight: 10%)
+    #[serde(default)]
+    pub cognitive_debt: f64,
+    /// Instability debt sub-score (weight: 8%)
+    #[serde(default)]
+    pub instability_debt: f64,
 }

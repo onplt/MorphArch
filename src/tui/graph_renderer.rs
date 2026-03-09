@@ -235,7 +235,7 @@ impl GraphLayout {
             labels,
             repulsion: 1500.0,
             attraction: 0.045,
-            damping: 0.82,
+            damping: 0.7, // 0.7 offers good balance between stiffness and fluid response
             ideal_length,
             width,
             height,
@@ -262,9 +262,6 @@ impl GraphLayout {
         let mut fx = vec![0.0f64; n];
         let mut fy = vec![0.0f64; n];
 
-        // Temperature-scaled force multiplier (hot = stronger forces for exploration)
-        let temp_scale = 0.5 + self.temperature * 0.5; // range [0.5, 1.0]
-
         // 1. Barnes-Hut Repulsion: build quadtree then compute forces
         let q_size = self.width.max(self.height).max(1.0);
         let mut qt = Quadtree::new(0.0, 0.0, q_size, 0);
@@ -284,7 +281,7 @@ impl GraphLayout {
         } else {
             self.repulsion
         };
-        let repulsion_const = dynamic_repulsion * temp_scale;
+        let repulsion_const = dynamic_repulsion;
 
         for i in 0..n {
             let mut f = (0.0, 0.0);
@@ -349,8 +346,13 @@ impl GraphLayout {
         }
 
         // 4. Temperature-scaled micro-jitter: alive feel that fades as graph settles
+        // We only apply this jitter initially when graph is "hot" so dragging doesn't cause noise.
         let mut rng = rand::rng();
-        let jitter = 0.15 * self.temperature;
+        let jitter = if self.temperature > 0.5 {
+            0.5 * self.temperature
+        } else {
+            0.0
+        };
         if jitter > 0.001 {
             for i in 0..n {
                 fx[i] += rng.random_range(-jitter..jitter);
@@ -368,11 +370,17 @@ impl GraphLayout {
             let vx = (self.positions[i].x - self.positions[i].prev_x) * self.damping;
             let vy = (self.positions[i].y - self.positions[i].prev_y) * self.damping;
 
+            // Temperature acts as alpha multiplier (d3-force style).
+            // It scales the forces uniformly so the target equilibrium never changes,
+            // but the nodes eventually stop moving when cold.
+            let mut fxi = fx[i] * self.temperature;
+            let mut fyi = fy[i] * self.temperature;
+
             // Clamp velocity and force to prevent explosions
             let vx = vx.clamp(-max_disp, max_disp);
             let vy = vy.clamp(-max_disp, max_disp);
-            let fxi = fx[i].clamp(-max_disp, max_disp);
-            let fyi = fy[i].clamp(-max_disp, max_disp);
+            fxi = fxi.clamp(-max_disp, max_disp);
+            fyi = fyi.clamp(-max_disp, max_disp);
 
             let new_x = self.positions[i].x + vx + fxi;
             let new_y = self.positions[i].y + vy + fyi;
@@ -405,7 +413,7 @@ impl GraphLayout {
         // 7. Temperature decay — graph settles quickly then freezes.
         // Rate 0.997 per step: with 90 steps/sec (~30fps * 3 substeps),
         // temperature drops to ~7% after 10s, ~2% after 15s → physics freezes.
-        self.temperature = (self.temperature * 0.997).max(0.01);
+        self.temperature = (self.temperature * 0.997).max(0.001);
     }
 
     /// Runs multiple physics steps at once (for warmup or faster convergence).
@@ -596,14 +604,15 @@ pub fn drift_color(drift_score: u8) -> Color {
 
 /// Returns an edge color scaled by weight (import count).
 ///
-/// - weight 1:   dim overlay (low-traffic dependency)
-/// - weight 2-3: medium Sapphire
-/// - weight 4+:  bright Sapphire (high-traffic dependency)
+/// Uses warm-shift progression: dim → cool blue → warm orange → red
+/// so heavy edges naturally draw attention.
 pub fn weighted_edge_color(weight: u32) -> Color {
     match weight {
-        1 => Color::Rgb(88, 91, 112),       // Catppuccin Overlay0 — dim
-        2..=3 => Color::Rgb(116, 199, 236), // Catppuccin Sapphire — normal
-        _ => Color::Rgb(137, 220, 255),     // Bright Sapphire — heavy
+        1 => Color::Rgb(69, 71, 90), // Surface2 — barely visible (trivial dep)
+        2..=3 => Color::Rgb(88, 91, 112), // Overlay0 — light coupling
+        4..=7 => Color::Rgb(116, 199, 236), // Sapphire — normal coupling
+        8..=15 => Color::Rgb(250, 179, 135), // Peach — heavy coupling (warm = attention)
+        _ => Color::Rgb(243, 139, 168), // Red — critical (spaghetti)
     }
 }
 

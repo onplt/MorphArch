@@ -91,21 +91,17 @@ When running with the `--json` flag, MorphArch returns a structured object. Use 
 {
   "commit": "abc1234...",
   "total": 92,
-  "metrics": {
-    "cycles": 1,
-    "violations": 2,
-    "density": 3.8
-  },
-  "cycles": [
-    ["pkg-a", "pkg-b", "pkg-a"]
-  ],
-  "violations": [
-    {
-      "from": "shared-lib",
-      "to": "web-app",
-      "rule": "shared/ -> apps/"
-    }
-  ],
+  "fan_in_delta": 0,
+  "fan_out_delta": 1,
+  "new_cycles": 1,
+  "boundary_violations": 2,
+  "cognitive_complexity": 5.4,
+  "cycle_debt": 4.5,
+  "layering_debt": 2.0,
+  "hub_debt": 0.0,
+  "coupling_debt": 1.5,
+  "cognitive_debt": 0.0,
+  "instability_debt": 0.0,
   "metadata": {
     "node_count": 12,
     "edge_count": 45,
@@ -116,7 +112,7 @@ When running with the `--json` flag, MorphArch returns a structured object. Use 
 
 #### Field Definitions:
 - `total`: The final Health Score (0-100).
-- `metrics.cycles`: Number of circular dependency groups detected.
-- `metrics.violations`: Number of boundary rules broken.
-- `cycles`: An array of arrays, where each inner array lists the packages in a circular loop.
-- `violations`: A list of specific edges that broke a defined architectural rule.
+- `new_cycles`: Number of circular dependency groups detected (SCCs).
+- `boundary_violations`: Back-edges in the topological ordering of the dependency graph.
+- `*_debt`: The exact sub-score calculated by the 6-component scoring algorithm for each specific architecture risk.
+- `fan_in_delta` / `fan_out_delta`: Median change in module fan-in/fan-out compared to the previous commit.

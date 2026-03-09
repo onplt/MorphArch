@@ -143,27 +143,25 @@ improvement recommendations.
 
 ---
 
-## Architecture Health
+## Architecture Health Scoring
 
-MorphArch assigns each commit a health score between 0 and 100. Higher scores
-indicate cleaner, more maintainable architecture.
+MorphArch assigns each commit a system health score between **0 and 100**. Higher scores indicate a cleaner, more maintainable architecture.
 
 | Health | Status | Description |
 |--------|--------|-------------|
-| 90--100 | Clean | Excellent structural integrity. |
-| 70--89 | Healthy | Minor coupling debt, but no fatal flaws. |
-| 40--69 | Warning | Significant debt (cycles or violations) detected. |
-| 0--39 | Critical | High structural risk; refactoring required. |
+| **90-100** | **Clean** | Excellent structural integrity. Modular and cohesive. |
+| **70-89**  | **Healthy** | Minor architectural debt, but no fatal flaws. |
+| **40-69**  | **Warning** | Significant debt detected. Prone to ripple effects. |
+| **0-39**   | **Critical** | Spagetti code. High structural risk; immediate refactoring required. |
 
-The score is calculated by subtracting "Architectural Debt" from a base of 100:
+The score uses a **6-component scale-aware algorithm** that calculates "Architectural Debt" and subtracts it from a base of 100. It dynamically scales its expectations based on the size of your repository, forgiving necessary complexity while harshly penalizing true anti-patterns.
 
-- **Cyclic dependencies** (**-25 pts**) -- circular paths between packages that
-  break modularity, detected via SCC analysis.
-- **Boundary violations** (**-15 pts**) -- dependencies that violate layer
-  constraints (e.g., shared libs depending on application code).
-- **Coupling density** (**-5 pts per unit > 3.5**) -- penalizes excessive
-  inter-package connections beyond a healthy threshold. Large projects like
-  Deno are given grace for necessary complexity.
+- **Cycle Debt (30%):** Circular paths between packages that break modularity. Detected via Strongly Connected Components (Kosaraju's algorithm).
+- **Layering Debt (25%):** Back-edges in the topological ordering of the dependency graph (boundary violations).
+- **Hub/God Module Debt (15%):** Penalizes "God modules" that have both abnormally high incoming (Fan-in) and outgoing (Fan-out) dependencies, ignoring natural entry points (`main`, `index`, `app`).
+- **Coupling Debt (12%):** Weighted coupling intensity based on the exact count of import statements between modules.
+- **Cognitive Debt (10%):** Evaluates graph Shannon entropy. Penalizes structures where the sheer density of connections makes the system impossible for a human to reason about.
+- **Instability Debt (8%):** Based on Martin's Abstractness/Instability metrics. Flags fragile modules that depend on everything but are depended upon by nothing.
 
 ---
 

@@ -36,7 +36,7 @@ The codebase follows a pipeline: **Git → Parse → Graph → Score → Store �
 1. **git_scanner.rs** — Walks commits via `gix`, diffs trees, collects changed blobs. Uses subtree caching for incremental scans.
 2. **parser.rs** — Extracts imports from source blobs using tree-sitter. Supports Rust, TypeScript/TSX, JavaScript/JSX, Python, and Go.
 3. **graph_builder.rs** — Constructs a `petgraph::DiGraph` from dependency edges.
-4. **scoring.rs** — Computes a 0–100 absolute health score (100 is best). Penalizes cycles (-25), boundary violations (-15), and excessive coupling density (>3.5).
+4. **scoring.rs** — Computes a 0–100 absolute health score using a 6-component scale-aware algorithm: Cycle Debt (30%), Layering Debt (25%), Hub Debt (15%), Coupling Debt (12%), Cognitive Debt (10%), and Instability Debt (8%). Automatically exempts entry points (`main`, `index`, `app`) from fragility penalties.
 5. **db.rs** — Persists commits and graph snapshots to SQLite (WAL mode).
 
 ### Commands (src/commands/)
@@ -53,10 +53,10 @@ The codebase follows a pipeline: **Git → Parse → Graph → Score → Store �
 
 ## Key Design Decisions
 
-- **Absolute Health**: Scoring is based on structural correctness (0 debt = 100% health).
-- **No git CLI dependency**: All operations use pure-Rust `gix`.
-- **Mission Control UI**: TUI adheres to k9s-style professional terminal aesthetics.
-- **Large Repo Support**: Density thresholds are tuned for scale (e.g., Deno).
+- **Scale-Aware Health Scoring**: The 6-component debt algorithm dynamically adjusts baseline expectations depending on repo size. "God object" limits and cognitive complexity thresholds relax naturally for large monorepos (e.g., Deno).
+- **Entry Point Exemption**: Prevents false positive "fragile" warnings for natural composition roots like `main`, `app`, and `index`.
+- **No git CLI dependency**: All operations use pure-Rust `gix` for maximum portability and speed.
+- **Mission Control UI**: TUI adheres to k9s-style professional terminal aesthetics, optimized to prevent layout stretching on dynamic panels (e.g. fixed-height sparklines).
 
 ## CI
 

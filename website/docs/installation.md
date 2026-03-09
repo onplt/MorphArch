@@ -5,7 +5,7 @@ MorphArch is distributed as a high-performance Rust binary. You can install it u
 ## Prerequisites
 
 - **Rust Toolchain**: You need the Rust compiler (v1.85+) and Cargo installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
-- **Git**: MorphArch analyzes Git history, so `git` must be available in your system path.
+- **Zero External Dependencies**: Because MorphArch is powered by the `gitoxide` (`gix`) pure-Rust Git engine, you do **not** even need the `git` CLI installed on your system to run it!
 
 ---
 

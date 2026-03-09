@@ -6,56 +6,66 @@ The **Scoring Engine** is the core of MorphArch. It translates complex graph rel
 
 MorphArch views architecture through the lens of **Technical Debt**. We start with a perfect score of **100** and subtract points for structural flaws that hinder maintainability.
 
+The engine uses a **6-component scale-aware algorithm** that calculates "Architectural Debt" and subtracts it from a base of 100. It dynamically scales its expectations based on the size of your repository, forgiving necessary complexity while harshly penalizing true anti-patterns.
+
 ---
 
-## 1. Cyclic Dependencies (-25 pts)
+## 1. Cycle Debt (30%)
 Cycles are the most severe architectural flaw. They break modularity, making it impossible to test or deploy packages in isolation.
 
-- **Detection**: Uses the **Kosaraju's Algorithm** to find **Strongly Connected Components (SCC)**.
-- **Penalty**: -25 points per group of packages that form a cycle.
-- **Example**:
-  - `pkg-A` imports `pkg-B`
-  - `pkg-B` imports `pkg-C`
-  - `pkg-C` imports `pkg-A` **(Cycle Detected!)**
-
-:::danger Why it matters
-Cycles lead to "Spaghetti Code" where changing one line in a library might break an entire unrelated application.
-:::
+- **Detection**: Uses **Kosaraju's Algorithm** to find **Strongly Connected Components (SCC)**.
+- **Impact**: Accounts for up to 30% of total architectural debt.
+- **Why it matters**: Cycles lead to "Spaghetti Code" where changing one line in a library might break an entire unrelated application. Break cycles using dependency inversion or by extracting shared logic into a lower-level package.
 
 ---
 
-## 2. Boundary Violations (-15 pts)
-Boundaries define the "flow" of your architecture. High-level modules (apps) should depend on low-level modules (libs), never the other way around.
+## 2. Layering Debt (25%)
+Boundaries define the "flow" of your architecture. High-level modules should depend on low-level modules, never the other way around.
 
-- **Detection**: Compares extracted AST imports against rules defined in your `morpharch.toml`.
-- **Penalty**: -15 points per unique violation edge.
-- **Example Violation**:
-  ```toml
-  # morpharch.toml rules
-  rules = [["libs/", "apps/"]] # libs should NOT depend on apps
-  ```
-  ```typescript
-  // apps/web/utils.ts
-  export const VERSION = '1.0';
-
-  // libs/core/logger.ts
-  import { VERSION } from '../../apps/web/utils'; // Error: Boundary Violation!
-  ```
+- **Detection**: Measures back-edges in the topological ordering of the dependency graph.
+- **Impact**: Accounts for up to 25% of total debt.
+- **Why it matters**: Dependencies that violate layer constraints (e.g., shared libs depending on application code) create massive ripple effects.
 
 ---
 
-## 3. Coupling Density (-5 pts)
+## 3. Hub / God Module Debt (15%)
+"God modules" are those that do too much, knowing everything and being known by everyone.
+
+- **Detection**: Penalizes modules that have abnormally high incoming (Fan-in) and outgoing (Fan-out) dependencies relative to the graph's median.
+- **Exception (Entry Points)**: MorphArch is smart enough to ignore natural entry points (`main`, `index`, `app`, `lib`, `mod`). It understands that a `main` module is *supposed* to wire everything together and won't penalize it as a God module.
+- **Impact**: Accounts for up to 15% of total debt.
+
+---
+
+## 4. Coupling Debt (12%)
 Large systems are naturally complex, but excessive connections lead to fragility.
 
-- **Metric**: `Edge Count / Node Count`.
-- **Threshold**: MorphArch uses a base threshold of **3.5**.
-- **Penalty**: -5 points for every 1.0 unit above the threshold.
-- **Scale Grace**: Projects with fewer than 10 nodes are exempt from density penalties to allow for early-stage rapid prototyping.
+- **Detection**: Calculates weighted coupling intensity based on the exact count of import statements between modules.
+- **Impact**: Accounts for up to 12% of total debt.
+- **Scale Grace**: Larger monorepos are given more leniency for natural coupling than smaller ones.
+
+---
+
+## 5. Cognitive Debt (10%)
+Can a human developer actually understand this graph?
+
+- **Detection**: Evaluates graph **Shannon entropy** and edge excess ratios.
+- **Impact**: Accounts for up to 10% of total debt.
+- **Why it matters**: Penalizes structures where the sheer density of connections makes the system impossible for a human to reason about, even if it technically compiles.
+
+---
+
+## 6. Instability Debt (8%)
+Fragile modules are a risk. A module is fragile if it depends on many other modules, but few (or none) depend on it.
+
+- **Detection**: Based on Robert C. Martin's Abstractness/Instability metrics. Flags modules that are highly unstable (High Fan-out, Low Fan-in).
+- **Exception**: Leaf nodes (packages with no outgoing dependencies) and Entry points are excluded from this penalty.
+- **Impact**: Accounts for up to 8% of total debt.
 
 ---
 
 ## How to Improve Your Score
 
-1.  **Break Cycles**: Use dependency inversion or extract shared logic into a new, lower-level package.
-2.  **Define Boundaries**: Explicitly list your layer rules in `morpharch.toml`.
-3.  **Refactor "God Packages"**: If a package has a high instability index, it likely has too many responsibilities. Split it.
+1.  **Break Cycles**: Use interfaces or traits to invert dependencies.
+2.  **Split Responsibilities**: Refactor "Hub/God Modules" by splitting them into smaller, single-purpose packages.
+3.  **Review the TUI Advisory**: The MorphArch TUI provides actionable, senior-architect-level advice on exactly which modules are causing the most debt.

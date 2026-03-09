@@ -18,7 +18,7 @@ MorphArch scans your Git history, builds per-commit dependency graphs using **AS
 ## Why MorphArch?
 
 - **Visual Clarity**: See your architecture as an animated, interactive graph.
-- **Quantitative Health**: Get a 0-100 score based on cycles and violations.
+- **Quantitative Health**: Get a 0-100 score based on a 6-component scale-aware algorithm (cycles, boundaries, coupling, cognitive load, and fragility).
 - **High Performance**: Written in Rust, optimized for monorepos with thousands of files.
 - **Git-Native**: Analyze the evolution, not just the current state.
 

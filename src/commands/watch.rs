@@ -19,12 +19,6 @@ use crate::commands::scan::run_scan;
 use crate::db::Database;
 use crate::tui::app::{App, run_tui};
 
-/// Default number of graph snapshots to load for the TUI timeline.
-/// Enough to show meaningful history without overwhelming the UI.
-/// (CLI default is set in cli.rs; this constant is used in tests.)
-#[allow(dead_code)]
-const DEFAULT_TIMELINE_SNAPSHOTS: usize = 200;
-
 /// Runs the watch command: scan + TUI launch.
 pub async fn run_watch(
     repo_path: &Path,
@@ -66,22 +60,16 @@ pub async fn run_watch(
     let mut app = App::new(Some(db), snapshots);
     app.set_timeline_commits(timeline_commits);
 
+    // Set repo name for breadcrumb display
+    let repo_name = repo_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".to_string());
+    app.set_repo_name(repo_name);
+
     info!("Watch: Launching TUI");
     run_tui(app).await?;
 
     info!("Watch: TUI closed");
     Ok(())
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_timeline_snapshots_constant() {
-        assert_eq!(DEFAULT_TIMELINE_SNAPSHOTS, 200);
-    }
 }
