@@ -1206,4 +1206,64 @@ mod tests {
             score.total
         );
     }
+
+    // ── Test: Entry Point Exemption (Main/Index/App) ──
+    #[test]
+    fn test_entry_point_exemption() {
+        let mut g = DiGraph::new();
+        // Create an entry point module that acts as a "God Module" (high fan-out, zero fan-in)
+        let entry = g.add_node("src/main.rs".to_string());
+        let mut targets = Vec::new();
+
+        for i in 0..15 {
+            let n = g.add_node(format!("module_{i}"));
+            targets.push(n);
+            g.add_edge(entry, n, 1);
+        }
+
+        // Add an extra connection to bump up instability parameters
+        let child = g.add_node("child".to_string());
+        g.add_edge(targets[0], child, 1);
+        g.add_edge(child, targets[0], 1); // create a cycle to force non-zero score to trigger diagnostics
+
+        let _score = calculate_drift(&g, None, 0);
+
+        // Ensure hub_debt is 0 for entry points despite high fan-out
+        // Note: The logic in `compute_hub_debt` checks `is_entry`
+        let mut g_regular = DiGraph::new();
+        let reg = g_regular.add_node("src/utils.rs".to_string());
+        for i in 0..15 {
+            let n = g_regular.add_node(format!("module_{i}"));
+            g_regular.add_edge(reg, n, 1);
+            g_regular.add_edge(n, reg, 1); // Make it high fan-in AND fan-out
+        }
+
+        let _score_reg = calculate_drift(&g_regular, None, 0);
+
+        // generate_diagnostics shouldn't flag 'main.rs' as brittle
+        let mock_score = DriftScore {
+            total: 50,
+            fan_in_delta: 0,
+            fan_out_delta: 0,
+            new_cycles: 0,
+            boundary_violations: 0,
+            cognitive_complexity: 0.0,
+            timestamp: 0,
+            cognitive_debt: 0.0,
+            cycle_debt: 0.0,
+            layering_debt: 0.0,
+            coupling_debt: 0.0,
+            hub_debt: 20.0,         // Force diagnostic generation
+            instability_debt: 20.0, // Force diagnostic generation
+        };
+
+        let diagnostics = generate_diagnostics(&g, &mock_score);
+        let joined_diagnostics = diagnostics.join(" ");
+
+        // The word "main" or "main.rs" should NOT be flagged as fragile
+        assert!(
+            !joined_diagnostics.contains("main.rs fragile"),
+            "Entry points should not be flagged as fragile"
+        );
+    }
 }

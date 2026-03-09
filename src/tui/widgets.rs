@@ -123,7 +123,7 @@ pub fn truncate_str(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    
+
     let char_count = s.chars().count();
     if char_count <= max_width {
         s.to_string()
@@ -167,5 +167,19 @@ mod tests {
     #[test]
     fn test_truncate_str_one() {
         assert_eq!(truncate_str("hello", 1), "…");
+    }
+
+    #[test]
+    fn test_truncate_str_multibyte_emoji() {
+        // "→" is 3 bytes, "🚀" is 4 bytes. If it slices by bytes, it would panic.
+        let msg = "chore: upgrade → faster 🚀 speed";
+        assert_eq!(truncate_str(msg, 20), "chore: upgrade → fa…");
+    }
+
+    #[test]
+    fn test_truncate_str_multibyte_exact() {
+        let msg = "test→";
+        assert_eq!(truncate_str(msg, 5), "test→");
+        assert_eq!(truncate_str(msg, 4), "tes…");
     }
 }
