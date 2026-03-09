@@ -26,11 +26,11 @@ If you want a static report of your current HEAD commit, run:
 morpharch analyze
 ```
 
-This will output a detailed breakdown of your **Architectural Debt**, including specific circular dependencies and boundary violations.
+This will output a detailed breakdown of your **Architectural Debt**, including specific circular dependencies, God-modules, and topological boundary violations.
 
 ---
 
 ## Next Steps
 
 - Learn about the [Scoring Engine](./concepts/scoring) to understand your health score.
-- Set up a [Custom Configuration](./guides/configuration) to define your own boundary rules.
+- Learn how [Zero-Config Topology](./guides/configuration) handles boundary rules automatically.

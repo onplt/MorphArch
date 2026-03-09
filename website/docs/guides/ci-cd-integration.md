@@ -38,7 +38,7 @@ jobs:
           
           # Fail if score is below 80
           if [ "$SCORE" -lt 80 ]; then
-            echo "Architecture health is too low ($SCORE)! Please fix circular dependencies or violations."
+            echo "Architecture health is too low ($SCORE)! Please fix circular dependencies or architectural debt."
             exit 1
           fi
 ```

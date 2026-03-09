@@ -1,61 +1,31 @@
 # Configuration Guide
 
-MorphArch is "zero-config" by default, but truly shines when you customize it to match your team's architectural standards.
+MorphArch is designed to be **"zero-config"** out of the box. It relies on topological analysis rather than strict string-matching to evaluate your architecture, meaning it works automatically for almost any monorepo without tedious setup.
 
-## The `morpharch.toml` File
+## How it works without a config file
 
-Place this file in your repository root. MorphArch will automatically detect and apply these settings during the `scan` and `watch` commands.
+### 1. Monorepo Detection
+MorphArch is built for monorepos. It natively understands and parses dependencies by treating top-level folders or standard workspace structures as discrete packages.
+- It automatically processes code in Rust, TypeScript, JavaScript, Python, and Go.
 
-```toml
-# --- Scoring Settings ---
-[scoring]
-# The point at which coupling is considered "too dense".
-# Default: 3.5
-density_threshold = 4.0
+### 2. Topological Layering (Boundary Rules)
+Instead of forcing you to write regex rules in a `morpharch.toml` file to declare "App cannot depend on Lib", MorphArch uses **Topological Sorting**.
+- It analyzes the natural flow of your dependencies.
+- It detects **Back-edges** (when a low-level module unexpectedly imports a high-level module that depends on it).
+- This means boundary violations are detected algorithmically without manual configuration!
 
-# --- Layer Boundaries ---
-[boundaries]
-# Format: ["Source Prefix", "Illegal Destination Prefix"]
-# MorphArch will penalize dependencies that match these pairs.
-rules = [
-    ["packages/core", "apps/"],    # Core should not know about Apps
-    ["packages/shared", "packages/features"], # Shared libs should be pure
-    ["libs/", "cmd/"]              # Libraries should not depend on CLI entrypoints
-]
-
-# --- Scanner Exclusions ---
-[scan]
-# Patterns to skip during AST parsing.
-# MorphArch respects .gitignore, but you can add specific paths here.
-ignore = [
-    "**/tests/**",
-    "**/benchmarks/**",
-    "vendor/"
-]
-```
+### 3. Entry Point Detection
+MorphArch automatically forgives natural entry points from being flagged as "God Modules" or "Fragile".
+- Any file or module named `main`, `index`, `app`, `lib`, or `mod` is recognized as a composition root.
 
 ## Environment Variables
 
-For CI/CD environments, you can override settings using environment variables:
+For CI/CD environments, you can override system-level settings using environment variables:
 
-- `MORPHARCH_CONFIG`: Path to a custom config file.
 - `MORPHARCH_DB_PATH`: Path to the SQLite database (default: `~/.morpharch/morpharch.db`).
 
 ---
 
-## Workspace Autodetection
+## Future Roadmap
 
-MorphArch is built for monorepos. It natively understands:
-
-### Nx & Turborepo
-It parses `project.json` and `turbo.json` to identify package boundaries automatically.
-
-### Cargo Workspaces
-It reads the `[workspace]` section of your root `Cargo.toml`.
-
-### pnpm & Lerna
-It follows `pnpm-workspace.yaml` and `lerna.json` structures.
-
-:::info
-If your workspace is not detected, MorphArch will fall back to **Directory-level analysis**, treating each top-level folder as a package.
-:::
+While MorphArch is currently zero-config to maximize ease of use, future versions may introduce a `morpharch.toml` file to allow teams to define custom architectural exceptions, strict boundary regexes, and specific density thresholds tailored to their unique domain logic.

@@ -187,7 +187,7 @@ impl Database {
     }
 
     /// Lists all commits in descending timestamp order.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn list_commits(&self) -> Result<Vec<CommitInfo>> {
         let mut stmt = self
             .conn
@@ -423,7 +423,7 @@ impl Database {
     ///
     /// Updates the drift_json column of an existing graph snapshot.
     /// Only drift info is added if the snapshot already exists.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn update_drift_score(&self, commit_hash: &str, drift: &DriftScore) -> Result<()> {
         let drift_json = serde_json::to_string(drift)
             .with_context(|| format!("Failed to serialize DriftScore to JSON: {commit_hash}"))?;
@@ -779,6 +779,12 @@ mod tests {
             boundary_violations: 2,
             cognitive_complexity: 12.5,
             timestamp: 3_000_000,
+            cycle_debt: 0.0,
+            layering_debt: 0.0,
+            hub_debt: 0.0,
+            coupling_debt: 0.0,
+            cognitive_debt: 0.0,
+            instability_debt: 0.0,
         };
 
         let snapshot = GraphSnapshot {
@@ -854,6 +860,12 @@ mod tests {
             boundary_violations: 0,
             cognitive_complexity: 5.0,
             timestamp: 4_000_000,
+            cycle_debt: 0.0,
+            layering_debt: 0.0,
+            hub_debt: 0.0,
+            coupling_debt: 0.0,
+            cognitive_debt: 0.0,
+            instability_debt: 0.0,
         };
         db.update_drift_score("upd01", &drift).unwrap();
 

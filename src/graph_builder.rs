@@ -1,8 +1,9 @@
 //! Dependency graph construction with petgraph.
 //!
-//! Builds a directed graph (`DiGraph<String, ()>`) from parsed dependency edges.
-//! Nodes are module/package names; edges represent import relationships.
-//! Self-edges and duplicate edges are automatically filtered.
+//! Builds a directed graph (`DiGraph<String, u32>`) from parsed dependency edges.
+//! Nodes are module/package names; edges represent import relationships with weights.
+//! Edge weights reflect coupling intensity (number of import statements).
+//! Self-edges and duplicate edges are automatically filtered (weights are summed).
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
@@ -16,13 +17,15 @@ use crate::models::DependencyEdge;
 /// - `edges`: Dependency edges between modules
 ///
 /// # Returns
-/// petgraph `DiGraph<String, ()>` — nodes are package names, edges are dependencies.
+/// petgraph `DiGraph<String, u32>` — nodes are package names, edges are weighted dependencies.
+/// Edge weight = number of import statements for that (from → to) pair.
 ///
 /// # Behavior
 /// - One node is created for each unique package name
 /// - `from_module` and `to_module` from edges are used directly as node labels
 ///   (they should already contain clean package names from scan.rs)
-pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGraph<String, ()> {
+/// - Duplicate edges are merged: their weights are summed
+pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGraph<String, u32> {
     let mut graph = DiGraph::new();
     let mut node_indices: HashMap<String, NodeIndex> = HashMap::new();
 
@@ -46,9 +49,12 @@ pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGrap
             .entry(to_pkg.clone())
             .or_insert_with(|| graph.add_node(to_pkg));
 
-        // Don't add duplicate edges (deduplicate)
-        if !graph.contains_edge(from_idx, to_idx) {
-            graph.add_edge(from_idx, to_idx, ());
+        // Merge duplicate edges by summing weights
+        if let Some(existing) = graph.find_edge(from_idx, to_idx) {
+            let w = graph[existing];
+            graph[existing] = w + edge.weight;
+        } else {
+            graph.add_edge(from_idx, to_idx, edge.weight);
         }
     }
 
@@ -95,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_graph_deduplication() {
+    fn test_build_graph_deduplication_and_weight_merge() {
         let nodes = HashSet::new();
         let edges = vec![
             DependencyEdge {
@@ -103,14 +109,14 @@ mod tests {
                 to_module: "core".to_string(),
                 file_path: "apps/web/src/app.ts".to_string(),
                 line: 1,
-                weight: 1,
+                weight: 2,
             },
             DependencyEdge {
                 from_module: "web".to_string(),
                 to_module: "core".to_string(),
                 file_path: "apps/web/src/index.ts".to_string(),
                 line: 1,
-                weight: 1,
+                weight: 3,
             },
         ];
 
@@ -122,6 +128,11 @@ mod tests {
             1,
             "same package pair should have one edge"
         );
+        // Weight should be summed: 2 + 3 = 5
+        let web_idx = graph.node_indices().find(|&n| graph[n] == "web").unwrap();
+        let core_idx = graph.node_indices().find(|&n| graph[n] == "core").unwrap();
+        let edge = graph.find_edge(web_idx, core_idx).unwrap();
+        assert_eq!(graph[edge], 5, "duplicate edge weights should be summed");
     }
 
     #[test]

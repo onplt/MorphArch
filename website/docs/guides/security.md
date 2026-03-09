@@ -16,16 +16,15 @@ Unlike many "SaaS" architecture tools, MorphArch does **not** upload your source
 
 MorphArch stores its analysis results in a local SQLite database located at `~/.morpharch/morpharch.db`.
 
-### What is stored?
-- Commit hashes and timestamps.
-- Metadata about detected packages (names and relative paths).
-- Dependency counts (edges) between packages.
-- Architectural drift scores.
+### What IS stored locally?
+- **Git Metadata**: Commit hashes, timestamps, commit messages, author names, and author emails (used exclusively to render the TUI timeline).
+- **Topology Data**: Metadata about detected packages (names and relative paths) and dependency edges (counts of import statements between packages).
+- **Scores**: Architectural drift scores and sub-metrics.
 
-### What is NOT stored?
-- Actual source code content.
+### What is NEVER stored or transmitted?
+- Actual source code content (ASTs are built in memory and dropped).
 - Sensitive information like API keys, secrets, or environment variables.
-- Developer names or email addresses from Git metadata.
+- Code blocks or function implementations.
 
 ---
 

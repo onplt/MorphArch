@@ -39,8 +39,8 @@ const FeatureList: FeatureItem[] = [
     color: '#9ece6a',
     description: (
       <>
-        Quantify your structural debt. Detect cyclic dependencies and boundary 
-        violations automatically to keep your architecture clean and maintainable.
+        Quantify your structural debt. A 6-component, scale-aware algorithm detects 
+        cycles, God-modules, and tight coupling to keep your architecture maintainable.
       </>
     ),
   },

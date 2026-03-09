@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-03-09
+
+### Added
+
+- **6-Component Scale-Aware Scoring Algorithm:** Completely overhauled the architectural health engine. It now calculates debt based on 6 critical components: Cycle Debt (30%), Layering Debt (25%), Hub Debt (15%), Coupling Debt (12%), Cognitive Debt (10%), and Instability Debt (8%).
+- **Entry Point Exemption:** The scoring engine is now smart enough to detect natural application entry points (`main`, `index`, `app`, `lib`, `mod`) and automatically exempts them from "God Module" and "Fragility" penalties, eliminating false-positive architectural warnings.
+- **Topological Boundary Detection:** Replaced rigid regex-based layer rules with algorithmic Topological Sorting. Boundary violations are now natively detected as back-edges in the dependency flow, creating a truly zero-config experience.
+
+### Changed
+
+- **Responsive TUI Trends Panel:** Re-architected the `ratatui` layout constraints for the Trends tab. The Health Sparkline is now capped at an optimal fixed height, preventing the ugly "infinite vertical stretch" bug on high-resolution terminals.
+- **Robust Multibyte String Handling:** Refactored the `truncate_str` helper function to use safe `.chars().take(n)` iterators instead of raw byte slicing. This completely resolves a critical panic (crash) that occurred when navigating the timeline over commits containing Unicode symbols (like `→`) or emojis in their messages.
+- **Comprehensive Documentation Rewrite:** The `README.md`, `CLAUDE.md`, and all Docusaurus website contents (`docs/` and `src/pages/`) have been fully refactored by a Senior Architect. The documentation now perfectly reflects the new scale-aware scoring system and zero-config philosophy.
+- **Dead Code Eradication:** Conducted a massive cleanup of deprecated functions (`TemporalDelta`, unused `format_timestamp`, legacy tests). The codebase is now 100% clean under `cargo clippy`.
+
 ## [1.1.0] - 2026-03-05
 
 ### Added

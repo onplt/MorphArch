@@ -121,11 +121,22 @@ impl TimelineState {
 ///
 /// Top line: slider bar (█ = current position)
 /// Bottom line: commit hash + message
-pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState) {
+pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState, focused: bool) {
+    let border_color = if focused { ACCENT_LAVENDER } else { FG_OVERLAY };
+    let title_style = if focused {
+        Style::default()
+            .fg(ACCENT_LAVENDER)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(FG_OVERLAY)
+    };
     let block = Block::default()
-        .title(" Timeline (j/k H/L ±10  Home/End  +/-:speed  click:seek) ")
+        .title(Span::styled(
+            " Timeline (j/k H/L ±10  Home/End  +/-:speed  click:seek) ",
+            title_style,
+        ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(FG_OVERLAY))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(BG_SURFACE));
 
     let inner = block.inner(area);
