@@ -48,7 +48,7 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Platform-independent directory paths
-dirs = "5.0"
+dirs = "6.0"
 
 # Directed graph data structure
 petgraph = { version = "0.8", features = ["serde-1", "graphmap", "stable_graph"] }
