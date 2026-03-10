@@ -12,6 +12,7 @@ use petgraph::graph::DiGraph;
 use rayon::prelude::*;
 use tracing::{debug, info};
 
+use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::git_scanner;
 use crate::graph_builder;
@@ -206,9 +207,15 @@ struct ScanContext {
     repo: gix::ThreadSafeRepository,
     subtree_cache: Arc<git_scanner::SubtreeCache>,
     blob_import_cache: Arc<DashMap<[u8; 20], Vec<String>>>,
+    ignore_globs: Option<globset::GlobSet>,
 }
 
-pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanResult> {
+pub fn run_scan(
+    path: &Path,
+    db: &Database,
+    max_commits: usize,
+    project_config: &ProjectConfig,
+) -> Result<ScanResult> {
     let repo_handle =
         gix::discover(path).with_context(|| format!("Failed to open repo: {}", path.display()))?;
 
@@ -263,6 +270,7 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
         repo: gix::ThreadSafeRepository::open(repo_handle.path().to_owned())?,
         subtree_cache: Arc::new(git_scanner::SubtreeCache::new()),
         blob_import_cache: Arc::new(DashMap::with_capacity(50_000)),
+        ignore_globs: project_config.ignore_globs().cloned(),
     });
 
     let mut graphs_created = 0;
@@ -295,8 +303,12 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
                 };
 
                 let tree_oid = commit_obj.tree_id()?.detach();
-                let entries =
-                    git_scanner::walk_tree_entries_cached(&repo, tree_oid, &ctx.subtree_cache)?;
+                let entries = git_scanner::walk_tree_entries_cached(
+                    &repo,
+                    tree_oid,
+                    &ctx.subtree_cache,
+                    ctx.ignore_globs.as_ref(),
+                )?;
 
                 let mut all_nodes = HashSet::new();
                 let mut all_edges = Vec::new();
@@ -402,8 +414,12 @@ pub fn run_scan(path: &Path, db: &Database, max_commits: usize) -> Result<ScanRe
 
             let graph = graph_builder::build_graph(&kept_nodes, &final_edges);
             let nodes_vec: Vec<String> = kept_nodes.into_iter().collect();
-            let drift =
-                scoring::calculate_drift(&graph, prev_graph.as_ref(), commit_info.timestamp);
+            let drift = scoring::calculate_drift(
+                &graph,
+                prev_graph.as_ref(),
+                commit_info.timestamp,
+                &project_config.scoring,
+            );
 
             db.insert_graph_snapshot(&GraphSnapshot {
                 commit_hash: commit_info.hash,

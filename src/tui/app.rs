@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::config::ScoringConfig;
 use crate::db::Database;
 use crate::models::{DriftScore, GraphSnapshot, SnapshotMetadata};
 use crate::scoring;
@@ -135,6 +136,8 @@ pub struct App {
     pub insights_area: Rect,
     /// Component diagnostic advisory lines (computed from current graph)
     pub advisory_lines: Vec<String>,
+    /// Scoring configuration for diagnostics generation
+    pub scoring_config: ScoringConfig,
 }
 
 struct GraphRenderCache {
@@ -225,6 +228,7 @@ impl App {
             insights_panel_width: 34,
             insights_area: Rect::default(),
             advisory_lines: Vec::new(),
+            scoring_config: ScoringConfig::default(),
         };
 
         if let Some(first_meta) = app.snapshots_metadata.first() {
@@ -263,7 +267,7 @@ impl App {
 
         // Compute component diagnostics for advisory display
         if let Some(ref drift) = self.current_drift {
-            self.advisory_lines = scoring::generate_diagnostics(&g, drift);
+            self.advisory_lines = scoring::generate_diagnostics(&g, drift, &self.scoring_config);
         } else {
             self.advisory_lines.clear();
         }
@@ -593,6 +597,10 @@ impl App {
     /// Set repo name for breadcrumb display
     pub fn set_repo_name(&mut self, name: String) {
         self.repo_name = name;
+    }
+
+    pub fn set_scoring_config(&mut self, config: ScoringConfig) {
+        self.scoring_config = config;
     }
 
     /// Get sorted and filtered package list for sidebar
@@ -1843,7 +1851,13 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
     // ── Render active tab content ──
     match app.insight_tab {
         InsightTab::Health => {
-            render_insight_panel(frame, content_area, &app.current_drift, &app.advisory_lines);
+            render_insight_panel(
+                frame,
+                content_area,
+                &app.current_drift,
+                &app.advisory_lines,
+                &app.scoring_config.weights,
+            );
         }
         InsightTab::Hotspots => {
             render_hotspots_tab(frame, content_area, app);

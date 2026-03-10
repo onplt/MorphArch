@@ -16,6 +16,7 @@ use std::path::Path;
 use tracing::info;
 
 use crate::commands::scan::run_scan;
+use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::tui::app::{App, run_tui};
 
@@ -25,10 +26,11 @@ pub async fn run_watch(
     db: Database,
     max_commits: usize,
     max_snapshots: usize,
+    project_config: &ProjectConfig,
 ) -> Result<()> {
     // ── 1. Scan the repository ──
     info!(path = %repo_path.display(), "Watch: Scanning repository");
-    let scan_result = run_scan(repo_path, &db, max_commits)?;
+    let scan_result = run_scan(repo_path, &db, max_commits, project_config)?;
     info!(
         commits = scan_result.commits_scanned,
         graphs = scan_result.graphs_created,
@@ -59,6 +61,7 @@ pub async fn run_watch(
     // We move the DB into App for lazy loading
     let mut app = App::new(Some(db), snapshots);
     app.set_timeline_commits(timeline_commits);
+    app.set_scoring_config(project_config.scoring.clone());
 
     // Set repo name for breadcrumb display
     let repo_name = repo_path

@@ -26,12 +26,12 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use tracing::debug;
 
+use crate::config::{Exemptions, ScoringConfig, Thresholds};
 use crate::models::DriftScore;
 
-/// Boundary violation rules: dependencies between these prefix pairs are violations.
-/// Note: Left here for compatibility with the analyze CLI command, though no longer
-/// used in the core drift score calculation to ensure monorepo-agnostic behavior.
-pub const BOUNDARY_RULES: &[(&str, &str)] = &[
+/// Legacy boundary violation rules — retained only for backward compatibility
+/// with the `analyze` CLI command when no `morpharch.toml` boundaries are configured.
+pub const LEGACY_BOUNDARY_RULES: &[(&str, &str)] = &[
     ("packages::", "apps::"),
     ("lib::", "apps::"),
     ("core::", "apps::"),
@@ -168,7 +168,11 @@ fn compute_layering_debt(graph: &DiGraph<String, u32>) -> (f64, usize) {
 ///   These are entry points / orchestrators that naturally wire things together.
 ///
 /// Uses scale-adaptive threshold: `2·√N`.
-fn compute_hub_debt(graph: &DiGraph<String, u32>) -> f64 {
+fn compute_hub_debt(
+    graph: &DiGraph<String, u32>,
+    thresholds: &Thresholds,
+    exemptions: &Exemptions,
+) -> f64 {
     let n = graph.node_count();
     if n < 6 {
         return 0.0;
@@ -179,6 +183,24 @@ fn compute_hub_debt(graph: &DiGraph<String, u32>) -> f64 {
     let mut god_count = 0u32;
 
     for node_idx in graph.node_indices() {
+        let module_name = &graph[node_idx];
+
+        // Explicit exemption by name
+        if exemptions
+            .hub_exempt
+            .iter()
+            .any(|e| module_name.contains(e.as_str()))
+        {
+            continue;
+        }
+
+        // ── Exemption: Named entry point stems ──
+        // Modules whose file stem matches a configured entry point (e.g., "main",
+        // "index", "app") are composition roots by definition — not god modules.
+        if is_entry_point_stem(module_name, &exemptions.entry_point_stems) {
+            continue;
+        }
+
         let fan_in = graph
             .neighbors_directed(node_idx, petgraph::Direction::Incoming)
             .count();
@@ -194,16 +216,16 @@ fn compute_hub_debt(graph: &DiGraph<String, u32>) -> f64 {
         // Hub ratio: how much does this module export vs import?
         let hub_ratio = fan_out as f64 / (fan_in as f64 + 1.0);
 
-        // ── Exemption 1: Legitimate shared core ──
+        // ── Exemption: Legitimate shared core ──
         // High fan-in, low fan-out (e.g., deno_core: 42 in, 3 out → ratio = 0.07)
-        if hub_ratio < 0.3 {
+        if hub_ratio < thresholds.hub_exemption_ratio {
             continue;
         }
 
-        // ── Exemption 2: Composition root / entry point ──
+        // ── Exemption: Composition root by fan-in threshold ──
         // Zero or very low fan-in means this is a top-level orchestrator, not a god
         // module. cli/tools (0 in, 46 out) is an entry point, not an anti-pattern.
-        if fan_in <= 2 {
+        if fan_in <= thresholds.entry_point_max_fan_in {
             continue;
         }
 
@@ -347,8 +369,12 @@ fn compute_cognitive_debt(graph: &DiGraph<String, u32>) -> f64 {
 /// Computes instability debt using refined Martin metric.
 ///
 /// Key fix: Excludes leaf packages (ca=0) which naturally have I=1.0.
-/// Only penalizes non-leaf brittle modules: I > 0.8 AND fan_in > 0 AND degree ≥ 3.
-fn compute_instability_debt(graph: &DiGraph<String, u32>) -> f64 {
+/// Only penalizes non-leaf brittle modules: I > threshold AND fan_in > 0 AND degree ≥ 3.
+fn compute_instability_debt(
+    graph: &DiGraph<String, u32>,
+    thresholds: &Thresholds,
+    exemptions: &Exemptions,
+) -> f64 {
     let n = graph.node_count();
     if n < 3 {
         return 0.0;
@@ -358,6 +384,22 @@ fn compute_instability_debt(graph: &DiGraph<String, u32>) -> f64 {
     let mut eligible_count = 0usize;
 
     for node_idx in graph.node_indices() {
+        let module_name = &graph[node_idx];
+
+        // Explicit exemption by name
+        if exemptions
+            .instability_exempt
+            .iter()
+            .any(|e| module_name.contains(e.as_str()))
+        {
+            continue;
+        }
+
+        // Entry point stems are exempt — they naturally have high fan-out
+        if is_entry_point_stem(module_name, &exemptions.entry_point_stems) {
+            continue;
+        }
+
         let ca = graph
             .neighbors_directed(node_idx, petgraph::Direction::Incoming)
             .count();
@@ -379,7 +421,7 @@ fn compute_instability_debt(graph: &DiGraph<String, u32>) -> f64 {
         eligible_count += 1;
 
         let instability = ce as f64 / total as f64;
-        if instability > 0.8 {
+        if instability > thresholds.brittle_instability_ratio {
             brittle_count += 1;
         }
     }
@@ -500,12 +542,14 @@ pub fn compute_instability_metrics(
 /// Calculates the absolute architectural debt score (0-100).
 /// 0 debt = 100% Health.
 ///
-/// Uses 6-component weighted sum:
-/// - Cycle (30%) + Layering (25%) + Hub (15%) + Coupling (12%) + Cognitive (10%) + Instability (8%)
+/// Uses 6-component weighted sum with configurable weights.
+/// When called with `ScoringConfig::default()`, produces identical results
+/// to the original hardcoded engine.
 pub fn calculate_drift(
     graph: &DiGraph<String, u32>,
     prev_graph: Option<&DiGraph<String, u32>>,
     timestamp: i64,
+    config: &ScoringConfig,
 ) -> DriftScore {
     let n = graph.node_count();
 
@@ -530,18 +574,19 @@ pub fn calculate_drift(
     // ── Compute all 6 components ──
     let (cycle_score, scc_count) = compute_cycle_debt(graph);
     let (layering_score, back_edges) = compute_layering_debt(graph);
-    let hub_score = compute_hub_debt(graph);
+    let hub_score = compute_hub_debt(graph, &config.thresholds, &config.exemptions);
     let coupling_score = compute_coupling_debt(graph);
     let cognitive_score = compute_cognitive_debt(graph);
-    let instability_score = compute_instability_debt(graph);
+    let instability_score = compute_instability_debt(graph, &config.thresholds, &config.exemptions);
 
-    // ── Weighted sum ──
-    let total_debt = (0.30 * cycle_score
-        + 0.25 * layering_score
-        + 0.15 * hub_score
-        + 0.12 * coupling_score
-        + 0.10 * cognitive_score
-        + 0.08 * instability_score)
+    // ── Weighted sum (normalized weights) ──
+    let w = config.weights.normalized();
+    let total_debt = (w.cycle * cycle_score
+        + w.layering * layering_score
+        + w.hub * hub_score
+        + w.coupling * coupling_score
+        + w.cognitive * cognitive_score
+        + w.instability * instability_score)
         .round()
         .min(100.0) as u8;
 
@@ -601,6 +646,15 @@ pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, S
         .collect()
 }
 
+/// Returns `true` if the module name's file stem matches any configured entry point stem.
+///
+/// Example: `"cli/tools"` → stem `"tools"`, `"src/main.rs"` → stem `"main"`.
+fn is_entry_point_stem(module_name: &str, stems: &[String]) -> bool {
+    let basename = module_name.split('/').next_back().unwrap_or(module_name);
+    let stem = basename.split('.').next().unwrap_or(basename);
+    stems.iter().any(|s| s == stem)
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Component Diagnostics (for TUI advisory display)
 // ═════════════════════════════════════════════════════════════════════════════
@@ -613,6 +667,7 @@ pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, S
 pub fn generate_diagnostics(
     graph: &DiGraph<String, u32>,
     drift: &crate::models::DriftScore,
+    config: &ScoringConfig,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let n = graph.node_count();
@@ -667,6 +722,15 @@ pub fn generate_diagnostics(
         let threshold = (2.0 * (n as f64).sqrt()).max(8.0);
         let mut hubs: Vec<(String, usize, usize)> = Vec::new();
         for node_idx in graph.node_indices() {
+            let module_name = &graph[node_idx];
+            if config
+                .exemptions
+                .hub_exempt
+                .iter()
+                .any(|e| module_name.contains(e.as_str()))
+            {
+                continue;
+            }
             let fi = graph
                 .neighbors_directed(node_idx, petgraph::Direction::Incoming)
                 .count();
@@ -676,9 +740,10 @@ pub fn generate_diagnostics(
             let total = fi + fo;
             if total as f64 >= threshold {
                 let ratio = fo as f64 / (fi as f64 + 1.0);
-                // Match scoring: skip shared cores (ratio < 0.3) and
-                // composition roots (fan_in ≤ 2)
-                if ratio >= 0.3 && fi > 2 {
+                // Match scoring: skip shared cores and composition roots
+                if ratio >= config.thresholds.hub_exemption_ratio
+                    && fi > config.thresholds.entry_point_max_fan_in
+                {
                     hubs.push((graph[node_idx].clone(), fi, fo));
                 }
             }
@@ -760,6 +825,15 @@ pub fn generate_diagnostics(
         let mut brittle_names: Vec<String> = Vec::new();
         let mut eligible = 0usize;
         for node_idx in graph.node_indices() {
+            let module_name = &graph[node_idx];
+            if config
+                .exemptions
+                .instability_exempt
+                .iter()
+                .any(|e| module_name.contains(e.as_str()))
+            {
+                continue;
+            }
             let ca = graph
                 .neighbors_directed(node_idx, petgraph::Direction::Incoming)
                 .count();
@@ -768,11 +842,15 @@ pub fn generate_diagnostics(
                 .count();
             if ca + ce >= 3 && ca > 0 {
                 eligible += 1;
-                if ce as f64 / (ca + ce) as f64 > 0.8 {
+                if ce as f64 / (ca + ce) as f64 > config.thresholds.brittle_instability_ratio {
                     let name = graph[node_idx].clone();
                     let basename = name.split('/').next_back().unwrap_or(&name);
                     let stem = basename.split('.').next().unwrap_or(basename);
-                    let is_entry = matches!(stem, "main" | "index" | "app" | "lib" | "mod");
+                    let is_entry = config
+                        .exemptions
+                        .entry_point_stems
+                        .iter()
+                        .any(|s| s == stem);
 
                     if !is_entry {
                         brittle_names.push(name);
@@ -807,6 +885,11 @@ pub fn generate_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ScoringConfig;
+
+    fn default_config() -> ScoringConfig {
+        ScoringConfig::default()
+    }
 
     // ── Test Helpers ──
 
@@ -869,7 +952,7 @@ mod tests {
     #[test]
     fn test_empty_graph_zero_debt() {
         let g: DiGraph<String, u32> = DiGraph::new();
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert_eq!(score.total, 0, "Empty graph should have 0 debt");
         assert_eq!(score.cycle_debt, 0.0);
         assert_eq!(score.layering_debt, 0.0);
@@ -879,7 +962,7 @@ mod tests {
     #[test]
     fn test_perfect_tree_low_debt() {
         let g = make_tree_graph(31); // 5-level binary tree
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.total < 10,
             "Perfect tree should have <10 debt, got: {}",
@@ -892,7 +975,7 @@ mod tests {
     #[test]
     fn test_clean_layered_graph() {
         let g = make_layered_graph(&[3, 5, 4]); // 3 layers, forward-only
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.total <= 20,
             "Clean layered graph should have ≤20 debt, got: {}",
@@ -909,7 +992,7 @@ mod tests {
     #[test]
     fn test_single_cycle() {
         let g = make_cyclic_graph();
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.total >= 10 && score.total <= 40,
             "Single cycle should produce 10-40 debt, got: {}",
@@ -933,7 +1016,7 @@ mod tests {
             let n = g.add_node(format!("leaf_{i}"));
             g.add_edge(nodes[0], n, 1);
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.cycle_debt > 30.0,
             "Large SCC should produce high cycle debt, got: {}",
@@ -951,7 +1034,7 @@ mod tests {
             let n = g.add_node(format!("consumer_{i}"));
             g.add_edge(n, core, 1);
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert_eq!(
             score.hub_debt, 0.0,
             "Legitimate hub (high in, zero out) should have 0 hub debt"
@@ -973,7 +1056,7 @@ mod tests {
             let n = g.add_node(format!("target_{i}"));
             g.add_edge(god, n, 1);
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.hub_debt > 0.0,
             "God module (high in AND out) should have positive hub debt, got: {}",
@@ -997,8 +1080,8 @@ mod tests {
             g_light.add_edge(nodes_l[i], nodes_l[i + 1], 1);
             g_heavy.add_edge(nodes_h[i], nodes_h[i + 1], 20); // 20x heavier
         }
-        let score_light = calculate_drift(&g_light, None, 0);
-        let score_heavy = calculate_drift(&g_heavy, None, 0);
+        let score_light = calculate_drift(&g_light, None, 0, &default_config());
+        let score_heavy = calculate_drift(&g_heavy, None, 0, &default_config());
         assert!(
             score_heavy.coupling_debt >= score_light.coupling_debt,
             "Heavy weights should produce ≥ coupling debt: light={}, heavy={}",
@@ -1025,7 +1108,7 @@ mod tests {
                 g.add_edge(src, tgt, 1);
             }
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert!(
             score.layering_debt > 0.0,
             "Back-edges should produce layering debt, got: {}",
@@ -1047,7 +1130,7 @@ mod tests {
             let leaf = g.add_node(format!("leaf_{i}"));
             g.add_edge(leaf, core, 1);
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         assert_eq!(
             score.instability_debt, 0.0,
             "Leaf packages (ca=0) should not contribute instability debt"
@@ -1080,7 +1163,7 @@ mod tests {
             g.add_edge(hub, n, 1);
         }
 
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         // Note: instability debt may still be 0 if brittle_ratio is very low
         // The important thing is the algorithm runs without error
         assert!(
@@ -1093,7 +1176,7 @@ mod tests {
     #[test]
     fn test_100_node_clean_graph_high_health() {
         let g = make_tree_graph(100);
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         let health = 100 - score.total;
         assert!(
             health >= 85,
@@ -1115,7 +1198,7 @@ mod tests {
                 }
             }
         }
-        let score = calculate_drift(&g, None, 0);
+        let score = calculate_drift(&g, None, 0, &default_config());
         let health = 100u8.saturating_sub(score.total);
         assert!(
             health < 40,
@@ -1168,7 +1251,7 @@ mod tests {
         curr.add_edge(ca, cd, 1); // A gained one more out-edge
         curr.add_edge(cb, cc, 1); // B gained one out-edge
 
-        let score = calculate_drift(&curr, Some(&prev), 0);
+        let score = calculate_drift(&curr, Some(&prev), 0, &default_config());
         // Fan deltas should be computed based on median of per-node changes
         // The exact values depend on which nodes overlap; just verify they're reasonable
         assert!(
@@ -1187,7 +1270,7 @@ mod tests {
     #[test]
     fn test_calculate_health_clean_small() {
         let graph = make_simple_graph();
-        let score = calculate_drift(&graph, None, 0);
+        let score = calculate_drift(&graph, None, 0, &default_config());
         assert!(
             score.total <= 10,
             "Score should be very low for a clean tiny graph: {}",
@@ -1199,7 +1282,7 @@ mod tests {
     #[test]
     fn test_calculate_health_with_cycle() {
         let graph = make_cyclic_graph();
-        let score = calculate_drift(&graph, None, 0);
+        let score = calculate_drift(&graph, None, 0, &default_config());
         assert!(
             score.total >= 10 && score.total <= 50,
             "Cycle should add significant debt: {}",
@@ -1226,7 +1309,7 @@ mod tests {
         g.add_edge(targets[0], child, 1);
         g.add_edge(child, targets[0], 1); // create a cycle to force non-zero score to trigger diagnostics
 
-        let _score = calculate_drift(&g, None, 0);
+        let _score = calculate_drift(&g, None, 0, &default_config());
 
         // Ensure hub_debt is 0 for entry points despite high fan-out
         // Note: The logic in `compute_hub_debt` checks `is_entry`
@@ -1238,7 +1321,7 @@ mod tests {
             g_regular.add_edge(n, reg, 1); // Make it high fan-in AND fan-out
         }
 
-        let _score_reg = calculate_drift(&g_regular, None, 0);
+        let _score_reg = calculate_drift(&g_regular, None, 0, &default_config());
 
         // generate_diagnostics shouldn't flag 'main.rs' as brittle
         let mock_score = DriftScore {
@@ -1257,13 +1340,61 @@ mod tests {
             instability_debt: 20.0, // Force diagnostic generation
         };
 
-        let diagnostics = generate_diagnostics(&g, &mock_score);
+        let diagnostics = generate_diagnostics(&g, &mock_score, &default_config());
         let joined_diagnostics = diagnostics.join(" ");
 
         // The word "main" or "main.rs" should NOT be flagged as fragile
         assert!(
             !joined_diagnostics.contains("main.rs fragile"),
             "Entry points should not be flagged as fragile"
+        );
+    }
+
+    #[test]
+    fn test_is_entry_point_stem_matching() {
+        let stems: Vec<String> = ["main", "index", "app"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(is_entry_point_stem("src/main.rs", &stems));
+        assert!(is_entry_point_stem("cli/index", &stems));
+        assert!(is_entry_point_stem("app", &stems));
+        assert!(is_entry_point_stem("packages/web/app.ts", &stems));
+        assert!(!is_entry_point_stem("src/utils.rs", &stems));
+        assert!(!is_entry_point_stem("core/server", &stems));
+        assert!(!is_entry_point_stem("main_helper", &stems));
+    }
+
+    #[test]
+    fn test_entry_point_stems_exempt_from_hub_and_instability_scoring() {
+        // Build a graph where "cli/app" is a god-module-shaped entry point:
+        // high fan-in AND fan-out, which would normally trigger hub + instability debt.
+        let mut g = DiGraph::new();
+        let app = g.add_node("cli/app".to_string());
+        for i in 0..12 {
+            let n = g.add_node(format!("module_{i}"));
+            g.add_edge(app, n, 1); // high fan-out
+            g.add_edge(n, app, 1); // high fan-in
+        }
+
+        // With default config, "app" is in entry_point_stems → should be exempt
+        let cfg = default_config();
+        let hub = compute_hub_debt(&g, &cfg.thresholds, &cfg.exemptions);
+        let instability = compute_instability_debt(&g, &cfg.thresholds, &cfg.exemptions);
+        assert_eq!(hub, 0.0, "Entry point 'app' should be exempt from hub debt");
+        assert_eq!(
+            instability, 0.0,
+            "Entry point 'app' should be exempt from instability debt"
+        );
+
+        // With a config where "app" is NOT an entry point stem → should trigger debt
+        let mut cfg_no_app = default_config();
+        cfg_no_app.exemptions.entry_point_stems =
+            ["main", "index"].iter().map(|s| s.to_string()).collect();
+        let hub_no_exempt = compute_hub_debt(&g, &cfg_no_app.thresholds, &cfg_no_app.exemptions);
+        assert!(
+            hub_no_exempt > 0.0,
+            "Without 'app' in stems, hub debt should be non-zero"
         );
     }
 }

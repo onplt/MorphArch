@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use dashmap::DashMap;
+use globset::GlobSet;
 use std::path::PathBuf;
 
 pub fn get_tree_for_commit(repo: &gix::Repository, commit_hash: &str) -> Result<gix::ObjectId> {
@@ -63,8 +64,9 @@ pub fn walk_tree_entries_cached(
     repo: &gix::Repository,
     tree_oid: gix::ObjectId,
     cache: &SubtreeCache,
+    ignore: Option<&GlobSet>,
 ) -> Result<Vec<(PathBuf, gix::ObjectId)>> {
-    let raw = walk_tree_collect(repo, tree_oid, 0, cache)?;
+    let raw = walk_tree_collect(repo, tree_oid, "", 0, cache, ignore)?;
     Ok(raw
         .into_iter()
         .map(|(p, oid)| (PathBuf::from(p), oid))
@@ -74,34 +76,80 @@ pub fn walk_tree_entries_cached(
 fn walk_tree_collect(
     repo: &gix::Repository,
     tree_oid: gix::ObjectId,
+    prefix: &str,
     depth: usize,
     cache: &SubtreeCache,
+    ignore: Option<&GlobSet>,
 ) -> Result<Vec<(String, gix::ObjectId)>> {
     if depth > 30 {
         return Ok(Vec::new());
     }
-    if let Some(cached) = cache.entries.get(&tree_oid) {
-        let entries: &Vec<(String, gix::ObjectId)> = cached.value();
-        return Ok(entries.clone());
+
+    // Cache lookup only when no ignore rules (ignore patterns make caching path-dependent)
+    if ignore.is_none() {
+        if let Some(cached) = cache.entries.get(&tree_oid) {
+            let entries: &Vec<(String, gix::ObjectId)> = cached.value();
+            return Ok(entries.clone());
+        }
     }
+
     let tree = repo.find_tree(tree_oid)?;
     let decoded = tree.decode()?;
     let mut result = Vec::new();
     for entry in &decoded.entries {
         let name = entry.filename.to_string();
         if entry.mode.is_tree() {
-            let sub = walk_tree_collect(repo, entry.oid.to_owned(), depth + 1, cache)?;
+            // Build the full subtree path for ignore matching
+            let subtree_path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+
+            // Skip entire subtree if it matches an ignore pattern
+            if let Some(globs) = ignore {
+                if globs.is_match(&subtree_path) || globs.is_match(format!("{subtree_path}/")) {
+                    continue;
+                }
+            }
+
+            let sub = walk_tree_collect(
+                repo,
+                entry.oid.to_owned(),
+                &subtree_path,
+                depth + 1,
+                cache,
+                ignore,
+            )?;
             for (sub_path, blob_oid) in sub {
-                result.push((format!("{}/{}", name, sub_path), blob_oid));
+                result.push((sub_path, blob_oid));
             }
         } else if entry.mode.is_blob() || entry.mode.is_executable() {
             if let Some(ext) = name.rsplit('.').next() {
                 if ["rs", "ts", "tsx", "py", "go"].contains(&ext) {
-                    result.push((name, entry.oid.to_owned()));
+                    let full_path = if prefix.is_empty() {
+                        name
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+
+                    // Skip individual files matching ignore patterns
+                    if let Some(globs) = ignore {
+                        if globs.is_match(&full_path) {
+                            continue;
+                        }
+                    }
+
+                    result.push((full_path, entry.oid.to_owned()));
                 }
             }
         }
     }
-    cache.entries.insert(tree_oid, result.clone());
+
+    // Only cache results when no ignore rules are active
+    if ignore.is_none() {
+        cache.entries.insert(tree_oid, result.clone());
+    }
+
     Ok(result)
 }
