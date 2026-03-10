@@ -7,7 +7,7 @@ use tracing::info;
 
 use morpharch::cli::{Cli, Commands};
 use morpharch::commands;
-use morpharch::config::MorphArchConfig;
+use morpharch::config::{MorphArchConfig, ProjectConfig};
 use morpharch::db::Database;
 use morpharch::utils;
 
@@ -40,18 +40,20 @@ fn run(cli: Cli) -> Result<()> {
     // Dispatch to subcommand
     match cli.command {
         Commands::Scan { path, max_commits } => {
+            let project_config = ProjectConfig::load(&path)?;
             let limit = if max_commits == 0 {
                 usize::MAX
             } else {
                 max_commits
             };
-            execute_scan(&path, &db, limit)?;
+            execute_scan(&path, &db, limit, &project_config)?;
         }
         Commands::Watch {
             path,
             max_commits,
             max_snapshots,
         } => {
+            let project_config = ProjectConfig::load(&path)?;
             let limit = if max_commits == 0 {
                 usize::MAX
             } else {
@@ -59,13 +61,20 @@ fn run(cli: Cli) -> Result<()> {
             };
             // Scan + launch animated TUI
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::watch::run_watch(&path, db, limit, max_snapshots))?;
+            rt.block_on(commands::watch::run_watch(
+                &path,
+                db,
+                limit,
+                max_snapshots,
+                &project_config,
+            ))?;
         }
         Commands::ListGraphs => {
             execute_list_graphs(&db)?;
         }
         Commands::Analyze { commit, path } => {
-            commands::analyze::run_analyze(&path, commit.as_deref(), &db)?;
+            let project_config = ProjectConfig::load(&path)?;
+            commands::analyze::run_analyze(&path, commit.as_deref(), &db, &project_config)?;
         }
         Commands::ListDrift => {
             execute_list_drift(&db)?;
@@ -80,7 +89,12 @@ fn run(cli: Cli) -> Result<()> {
 /// commit scanning + dependency graph + drift scoring
 /// all run in a single command. `commands::scan::run_scan` orchestrates
 /// all three steps.
-fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Result<()> {
+fn execute_scan(
+    path: &std::path::Path,
+    db: &Database,
+    max_commits: usize,
+    project_config: &ProjectConfig,
+) -> Result<()> {
     println!("Scanning repository: {}", path.display());
     println!();
 
@@ -88,7 +102,7 @@ fn execute_scan(path: &std::path::Path, db: &Database, max_commits: usize) -> Re
     let start = Instant::now();
 
     // commit scanning + dependency graph + drift scoring
-    let result = commands::scan::run_scan(path, db, max_commits)?;
+    let result = commands::scan::run_scan(path, db, max_commits, project_config)?;
 
     // Calculate elapsed time
     let elapsed = start.elapsed();

@@ -35,7 +35,7 @@ box, with language-level import extraction for Rust, TypeScript, JavaScript, Pyt
   source files in Rust, TypeScript (inc. JSX/TSX), JavaScript, Python, and Go.
 - **Absolute Health scoring** -- quantify architectural integrity on a 0--100
   scale using cycle detection (Kosaraju SCC), boundary violation analysis, and
-  context-aware coupling density metrics.
+  context-aware coupling density metrics. Fully configurable via `morpharch.toml`.
 - **Animated TUI** -- Verlet physics force-directed graph layout rendered with
   ratatui and crossterm, featuring a timeline slider, k9s-inspired insight
   dashboard, and Catppuccin Mocha color theme.
@@ -162,6 +162,48 @@ The score uses a **6-component scale-aware algorithm** that calculates "Architec
 - **Coupling Debt (12%):** Weighted coupling intensity based on the exact count of import statements between modules.
 - **Cognitive Debt (10%):** Evaluates graph Shannon entropy. Penalizes structures where the sheer density of connections makes the system impossible for a human to reason about.
 - **Instability Debt (8%):** Based on Martin's Abstractness/Instability metrics. Flags fragile modules that depend on everything but are depended upon by nothing.
+
+All weights, thresholds, and exemptions above are fully configurable via `morpharch.toml`.
+
+---
+
+## Configuration
+
+MorphArch works out of the box with zero configuration. To customize the scoring engine, place a `morpharch.toml` file at the root of your repository.
+
+```toml
+# Paths to exclude from scanning
+[ignore]
+paths = ["tests/**", "benches/**", "vendor/**"]
+
+# Relative weights (normalized internally — no need to sum to 100)
+[scoring.weights]
+cycle = 35
+layering = 25
+hub = 20
+coupling = 10
+cognitive = 5
+instability = 5
+
+# Thresholds for debt detection
+[scoring.thresholds]
+hub_exemption_ratio = 0.3       # fan_out/(fan_in+1) below this = shared core
+entry_point_max_fan_in = 2      # max fan-in to qualify as entry point
+brittle_instability_ratio = 0.8 # I > this = flagged as brittle
+
+# Architectural boundary rules
+[[scoring.boundaries]]
+from = "runtime/"
+deny = ["cli/"]
+
+# Module-level exemptions
+[scoring.exemptions]
+hub_exempt = ["deno_core"]
+instability_exempt = []
+entry_point_stems = ["main", "index", "app", "lib", "mod"]
+```
+
+All fields are optional. Omitted values use sensible defaults. See [`morpharch.example.toml`](morpharch.example.toml) for a fully commented reference.
 
 ---
 

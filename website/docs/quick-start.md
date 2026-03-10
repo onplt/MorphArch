@@ -28,9 +28,28 @@ morpharch analyze
 
 This will output a detailed breakdown of your **Architectural Debt**, including specific circular dependencies, God-modules, and topological boundary violations.
 
+## 4. Customize (Optional)
+
+To fine-tune the scoring engine for your project, create a `morpharch.toml` at your repo root:
+
+```toml
+[ignore]
+paths = ["tests/**", "vendor/**"]
+
+[scoring.weights]
+cycle = 35
+hub = 20
+
+[[scoring.boundaries]]
+from = "packages/"
+deny = ["apps/"]
+```
+
+All fields are optional. See the [Configuration Guide](./guides/configuration) for the full reference.
+
 ---
 
 ## Next Steps
 
 - Learn about the [Scoring Engine](./concepts/scoring) to understand your health score.
-- Learn how [Zero-Config Topology](./guides/configuration) handles boundary rules automatically.
+- Read the [Configuration Guide](./guides/configuration) to customize weights, thresholds, and boundary rules.

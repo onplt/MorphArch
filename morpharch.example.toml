@@ -1,0 +1,83 @@
+# morpharch.toml — MorphArch Project Configuration
+#
+# Place this file at the root of your Git repository to customize
+# the scoring engine. All fields are optional — omitted values use
+# the defaults shown below.
+#
+# This file is designed to be version-controlled alongside your code,
+# so your team shares the same architectural health standards.
+
+# ─── Ignore Rules ─────────────────────────────────────────────────────────────
+# Glob patterns for paths to exclude from AST parsing and scoring.
+# Ignored paths are skipped during the Git tree walk, so this also
+# improves scan performance for large repositories.
+
+[ignore]
+# paths = ["tests/**", "benches/**", "**/generated_*.rs", "vendor/**"]
+
+# ─── Scoring Weights ─────────────────────────────────────────────────────────
+# Relative weights for each debt component. Values are normalized to
+# sum to 1.0 internally, so they don't need to sum to 100.
+#
+# Use these to prioritize what matters most for your project:
+#   - Legacy codebase? Lower cycle weight to make adoption gradual.
+#   - Microservices? Raise coupling weight to catch tight bindings.
+#   - Monolith? Raise hub weight to catch god modules early.
+
+[scoring.weights]
+# cycle = 30       # Circular dependencies (SCC analysis)
+# layering = 25    # Back-edges violating layered architecture
+# hub = 15         # God modules (high fan-in AND fan-out)
+# coupling = 12    # Edge weight density (import concentration)
+# cognitive = 10   # Graph complexity (edge excess + degree excess)
+# instability = 8  # Brittle modules (Martin instability metric)
+
+# ─── Scoring Thresholds ──────────────────────────────────────────────────────
+# Fine-tune when exemptions and penalties kick in.
+
+[scoring.thresholds]
+# Hub exemption ratio: modules with fan_out/(fan_in+1) below this
+# are treated as legitimate shared cores (e.g., deno_core).
+# hub_exemption_ratio = 0.3
+
+# Modules with fan-in at or below this are treated as entry-point
+# composition roots (e.g., main.rs, cli/tools) — exempt from hub debt.
+# entry_point_max_fan_in = 2
+
+# Instability threshold: modules with I > this are flagged as brittle.
+# I = Ce/(Ca+Ce), where Ca=fan-in, Ce=fan-out.
+# brittle_instability_ratio = 0.8
+
+# ─── Boundary Rules ──────────────────────────────────────────────────────────
+# Define architectural boundaries — forbidden dependency directions.
+# These are checked during `morpharch analyze` and reported as violations.
+#
+# Each rule says: modules matching `from` must NOT depend on modules
+# matching `deny`. Uses prefix matching (glob wildcards are stripped).
+
+# [[scoring.boundaries]]
+# from = "packages/**"
+# deny = ["apps/**", "cmd/**"]
+
+# [[scoring.boundaries]]
+# from = "libs/shared/**"
+# deny = ["libs/feature_*/**"]
+
+# [[scoring.boundaries]]
+# from = "modules/billing/**"
+# deny = ["modules/auth/**"]
+
+# ─── Exemptions ──────────────────────────────────────────────────────────────
+# Specific modules exempted from certain debt calculations.
+
+[scoring.exemptions]
+# Modules exempted from hub/god-module debt.
+# Useful for intentional utility modules or framework entry points.
+# hub_exempt = ["src/utils.rs", "libs/core/index.ts"]
+
+# Modules exempted from instability debt.
+# instability_exempt = ["packages/ui-kit/src/index.ts"]
+
+# File stems treated as entry points (exempt from fragility penalties).
+# These modules naturally have high fan-out and low fan-in.
+# entry_point_stems = ["main", "index", "app", "lib", "mod"]

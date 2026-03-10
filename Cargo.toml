@@ -1,6 +1,6 @@
 [package]
 name = "morpharch"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Onur <onur@morpharch.dev>"]
@@ -91,6 +91,12 @@ lru = "0.16"
 
 # Image rendering and GIF encoding for movie export
 image = { version = "0.24", default-features = false, features = ["gif"] }
+
+# TOML config file parsing
+toml = "0.8"
+
+# Fast multi-pattern glob matching (used for ignore rules)
+globset = "0.4"
 
 [profile.release]
 lto = true

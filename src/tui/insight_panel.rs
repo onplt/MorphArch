@@ -12,6 +12,7 @@ use super::app::App;
 use super::graph_renderer::{
     ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, drift_color,
 };
+use crate::config::Weights;
 use crate::models::DriftScore;
 
 pub fn render_insight_panel(
@@ -19,6 +20,7 @@ pub fn render_insight_panel(
     area: Rect,
     drift: &Option<DriftScore>,
     advisory_lines: &[String],
+    weights: &Weights,
 ) {
     if let Some(d) = drift {
         let health = 100u8.saturating_sub(d.total);
@@ -112,18 +114,37 @@ pub fn render_insight_panel(
         frame.render_widget(health_gauge, chunks[0]);
 
         // ── 6-COMPONENT METRICS GRID ──
+        let n = weights.normalized();
+        let fmt_pct = |v: f64| -> String {
+            let pct = (v * 100.0).round() as u32;
+            if pct < 10 {
+                format!(" {pct}%")
+            } else {
+                format!("{pct}%")
+            }
+        };
         let metric_lines = vec![
-            subscore_row("Cycles", "30%", d.cycle_debt, d.new_cycles as f64),
+            subscore_row(
+                "Cycles",
+                &fmt_pct(n.cycle),
+                d.cycle_debt,
+                d.new_cycles as f64,
+            ),
             subscore_row(
                 "Layering",
-                "25%",
+                &fmt_pct(n.layering),
                 d.layering_debt,
                 d.boundary_violations as f64,
             ),
-            subscore_row("Hub/God", "15%", d.hub_debt, 0.0),
-            subscore_row("Coupling", "12%", d.coupling_debt, 0.0),
-            subscore_row("Cognitive", "10%", d.cognitive_debt, 0.0),
-            subscore_row("Instability", " 8%", d.instability_debt, 0.0),
+            subscore_row("Hub/God", &fmt_pct(n.hub), d.hub_debt, 0.0),
+            subscore_row("Coupling", &fmt_pct(n.coupling), d.coupling_debt, 0.0),
+            subscore_row("Cognitive", &fmt_pct(n.cognitive), d.cognitive_debt, 0.0),
+            subscore_row(
+                "Instability",
+                &fmt_pct(n.instability),
+                d.instability_debt,
+                0.0,
+            ),
         ];
         frame.render_widget(
             Paragraph::new(metric_lines).block(

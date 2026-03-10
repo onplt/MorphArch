@@ -21,13 +21,19 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tracing::info;
 
+use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::graph_builder;
 use crate::models::DriftScore;
 use crate::scoring;
 
 /// Runs the analyze command: produces a detailed drift report.
-pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) -> Result<()> {
+pub fn run_analyze(
+    repo_path: &Path,
+    commit_ish: Option<&str>,
+    db: &Database,
+    project_config: &ProjectConfig,
+) -> Result<()> {
     // ── Resolve commit hash ──
     let commit_hash = resolve_commit(repo_path, commit_ish)?;
     let short_hash = if commit_hash.len() >= 7 {
@@ -48,7 +54,12 @@ pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) ->
 
     // ── Drift report ──
     if let Some(ref drift) = snapshot.drift {
-        print_drift_report(drift, snapshot.node_count, snapshot.edge_count);
+        print_drift_report(
+            drift,
+            snapshot.node_count,
+            snapshot.edge_count,
+            project_config,
+        );
     } else {
         println!("  No drift score calculated for this commit.");
         println!("   Run 'morpharch scan <path>' to re-scan first.");
@@ -112,7 +123,7 @@ pub fn run_analyze(repo_path: &Path, commit_ish: Option<&str>, db: &Database) ->
 
     // ── Boundary violation details ──
     println!();
-    print_boundary_details(&snapshot.edges);
+    print_boundary_details(&snapshot.edges, project_config);
 
     // ── Cycle information ──
     println!();
@@ -138,7 +149,12 @@ fn resolve_commit(repo_path: &Path, commit_ish: Option<&str>) -> Result<String> 
     Ok(object.detach().to_string())
 }
 
-fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) {
+fn print_drift_report(
+    drift: &DriftScore,
+    node_count: usize,
+    edge_count: usize,
+    config: &ProjectConfig,
+) {
     let (emoji, level) = match drift.total {
         0..=15 => ("  ", "Excellent"),
         16..=30 => ("  ", "Healthy"),
@@ -146,6 +162,9 @@ fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) 
         56..=80 => ("  ", "Degraded"),
         _ => ("  ", "Critical"),
     };
+
+    let n = config.scoring.weights.normalized();
+    let pct = |v: f64| -> u32 { (v * 100.0).round() as u32 };
 
     println!("{emoji} Drift Score: {}/100 ({level})", drift.total);
     println!("     Health: {}%", 100u8.saturating_sub(drift.total));
@@ -156,18 +175,35 @@ fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) 
     println!();
     println!("  Component Breakdown (6-factor analysis):");
     println!(
-        "     Cycles       (30%):  {:5.1}/100  {} SCCs",
-        drift.cycle_debt, drift.new_cycles
+        "     Cycles      ({:>2}%):  {:5.1}/100  {} SCCs",
+        pct(n.cycle),
+        drift.cycle_debt,
+        drift.new_cycles
     );
     println!(
-        "     Layering     (25%):  {:5.1}/100  {} back-edges",
-        drift.layering_debt, drift.boundary_violations
+        "     Layering    ({:>2}%):  {:5.1}/100  {} back-edges",
+        pct(n.layering),
+        drift.layering_debt,
+        drift.boundary_violations
     );
-    println!("     Hub/God      (15%):  {:5.1}/100", drift.hub_debt);
-    println!("     Coupling     (12%):  {:5.1}/100", drift.coupling_debt);
-    println!("     Cognitive    (10%):  {:5.1}/100", drift.cognitive_debt);
     println!(
-        "     Instability   (8%):  {:5.1}/100",
+        "     Hub/God     ({:>2}%):  {:5.1}/100",
+        pct(n.hub),
+        drift.hub_debt
+    );
+    println!(
+        "     Coupling    ({:>2}%):  {:5.1}/100",
+        pct(n.coupling),
+        drift.coupling_debt
+    );
+    println!(
+        "     Cognitive   ({:>2}%):  {:5.1}/100",
+        pct(n.cognitive),
+        drift.cognitive_debt
+    );
+    println!(
+        "     Instability ({:>2}%):  {:5.1}/100",
+        pct(n.instability),
         drift.instability_debt
     );
     println!();
@@ -176,16 +212,33 @@ fn print_drift_report(drift: &DriftScore, node_count: usize, edge_count: usize) 
     println!("     Fan-out change (median):  {:+}", drift.fan_out_delta);
 }
 
-fn print_boundary_details(edges: &[crate::models::DependencyEdge]) {
+fn print_boundary_details(edges: &[crate::models::DependencyEdge], config: &ProjectConfig) {
     let pairs = scoring::edges_to_pairs(edges);
-    let violations: Vec<_> = pairs
-        .iter()
-        .filter(|(from, to)| {
-            scoring::BOUNDARY_RULES
-                .iter()
-                .any(|(fp, tp)| from.starts_with(fp) && to.starts_with(tp))
-        })
-        .collect();
+
+    let violations: Vec<_> = if config.scoring.boundaries.is_empty() {
+        // Fall back to legacy rules when no boundaries are configured
+        pairs
+            .iter()
+            .filter(|(from, to)| {
+                scoring::LEGACY_BOUNDARY_RULES
+                    .iter()
+                    .any(|(fp, tp)| from.starts_with(fp) && to.starts_with(tp))
+            })
+            .collect()
+    } else {
+        // Use configured boundary rules with prefix matching
+        pairs
+            .iter()
+            .filter(|(from, to)| {
+                config.scoring.boundaries.iter().any(|rule| {
+                    from.starts_with(rule.from.trim_end_matches('*').trim_end_matches('/'))
+                        && rule.deny.iter().any(|denied| {
+                            to.starts_with(denied.trim_end_matches('*').trim_end_matches('/'))
+                        })
+                })
+            })
+            .collect()
+    };
 
     if violations.is_empty() {
         println!("  Boundary Violations: None — package boundaries are clean.");
