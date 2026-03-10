@@ -90,7 +90,7 @@ dashmap = "6.1"
 lru = "0.16"
 
 # Image rendering and GIF encoding for movie export
-image = { version = "0.24", default-features = false, features = ["gif"] }
+image = { version = "0.25", default-features = false, features = ["gif"] }
 
 [profile.release]
 lto = true
