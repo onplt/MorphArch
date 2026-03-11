@@ -616,6 +616,39 @@ pub fn weighted_edge_color(weight: u32) -> Color {
     }
 }
 
+/// Returns a node color based on blast radius score (0.0–1.0).
+///
+/// Cool-to-hot gradient matching the Catppuccin theme:
+///   - 0–10%:  Blue (low impact)
+///   - 11–25%: Teal (moderate)
+///   - 26–45%: Green (noticeable)
+///   - 46–65%: Yellow (significant)
+///   - 66–80%: Peach (high)
+///   - 81%+:   Red (critical blast radius)
+pub fn blast_color(score: f64) -> Color {
+    match (score * 100.0) as u32 {
+        0..=10 => Color::Rgb(137, 180, 250),  // Blue — low impact
+        11..=25 => Color::Rgb(148, 226, 213), // Teal — moderate
+        26..=45 => Color::Rgb(166, 227, 161), // Green — noticeable
+        46..=65 => Color::Rgb(249, 226, 175), // Yellow — significant
+        66..=80 => Color::Rgb(250, 179, 135), // Peach — high
+        _ => Color::Rgb(243, 139, 168),       // Red — critical
+    }
+}
+
+/// Returns a cascade-affected node color based on hop distance from the source.
+///
+/// Closer = hotter (red), farther = cooler (blue).
+pub fn cascade_distance_color(distance: u32) -> Color {
+    match distance {
+        1 => Color::Rgb(243, 139, 168),     // Red — direct dependent
+        2 => Color::Rgb(250, 179, 135),     // Peach
+        3 => Color::Rgb(249, 226, 175),     // Yellow
+        4..=5 => Color::Rgb(166, 227, 161), // Green
+        _ => Color::Rgb(137, 180, 250),     // Blue — distant
+    }
+}
+
 // =============================================================================
 // Catppuccin Mocha color palette — used throughout the TUI
 // =============================================================================

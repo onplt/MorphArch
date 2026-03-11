@@ -3,15 +3,21 @@ name: Release
 on:
   push:
     tags:
-      - 'v*' # Trigger on version tags (e.g. v1.1.0)
+      - 'v*' # Trigger on version tags (e.g. v1.2.1)
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
   # Build binaries for all platforms
+  # ═══════════════════════════════════════════════════════════════════════════
   build-binaries:
-    name: Build Binary (${{ matrix.os }})
+    name: Build Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -20,18 +26,27 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: morpharch
             asset_name: morpharch-linux-x86_64.tar.gz
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: morpharch
+            asset_name: morpharch-linux-aarch64.tar.gz
+            use_cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: morpharch.exe
             asset_name: morpharch-windows-x86_64.zip
+            use_cross: false
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: morpharch
             asset_name: morpharch-macos-x86_64.tar.gz
+            use_cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: morpharch
             asset_name: morpharch-macos-aarch64.tar.gz
+            use_cross: false
 
     steps:
       - uses: actions/checkout@v6
@@ -41,8 +56,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
       - name: Build Binary
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Package Binary (Unix)
         if: runner.os != 'Windows'
@@ -62,34 +87,132 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
 
-  # Create GitHub Release and attach binaries
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Build Linux native packages (DEB + RPM)
+  # ═══════════════════════════════════════════════════════════════════════════
+  package-linux:
+    name: Package Linux (${{ matrix.format }})
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - format: deb-amd64
+            artifact: morpharch-linux-x86_64.tar.gz
+            target: x86_64-unknown-linux-gnu
+            deb: true
+            rpm: false
+          - format: deb-arm64
+            artifact: morpharch-linux-aarch64.tar.gz
+            target: aarch64-unknown-linux-gnu
+            deb: true
+            rpm: false
+          - format: rpm-x86_64
+            artifact: morpharch-linux-x86_64.tar.gz
+            target: x86_64-unknown-linux-gnu
+            deb: false
+            rpm: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download prebuilt binary
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+
+      - name: Extract binary to target path
+        run: |
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            mkdir -p target/release
+            tar -xzf ${{ matrix.artifact }} -C target/release/
+          else
+            mkdir -p target/${{ matrix.target }}/release
+            tar -xzf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release/
+          fi
+
+      - name: Build DEB package
+        if: matrix.deb
+        run: |
+          cargo install cargo-deb --locked
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            cargo deb --no-build
+          else
+            cargo deb --no-build --target ${{ matrix.target }}
+          fi
+
+      - name: Build RPM package
+        if: matrix.rpm
+        run: |
+          cargo install cargo-generate-rpm --locked
+          cargo generate-rpm
+
+      - name: Upload DEB artifact
+        if: matrix.deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: morpharch-${{ matrix.format }}
+          path: |
+            target/debian/*.deb
+            target/${{ matrix.target }}/debian/*.deb
+
+      - name: Upload RPM artifact
+        if: matrix.rpm
+        uses: actions/upload-artifact@v7
+        with:
+          name: morpharch-${{ matrix.format }}
+          path: target/generate-rpm/*.rpm
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Create GitHub Release and attach all artifacts
+  # ═══════════════════════════════════════════════════════════════════════════
   github-release:
     name: Create GitHub Release
-    needs: build-binaries
+    needs: [build-binaries, package-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download Artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           merge-multiple: true
+          path: release-assets
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-output
+          # Move all binary archives
+          find release-assets -name '*.tar.gz' -exec mv {} release-output/ \;
+          find release-assets -name '*.zip' -exec mv {} release-output/ \;
+          find release-assets -name '*.deb' -exec mv {} release-output/ \;
+          find release-assets -name '*.rpm' -exec mv {} release-output/ \;
+          # Copy installer scripts
+          cp install.sh install.ps1 release-output/
+          ls -la release-output/
+
+      - name: Generate SHA256 checksums
+        working-directory: release-output
+        run: |
+          sha256sum *.tar.gz *.zip *.deb *.rpm > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            morpharch-linux-x86_64.tar.gz
-            morpharch-windows-x86_64.zip
-            morpharch-macos-x86_64.tar.gz
-            morpharch-macos-aarch64.tar.gz
+          files: release-output/*
           generate_release_notes: true
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ═══════════════════════════════════════════════════════════════════════════
   # Publish to crates.io
+  # ═══════════════════════════════════════════════════════════════════════════
   publish-crates-io:
     name: Publish to crates.io
     needs: github-release
@@ -102,3 +225,206 @@ jobs:
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Update Homebrew tap
+  # ═══════════════════════════════════════════════════════════════════════════
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: github-release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download checksums
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL \
+            "https://github.com/onplt/morpharch/releases/download/v${VERSION}/SHA256SUMS.txt" \
+            -o SHA256SUMS.txt
+
+      - name: Generate formula from template
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_LINUX_X86=$(grep 'linux-x86_64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
+          SHA_LINUX_ARM=$(grep 'linux-aarch64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
+          SHA_MACOS_X86=$(grep 'macos-x86_64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
+          SHA_MACOS_ARM=$(grep 'macos-aarch64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
+
+          sed -e "s/{{VERSION}}/${VERSION}/g" \
+              -e "s/{{SHA256_LINUX_X86_64}}/${SHA_LINUX_X86}/g" \
+              -e "s/{{SHA256_LINUX_AARCH64}}/${SHA_LINUX_ARM}/g" \
+              -e "s/{{SHA256_MACOS_X86_64}}/${SHA_MACOS_X86}/g" \
+              -e "s/{{SHA256_MACOS_AARCH64}}/${SHA_MACOS_ARM}/g" \
+              dist/formula/morpharch.rb.template > morpharch.rb
+
+          cat morpharch.rb
+
+      - name: Push to Homebrew tap
+        uses: cpina/github-action-push-to-another-repository@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        with:
+          source-directory: .
+          destination-github-username: onplt
+          destination-repository-name: homebrew-morpharch
+          target-directory: Formula
+          target-branch: main
+          commit-message: "morpharch ${{ github.ref_name }}"
+          user-email: onur@morpharch.dev
+          user-name: morpharch-bot
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Update Scoop bucket
+  # ═══════════════════════════════════════════════════════════════════════════
+  update-scoop:
+    name: Update Scoop Bucket
+    needs: github-release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download checksums
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL \
+            "https://github.com/onplt/morpharch/releases/download/v${VERSION}/SHA256SUMS.txt" \
+            -o SHA256SUMS.txt
+
+      - name: Generate manifest from template
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_WIN=$(grep 'windows-x86_64\.zip' SHA256SUMS.txt | awk '{print $1}')
+
+          sed -e "s/{{VERSION}}/${VERSION}/g" \
+              -e "s/{{SHA256_WINDOWS_X86_64}}/${SHA_WIN}/g" \
+              dist/scoop/morpharch.json.template > morpharch.json
+
+          cat morpharch.json
+
+      - name: Push to Scoop bucket
+        uses: cpina/github-action-push-to-another-repository@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        with:
+          source-directory: .
+          destination-github-username: onplt
+          destination-repository-name: scoop-morpharch
+          target-directory: bucket
+          target-branch: main
+          commit-message: "morpharch ${{ github.ref_name }}"
+          user-email: onur@morpharch.dev
+          user-name: morpharch-bot
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Publish to npm
+  # ═══════════════════════════════════════════════════════════════════════════
+  publish-npm:
+    name: Publish to npm
+    needs: github-release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: binaries
+
+      - name: Prepare npm packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Map: asset archive -> npm package directory -> binary name
+          declare -A PKG_MAP=(
+            ["morpharch-linux-x86_64.tar.gz"]="npm/morpharch-linux-x64"
+            ["morpharch-linux-aarch64.tar.gz"]="npm/morpharch-linux-arm64"
+            ["morpharch-macos-x86_64.tar.gz"]="npm/morpharch-darwin-x64"
+            ["morpharch-macos-aarch64.tar.gz"]="npm/morpharch-darwin-arm64"
+            ["morpharch-windows-x86_64.zip"]="npm/morpharch-win32-x64"
+          )
+
+          for asset in "${!PKG_MAP[@]}"; do
+            pkg_dir="${PKG_MAP[$asset]}"
+            mkdir -p "${pkg_dir}/bin"
+
+            if [[ "$asset" == *.zip ]]; then
+              # Windows: unzip
+              unzip -o "binaries/${asset}" -d "${pkg_dir}/bin/"
+            else
+              # Unix: tar
+              tar -xzf "binaries/${asset}" -C "${pkg_dir}/bin/"
+            fi
+
+            # Update version in package.json
+            cd "${pkg_dir}"
+            sed -i "s/\"version\": \"0.0.0\"/\"version\": \"${VERSION}\"/" package.json
+            cd -
+          done
+
+          # Update main package version and dependency versions
+          cd npm/morpharch
+          sed -i "s/\"version\": \"0.0.0\"/\"version\": \"${VERSION}\"/" package.json
+          sed -i "s/\"0.0.0\"/\"${VERSION}\"/g" package.json
+          cd -
+
+          echo "Package versions updated to ${VERSION}"
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg_dir in npm/morpharch-*/; do
+            echo "Publishing ${pkg_dir}..."
+            cd "${pkg_dir}"
+            npm publish --access public || echo "Warning: Failed to publish ${pkg_dir}"
+            cd -
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/morpharch
+          npm publish --access public
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Publish Docker image to GHCR
+  # ═══════════════════════════════════════════════════════════════════════════
+  publish-docker:
+    name: Publish Docker Image
+    needs: github-release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/onplt/morpharch:${{ github.ref_name }}
+            ghcr.io/onplt/morpharch:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

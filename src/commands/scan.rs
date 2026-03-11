@@ -12,6 +12,7 @@ use petgraph::graph::DiGraph;
 use rayon::prelude::*;
 use tracing::{debug, info};
 
+use crate::blast_radius;
 use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::git_scanner;
@@ -421,6 +422,11 @@ pub fn run_scan(
                 &project_config.scoring,
             );
 
+            let blast = blast_radius::compute_blast_radius_report(
+                &graph,
+                project_config.scoring.thresholds.blast_max_critical_paths,
+            );
+
             db.insert_graph_snapshot(&GraphSnapshot {
                 commit_hash: commit_info.hash,
                 nodes: nodes_vec,
@@ -429,6 +435,7 @@ pub fn run_scan(
                 edge_count: graph.edge_count(),
                 timestamp: commit_info.timestamp,
                 drift: Some(drift),
+                blast_radius: Some(blast),
             })?;
 
             prev_graph = Some(graph);

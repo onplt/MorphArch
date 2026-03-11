@@ -293,7 +293,7 @@ function BottomCTA() {
         </p>
         <div className="install-command-wrapper" style={{ justifyContent: 'center' }}>
           <div className="install-command" style={{ margin: 0 }}>
-            <code>$ cargo install morpharch</code>
+            <code>$ brew install onplt/morpharch</code>
           </div>
         </div>
         <div style={{ marginTop: '2rem' }}>
@@ -313,7 +313,7 @@ function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
   
   const handleCopy = () => {
-    navigator.clipboard.writeText('cargo install morpharch');
+    navigator.clipboard.writeText('brew install onplt/morpharch');
     const btn = document.querySelector('.copy-button');
     if (btn) {
       const originalText = btn.textContent;
@@ -341,10 +341,10 @@ function HomepageHeader() {
             <p className="hero__subtitle">
               Understand your monorepo's architectural evolution with AST-powered dependency analysis and an animated TUI.
             </p>
-            
+
             <div className="install-command-wrapper">
               <div className="install-command" style={{ margin: 0 }}>
-                <code>$ cargo install morpharch</code>
+                <code>$ brew install onplt/morpharch</code>
               </div>
               <button className="copy-button" onClick={handleCopy}>Copy</button>
             </div>

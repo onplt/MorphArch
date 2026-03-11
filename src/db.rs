@@ -97,6 +97,9 @@ impl Database {
         // SQLite doesn't have "ADD COLUMN IF NOT EXISTS" — check with PRAGMA table_info
         self.migrate_drift_column()?;
 
+        // Add blast_radius_json column (idempotent)
+        self.migrate_blast_radius_column()?;
+
         info!("Database migration complete");
         Ok(())
     }
@@ -128,6 +131,38 @@ impl Database {
                 )
                 .context("Failed to add drift_json column")?;
             debug!("migration: drift_json column added");
+        }
+
+        Ok(())
+    }
+
+    /// migration: adds blast_radius_json column to graph_snapshots table.
+    ///
+    /// Silently skips if column already exists (idempotent).
+    fn migrate_blast_radius_column(&self) -> Result<()> {
+        let has_column = {
+            let mut stmt = self
+                .conn
+                .prepare("PRAGMA table_info(graph_snapshots)")
+                .context("Failed to prepare PRAGMA table_info query")?;
+
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("Failed to execute PRAGMA query")?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            columns.contains(&"blast_radius_json".to_string())
+        };
+
+        if !has_column {
+            self.conn
+                .execute_batch(
+                    "ALTER TABLE graph_snapshots \
+                     ADD COLUMN blast_radius_json TEXT DEFAULT NULL;",
+                )
+                .context("Failed to add blast_radius_json column")?;
+            debug!("migration: blast_radius_json column added");
         }
 
         Ok(())
@@ -247,17 +282,24 @@ impl Database {
             .as_ref()
             .map(|d| serde_json::to_string(d).unwrap_or_default());
 
+        let blast_radius_json = snapshot
+            .blast_radius
+            .as_ref()
+            .map(|br| serde_json::to_string(br).unwrap_or_default());
+
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO graph_snapshots
-                    (commit_hash, snapshot_json, node_count, edge_count, drift_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (commit_hash, snapshot_json, node_count, edge_count, \
+                     drift_json, blast_radius_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     snapshot.commit_hash,
                     json,
                     snapshot.node_count as i64,
                     snapshot.edge_count as i64,
                     drift_json,
+                    blast_radius_json,
                 ],
             )
             .with_context(|| {
@@ -739,6 +781,7 @@ mod tests {
             edge_count: 2,
             timestamp: 1_000_000,
             drift: None,
+            blast_radius: None,
         };
         db.insert_graph_snapshot(&snapshot).unwrap();
 
@@ -801,6 +844,7 @@ mod tests {
             edge_count: 1,
             timestamp: 3_000_000,
             drift: Some(drift),
+            blast_radius: None,
         };
         db.insert_graph_snapshot(&snapshot).unwrap();
 
@@ -848,6 +892,7 @@ mod tests {
             edge_count: 0,
             timestamp: 4_000_000,
             drift: None,
+            blast_radius: None,
         };
         db.insert_graph_snapshot(&snapshot).unwrap();
 

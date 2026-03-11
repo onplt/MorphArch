@@ -1,0 +1,36 @@
+class Morpharch < Formula
+  desc "Monorepo architecture health visualizer with animated TUI"
+  homepage "https://github.com/onplt/morpharch"
+  version "{{VERSION}}"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "https://github.com/onplt/morpharch/releases/download/v{{VERSION}}/morpharch-macos-aarch64.tar.gz"
+      sha256 "{{SHA256_MACOS_AARCH64}}"
+    end
+    on_intel do
+      url "https://github.com/onplt/morpharch/releases/download/v{{VERSION}}/morpharch-macos-x86_64.tar.gz"
+      sha256 "{{SHA256_MACOS_X86_64}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/onplt/morpharch/releases/download/v{{VERSION}}/morpharch-linux-aarch64.tar.gz"
+      sha256 "{{SHA256_LINUX_AARCH64}}"
+    end
+    on_intel do
+      url "https://github.com/onplt/morpharch/releases/download/v{{VERSION}}/morpharch-linux-x86_64.tar.gz"
+      sha256 "{{SHA256_LINUX_X86_64}}"
+    end
+  end
+
+  def install
+    bin.install "morpharch"
+  end
+
+  test do
+    assert_match "morpharch", shell_output("#{bin}/morpharch --version")
+  end
+end

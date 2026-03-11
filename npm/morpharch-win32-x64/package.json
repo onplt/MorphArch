@@ -1,0 +1,14 @@
+{
+  "name": "@morpharch/cli-win32-x64",
+  "version": "0.0.0",
+  "description": "MorphArch binary for win32-x64",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onplt/morpharch"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin"],
+  "preferUnplugged": true
+}

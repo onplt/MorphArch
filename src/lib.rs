@@ -13,6 +13,7 @@
 //! - **Python** — `import` / `from ... import` statements
 //! - **Go** — `import` declarations
 
+pub mod blast_radius;
 pub mod cli;
 pub mod commands;
 pub mod config;

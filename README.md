@@ -55,13 +55,35 @@ box, with language-level import extraction for Rust, TypeScript, JavaScript, Pyt
 
 ## Installation
 
-### From crates.io
+### Quick Install
+
+**Linux / macOS:**
 
 ```bash
-cargo install morpharch
+curl -fsSL https://raw.githubusercontent.com/onplt/morpharch/main/install.sh | sh
 ```
 
-### From source
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/onplt/morpharch/main/install.ps1 | iex
+```
+
+### Package Managers
+
+| Platform | Command |
+|----------|---------|
+| **crates.io** | `cargo install morpharch` |
+| **cargo-binstall** | `cargo binstall morpharch` |
+| **Homebrew** | `brew install onplt/morpharch` |
+| **npm** | `npm install -g morpharch` |
+| **Scoop** (Windows) | `scoop bucket add morpharch https://github.com/onplt/scoop-morpharch` then `scoop install morpharch` |
+| **AUR** (Arch) | `yay -S morpharch-bin` |
+| **DEB** (Debian/Ubuntu) | Download `.deb` from [Releases](https://github.com/onplt/morpharch/releases) |
+| **RPM** (Fedora/RHEL) | Download `.rpm` from [Releases](https://github.com/onplt/morpharch/releases) |
+| **Docker** | `docker run --rm -v .:/repo ghcr.io/onplt/morpharch scan .` |
+
+### From Source
 
 ```bash
 git clone https://github.com/onplt/morpharch.git

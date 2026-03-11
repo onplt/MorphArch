@@ -20,28 +20,36 @@ jobs:
         with:
           fetch-depth: 0 # Full history is required for scan
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install MorphArch
-        run: cargo install morpharch
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/onplt/morpharch/main/install.sh | sh
 
       - name: Run Architecture Analysis
         run: |
           # Scan the repository
           morpharch scan . --max-commits 1
-          
+
           # Analyze the HEAD commit and extract the score
           SCORE=$(morpharch analyze --json | jq '.total')
-          
+
           echo "Architectural Health Score: $SCORE"
-          
+
           # Fail if score is below 80
           if [ "$SCORE" -lt 80 ]; then
             echo "Architecture health is too low ($SCORE)! Please fix circular dependencies or architectural debt."
             exit 1
           fi
 ```
+
+### Alternative Install Methods for CI
+
+The shell script installer is the fastest option since it downloads a pre-built binary. If you prefer other methods:
+
+| Method | Command | Notes |
+|--------|---------|-------|
+| **Shell script** (Recommended) | `curl -fsSL .../install.sh \| sh` | Pre-built binary, fastest |
+| **cargo-binstall** | `cargo binstall morpharch --no-confirm` | Pre-built binary via cargo |
+| **cargo install** | `cargo install morpharch` | Compiles from source, slowest |
 
 ---
 

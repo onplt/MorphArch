@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-03-11
+
+### Added
+- **Distribution Scripts:** Added new `install.sh`, `install.ps1`, `Dockerfile`, and `npm/` wrappers for simplified and broader installation options across platforms.
+- **Blast Radius Analysis:** Introduced architectural blast radius detection (`src/blast_radius.rs`) to evaluate the impact of changes across the dependency graph.
+
+### Changed
+- **CLI & TUI Enhancements:** Applied core updates to CLI parsing logic, models, and DB interactions. Improved graph rendering logic and insight panels in the terminal UI.
+- **Documentation:** Updated internal website documentation and installation guides to reflect new features and installation methods.
+
 ## [1.2.1] - 2026-03-10
 
 ### Changed
@@ -104,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite Persistence:** Durable storage for scan results, graph snapshots, and drift metrics.
 - **Multi-Language Support:** Import extraction for Rust, TypeScript, Python, and Go via tree-sitter.
 
+[1.2.2]: https://github.com/onplt/morpharch/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/onplt/morpharch/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/onplt/morpharch/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/onplt/morpharch/compare/v1.0.4...v1.1.0

@@ -16,9 +16,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::blast_radius;
 use crate::config::ScoringConfig;
 use crate::db::Database;
-use crate::models::{DriftScore, GraphSnapshot, SnapshotMetadata};
+use crate::models::{BlastRadiusReport, DriftScore, GraphSnapshot, SnapshotMetadata};
 use crate::scoring;
 
 /// Which panel currently has keyboard focus
@@ -44,6 +45,7 @@ pub enum InsightTab {
     Health,
     Hotspots,
     Trends,
+    Blast,
 }
 
 // Keep ActiveView for backward compat during transition
@@ -138,6 +140,18 @@ pub struct App {
     pub advisory_lines: Vec<String>,
     /// Scoring configuration for diagnostics generation
     pub scoring_config: ScoringConfig,
+
+    // ── Blast Radius Cartography ──
+    /// Blast radius overlay mode active (toggle with 'x')
+    pub blast_overlay_active: bool,
+    /// Cached blast radius report for the current snapshot
+    pub current_blast_radius: Option<BlastRadiusReport>,
+    /// Per-node blast scores indexed by graph layout position
+    pub node_blast_scores: Vec<f64>,
+    /// Single-node cascade highlight: (layout_idx, distance, impact)
+    pub cascade_highlight: Option<Vec<(usize, u32, f64)>>,
+    /// Scroll offset for the Blast tab TOP IMPACT list
+    pub blast_impact_scroll: usize,
 }
 
 struct GraphRenderCache {
@@ -225,10 +239,16 @@ impl App {
             filter_text: String::new(),
             selected_pkg_index: None,
             repo_name: String::new(),
-            insights_panel_width: 34,
+            insights_panel_width: 36,
             insights_area: Rect::default(),
             advisory_lines: Vec::new(),
             scoring_config: ScoringConfig::default(),
+            // Blast radius cartography
+            blast_overlay_active: false,
+            current_blast_radius: None,
+            node_blast_scores: Vec::new(),
+            cascade_highlight: None,
+            blast_impact_scroll: 0,
         };
 
         if let Some(first_meta) = app.snapshots_metadata.first() {
@@ -271,6 +291,31 @@ impl App {
         } else {
             self.advisory_lines.clear();
         }
+
+        // Compute blast radius for current graph
+        let blast_report = blast_radius::compute_blast_radius_report(
+            &g,
+            self.scoring_config.thresholds.blast_max_critical_paths,
+        );
+
+        // Map blast scores to layout indices for rendering
+        self.node_blast_scores = self
+            .graph_layout
+            .labels
+            .iter()
+            .map(|label| {
+                blast_report
+                    .impacts
+                    .iter()
+                    .find(|m| m.module_name == *label)
+                    .map(|m| m.blast_score)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        self.current_blast_radius = Some(blast_report);
+        self.cascade_highlight = None;
+        self.blast_impact_scroll = 0;
     }
 
     pub fn apply_hotspots_sort(&mut self) {
@@ -403,6 +448,7 @@ impl App {
         self.refresh_render_cache(&snapshot.commit_hash);
         self.compute_insights();
         self.dragging_node = None;
+        self.hovered_node = None;
         self.pkg_scroll_offset = 0;
         for pos in &mut self.graph_layout.positions {
             pos.prev_x = pos.x;
@@ -717,14 +763,23 @@ impl App {
                 self.reheat_layout();
                 return;
             }
+            KeyCode::Char('x') => {
+                self.blast_overlay_active = !self.blast_overlay_active;
+                if !self.blast_overlay_active {
+                    self.cascade_highlight = None;
+                }
+                return;
+            }
             KeyCode::Char('p') | KeyCode::Char(' ') => {
                 self.is_playing = !self.is_playing;
                 self.last_auto_advance = Instant::now();
                 return;
             }
             KeyCode::Esc => {
-                // Cascading escape: filter → nav stack → deselect → quit
-                if !self.filter_text.is_empty() {
+                // Cascading escape: cascade → filter → nav stack → deselect → quit
+                if self.cascade_highlight.is_some() {
+                    self.cascade_highlight = None;
+                } else if !self.filter_text.is_empty() {
                     self.filter_text.clear();
                 } else if self.nav_stack.len() > 1 {
                     self.pop_view();
@@ -813,8 +868,18 @@ impl App {
                 if let Some(idx) = self.selected_pkg_index {
                     if let Some(name) = pkgs.get(idx) {
                         let name = name.clone();
-                        self.active_view = ActiveView::Inspect(name.clone());
-                        self.push_view(ViewContext::ModuleInspect(name));
+                        if self.blast_overlay_active {
+                            // In blast mode: compute cascade for the selected package
+                            if let Some(layout_idx) =
+                                self.graph_layout.labels.iter().position(|l| *l == name)
+                            {
+                                self.hovered_node = Some(layout_idx);
+                                self.compute_cascade_for_node(layout_idx);
+                            }
+                        } else {
+                            self.active_view = ActiveView::Inspect(name.clone());
+                            self.push_view(ViewContext::ModuleInspect(name));
+                        }
                     }
                 }
             }
@@ -833,12 +898,17 @@ impl App {
     fn handle_graph_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => {
-                // Inspect hovered node
                 if let Some(idx) = self.hovered_node {
-                    if let Some(label) = self.graph_layout.labels.get(idx) {
-                        let name = label.clone();
-                        self.active_view = ActiveView::Inspect(name.clone());
-                        self.push_view(ViewContext::ModuleInspect(name));
+                    if self.blast_overlay_active {
+                        // In blast mode: compute cascade highlight for this node
+                        self.compute_cascade_for_node(idx);
+                    } else {
+                        // Normal: inspect hovered node
+                        if let Some(label) = self.graph_layout.labels.get(idx) {
+                            let name = label.clone();
+                            self.active_view = ActiveView::Inspect(name.clone());
+                            self.push_view(ViewContext::ModuleInspect(name));
+                        }
                     }
                 }
             }
@@ -849,37 +919,111 @@ impl App {
         }
     }
 
+    /// Computes the single-node blast radius cascade for TUI overlay.
+    fn compute_cascade_for_node(&mut self, layout_idx: usize) {
+        // Build a temporary petgraph from current layout
+        let mut g: DiGraph<String, u32> = DiGraph::new();
+        let mut node_map = HashMap::new();
+        for label in &self.graph_layout.labels {
+            node_map.insert(label.clone(), g.add_node(label.clone()));
+        }
+        for (idx, &(from, to)) in self.graph_layout.edges.iter().enumerate() {
+            if from < self.graph_layout.labels.len() && to < self.graph_layout.labels.len() {
+                let from_n = &self.graph_layout.labels[from];
+                let to_n = &self.graph_layout.labels[to];
+                let weight = self
+                    .graph_layout
+                    .edge_weights
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(1);
+                g.add_edge(node_map[from_n], node_map[to_n], weight);
+            }
+        }
+
+        let label = &self.graph_layout.labels[layout_idx];
+        if let Some(&ni) = node_map.get(label) {
+            let blast_nodes = blast_radius::compute_single_node_blast(&g, ni);
+            // Map NodeIndex back to layout indices
+            let mapped: Vec<(usize, u32, f64)> = blast_nodes
+                .iter()
+                .filter_map(|(ni, dist, impact)| {
+                    let name = &g[*ni];
+                    self.graph_layout
+                        .labels
+                        .iter()
+                        .position(|l| l == name)
+                        .map(|layout_i| (layout_i, *dist, *impact))
+                })
+                .collect();
+            self.cascade_highlight = Some(mapped);
+        }
+    }
+
     fn handle_insights_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.select_next_hotspot();
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.select_prev_hotspot();
-            }
+            KeyCode::Char('j') | KeyCode::Down => match self.insight_tab {
+                InsightTab::Hotspots => self.select_next_hotspot(),
+                InsightTab::Blast => {
+                    let max = self
+                        .current_blast_radius
+                        .as_ref()
+                        .map(|br| br.impacts.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    self.blast_impact_scroll = (self.blast_impact_scroll + 1).min(max);
+                }
+                _ => {}
+            },
+            KeyCode::Char('k') | KeyCode::Up => match self.insight_tab {
+                InsightTab::Hotspots => self.select_prev_hotspot(),
+                InsightTab::Blast => {
+                    self.blast_impact_scroll = self.blast_impact_scroll.saturating_sub(1);
+                }
+                _ => {}
+            },
             KeyCode::Char('h') | KeyCode::Left => {
                 self.insight_tab = match self.insight_tab {
-                    InsightTab::Health => InsightTab::Trends,
+                    InsightTab::Health => InsightTab::Blast,
                     InsightTab::Hotspots => InsightTab::Health,
                     InsightTab::Trends => InsightTab::Hotspots,
+                    InsightTab::Blast => InsightTab::Trends,
                 };
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 self.insight_tab = match self.insight_tab {
                     InsightTab::Health => InsightTab::Hotspots,
                     InsightTab::Hotspots => InsightTab::Trends,
-                    InsightTab::Trends => InsightTab::Health,
+                    InsightTab::Trends => InsightTab::Blast,
+                    InsightTab::Blast => InsightTab::Health,
                 };
             }
-            KeyCode::Enter => {
-                if let Some(i) = self.hotspots_state.selected() {
-                    if let Some(pkg) = self.brittle_packages.get(i) {
-                        let name = pkg.0.clone();
-                        self.active_view = ActiveView::Inspect(name.clone());
-                        self.push_view(ViewContext::ModuleInspect(name));
+            KeyCode::Enter => match self.insight_tab {
+                InsightTab::Hotspots => {
+                    if let Some(i) = self.hotspots_state.selected() {
+                        if let Some(pkg) = self.brittle_packages.get(i) {
+                            let name = pkg.0.clone();
+                            self.active_view = ActiveView::Inspect(name.clone());
+                            self.push_view(ViewContext::ModuleInspect(name));
+                        }
                     }
                 }
-            }
+                InsightTab::Blast => {
+                    // Enter on Blast tab: compute cascade for the impact at scroll position
+                    if let Some(br) = &self.current_blast_radius {
+                        if let Some(impact) = br.impacts.get(self.blast_impact_scroll) {
+                            let module = impact.module_name.clone();
+                            if let Some(idx) =
+                                self.graph_layout.labels.iter().position(|l| *l == module)
+                            {
+                                self.blast_overlay_active = true;
+                                self.hovered_node = Some(idx);
+                                self.compute_cascade_for_node(idx);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
             KeyCode::Char('s') => {
                 self.hotspots_sort = match self.hotspots_sort {
                     HotspotsSort::Instability => HotspotsSort::FanIn,
@@ -1070,7 +1214,11 @@ impl App {
                 }
             }
             MouseEventKind::Moved => {
-                if in_canvas {
+                // When a cascade highlight is active, lock hovered_node to the
+                // cascade source so mouse movement doesn't break the visual.
+                if self.cascade_highlight.is_some() {
+                    // Do nothing — keep hovered_node pinned to cascade source
+                } else if in_canvas {
                     let (px, py) =
                         self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
                     let vis = self.visible_node_set();
@@ -1103,13 +1251,15 @@ impl App {
                 if row == tab_row {
                     // Click on tab bar — determine which tab by x position
                     let rel_x = col.saturating_sub(self.insights_area.x + 1);
-                    // Tabs: " Health " (8) " " (1) " Hotspots " (10) " " (1) " Trends " (8)
-                    if rel_x < 8 {
+                    // Tabs: " Health "(8)+sep(1)+" Spots "(7)+sep(1)+" Trend "(7)+sep(1)+" Blast "(7)
+                    if rel_x < 9 {
                         self.insight_tab = InsightTab::Health;
-                    } else if rel_x < 19 {
+                    } else if rel_x < 17 {
                         self.insight_tab = InsightTab::Hotspots;
-                    } else {
+                    } else if rel_x < 25 {
                         self.insight_tab = InsightTab::Trends;
+                    } else {
+                        self.insight_tab = InsightTab::Blast;
                     }
                 } else if self.insight_tab == InsightTab::Hotspots {
                     // Click on hotspots table row
@@ -1120,6 +1270,31 @@ impl App {
                         self.hotspots_state.select(Some(clicked_idx));
                         self.focus_selected_hotspot();
                     }
+                } else if self.insight_tab == InsightTab::Blast {
+                    // Click on blast impact row — trigger cascade for that module
+                    // Summary(3) + Keystones(5) + TopImpact title(1) = offset 9
+                    // Plus tab bar row(1) + border(1) = 11 from insights_area.y
+                    let content_start = self.insights_area.y + 11;
+                    if row >= content_start {
+                        let has_above = self.blast_impact_scroll > 0;
+                        let indicator_offset = if has_above { 1u16 } else { 0 };
+                        let row_idx = row.saturating_sub(content_start + indicator_offset) as usize
+                            + self.blast_impact_scroll;
+                        if let Some(br) = &self.current_blast_radius {
+                            if row_idx < br.impacts.len() {
+                                let module = br.impacts[row_idx].module_name.clone();
+                                // Find this module's node index in the graph
+                                if let Some(idx) =
+                                    self.graph_layout.labels.iter().position(|l| *l == module)
+                                {
+                                    self.hovered_node = Some(idx);
+                                    if self.blast_overlay_active {
+                                        self.compute_cascade_for_node(idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -1127,15 +1302,19 @@ impl App {
                 if self.pkg_area.contains(pos) {
                     self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(3);
                 } else if self.insights_area.contains(pos) {
-                    // Scroll insights: navigate hotspots up or switch tabs
-                    if self.insight_tab == InsightTab::Hotspots {
-                        self.select_prev_hotspot();
-                    } else {
-                        self.insight_tab = match self.insight_tab {
-                            InsightTab::Hotspots => InsightTab::Health,
-                            InsightTab::Trends => InsightTab::Hotspots,
-                            InsightTab::Health => InsightTab::Trends,
-                        };
+                    // Scroll insights: navigate content or switch tabs
+                    match self.insight_tab {
+                        InsightTab::Hotspots => self.select_prev_hotspot(),
+                        InsightTab::Blast => {
+                            self.blast_impact_scroll = self.blast_impact_scroll.saturating_sub(1);
+                        }
+                        _ => {
+                            self.insight_tab = match self.insight_tab {
+                                InsightTab::Health => InsightTab::Blast,
+                                InsightTab::Trends => InsightTab::Hotspots,
+                                _ => unreachable!(),
+                            };
+                        }
                     }
                 }
             }
@@ -1147,15 +1326,24 @@ impl App {
                         .saturating_add(3)
                         .min(self.graph_layout.labels.len().saturating_sub(1));
                 } else if self.insights_area.contains(pos) {
-                    // Scroll insights: navigate hotspots down or switch tabs
-                    if self.insight_tab == InsightTab::Hotspots {
-                        self.select_next_hotspot();
-                    } else {
-                        self.insight_tab = match self.insight_tab {
-                            InsightTab::Health => InsightTab::Hotspots,
-                            InsightTab::Hotspots => InsightTab::Trends,
-                            InsightTab::Trends => InsightTab::Health,
-                        };
+                    // Scroll insights: navigate content or switch tabs
+                    match self.insight_tab {
+                        InsightTab::Hotspots => self.select_next_hotspot(),
+                        InsightTab::Blast => {
+                            let max = self
+                                .current_blast_radius
+                                .as_ref()
+                                .map(|br| br.impacts.len().saturating_sub(1))
+                                .unwrap_or(0);
+                            self.blast_impact_scroll = (self.blast_impact_scroll + 1).min(max);
+                        }
+                        _ => {
+                            self.insight_tab = match self.insight_tab {
+                                InsightTab::Health => InsightTab::Hotspots,
+                                InsightTab::Trends => InsightTab::Blast,
+                                _ => unreachable!(),
+                            };
+                        }
                     }
                 }
             }
@@ -1472,12 +1660,24 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let snapped_cloned = snapped.clone();
     let search_visible_cloned = search_visible.clone();
+
+    // Clone blast state into the canvas closure for edge coloring
+    let blast_active = app.blast_overlay_active;
+    let blast_scores_cloned = app.node_blast_scores.clone();
+    let cascade_cloned = app.cascade_highlight.clone();
+    let hovered_cloned = app.hovered_node;
+
     let canvas = Canvas::default()
         .block(block)
         .marker(ratatui::symbols::Marker::Braille)
         .x_bounds([0.0, canvas_w.max(1.0)])
         .y_bounds([0.0, canvas_h.max(1.0)])
         .paint(move |ctx| {
+            // Pre-compute whether cascade should affect edge rendering
+            let edge_use_cascade = cascade_cloned.is_some()
+                && (!is_filtered
+                    || hovered_cloned.is_some_and(|h| search_visible_cloned.contains(&h)));
+
             if let Some(c) = cache {
                 for (count, &idx) in c.sorted_edge_indices.iter().rev().enumerate() {
                     let &(f, t) = &layout.edges[idx];
@@ -1497,7 +1697,35 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                     let (x1, y1) = snapped_cloned[f];
                     let (x2, y2) = snapped_cloned[t];
 
-                    let color = if is_filtered {
+                    let color = if blast_active {
+                        if edge_use_cascade {
+                            let cascade = cascade_cloned.as_ref().unwrap();
+                            let f_in = cascade.iter().any(|(ci, _, _)| *ci == f)
+                                || hovered_cloned == Some(f);
+                            let t_in = cascade.iter().any(|(ci, _, _)| *ci == t)
+                                || hovered_cloned == Some(t);
+                            if f_in && t_in {
+                                // Edge on the cascade path: bright
+                                use crate::tui::graph_renderer::cascade_distance_color;
+                                let max_dist = cascade
+                                    .iter()
+                                    .filter(|(ci, _, _)| *ci == f || *ci == t)
+                                    .map(|(_, d, _)| *d)
+                                    .min()
+                                    .unwrap_or(1);
+                                cascade_distance_color(max_dist)
+                            } else {
+                                // Not on cascade path: very dim
+                                Color::Rgb(45, 45, 60)
+                            }
+                        } else {
+                            // Blast heatmap: edge color = average blast score of endpoints
+                            let s_f = blast_scores_cloned.get(f).copied().unwrap_or(0.0);
+                            let s_t = blast_scores_cloned.get(t).copied().unwrap_or(0.0);
+                            use crate::tui::graph_renderer::blast_color;
+                            blast_color((s_f + s_t) / 2.0)
+                        }
+                    } else if is_filtered {
                         if let Some(center) = inspect_center_idx {
                             if f == center {
                                 // Outbound: Peach — this module depends on target
@@ -1506,7 +1734,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                                 // Inbound: Teal — source depends on this module
                                 Color::Rgb(148, 226, 213)
                             } else {
-                                // Neighbor-to-neighbor: muted Sapphire (visible but secondary)
+                                // Neighbor-to-neighbor: muted Sapphire
                                 Color::Rgb(88, 113, 150)
                             }
                         } else {
@@ -1531,6 +1759,16 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let buf = frame.buffer_mut();
     let label_max_len = if n_nodes > 80 { 12 } else { 14 };
+
+    // When in inspect/filter mode, only apply cascade coloring if the source node
+    // is within the visible subset — otherwise the cascade dims all visible nodes
+    // because the source and its downstream neighbors are outside the view.
+    let use_cascade = app.cascade_highlight.is_some()
+        && (!is_filtered
+            || app
+                .hovered_node
+                .is_some_and(|h| search_visible.contains(&h)));
+
     for (i, &(sx, sy)) in snapped.iter().enumerate() {
         let is_m = is_filtered && search_matched.contains(&i);
         let is_v = is_filtered && search_visible.contains(&i);
@@ -1550,7 +1788,25 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         let row = area.y + 1 + ((canvas_h - sy) / 4.0) as u16;
 
         if col < area.x + area.width - 1 && row < area.y + area.height - 1 {
-            let color = if is_m {
+            let color = if app.blast_overlay_active {
+                // Blast overlay mode: color by blast score or cascade distance
+                if use_cascade {
+                    let cascade = app.cascade_highlight.as_ref().unwrap();
+                    if is_h {
+                        Color::Rgb(255, 232, 115) // bright yellow for source
+                    } else if let Some((_, dist, _)) = cascade.iter().find(|(ci, _, _)| *ci == i) {
+                        use crate::tui::graph_renderer::cascade_distance_color;
+                        cascade_distance_color(*dist)
+                    } else {
+                        Color::Rgb(49, 50, 68) // dim unaffected
+                    }
+                } else if i < app.node_blast_scores.len() {
+                    use crate::tui::graph_renderer::blast_color;
+                    blast_color(app.node_blast_scores[i])
+                } else {
+                    NODE_PALETTE[i % NODE_PALETTE.len()]
+                }
+            } else if is_m {
                 Color::Rgb(255, 232, 115) // bright yellow for center
             } else if is_h {
                 Color::White // white for hover
@@ -1560,17 +1816,13 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                     let is_inbound = layout.edges.iter().any(|&(f, t)| f == i && t == center);
                     let is_outbound = layout.edges.iter().any(|&(f, t)| f == center && t == i);
                     if is_inbound && is_outbound {
-                        // Bidirectional: Mauve (special)
-                        Color::Rgb(203, 166, 247)
+                        Color::Rgb(203, 166, 247) // Bidirectional: Mauve
                     } else if is_inbound {
-                        // This node depends on center: Teal
-                        Color::Rgb(148, 226, 213)
+                        Color::Rgb(148, 226, 213) // Teal
                     } else if is_outbound {
-                        // Center depends on this node: Peach
-                        Color::Rgb(250, 179, 135)
+                        Color::Rgb(250, 179, 135) // Peach
                     } else {
-                        // Indirect neighbor (neighbor-of-neighbor): muted blue
-                        Color::Rgb(116, 150, 200)
+                        Color::Rgb(116, 150, 200) // muted blue
                     }
                 } else {
                     Color::Rgb(137, 220, 255) // filter mode: bright blue
@@ -1579,8 +1831,30 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 NODE_PALETTE[i % NODE_PALETTE.len()]
             };
 
+            // Articulation points get diamond ◆, others get circle ●
+            let symbol = if app.blast_overlay_active {
+                if let Some(ref br) = app.current_blast_radius {
+                    let label = &layout.labels[i];
+                    if br
+                        .articulation_points
+                        .iter()
+                        .any(|a| a.module_name == *label)
+                    {
+                        "◆"
+                    } else {
+                        "●"
+                    }
+                } else {
+                    "●"
+                }
+            } else if is_m {
+                "◆"
+            } else {
+                "●"
+            };
+
             let cell = &mut buf[(col, row)];
-            cell.set_symbol(if is_m { "◆" } else { "●" }).set_fg(color);
+            cell.set_symbol(symbol).set_fg(color);
 
             if show_l {
                 let label = &layout.labels[i];
@@ -1821,14 +2095,15 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
         inner.height.saturating_sub(1),
     );
 
-    let tabs = vec![
+    let tabs = [
         ("Health", InsightTab::Health),
-        ("Hotspots", InsightTab::Hotspots),
-        ("Trends", InsightTab::Trends),
+        ("Spots", InsightTab::Hotspots),
+        ("Trend", InsightTab::Trends),
+        ("Blast", InsightTab::Blast),
     ];
 
     let mut tab_spans = Vec::new();
-    for (label, tab) in &tabs {
+    for (i, (label, tab)) in tabs.iter().enumerate() {
         let is_active = app.insight_tab == *tab;
         if is_active {
             tab_spans.push(Span::styled(
@@ -1844,7 +2119,10 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(FG_OVERLAY),
             ));
         }
-        tab_spans.push(Span::styled(" ", Style::default()));
+        // No trailing separator after the last tab
+        if i < tabs.len() - 1 {
+            tab_spans.push(Span::styled(" ", Style::default()));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), tab_area);
 
@@ -1864,6 +2142,14 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         InsightTab::Trends => {
             render_trends_tab(frame, content_area, app);
+        }
+        InsightTab::Blast => {
+            super::insight_panel::render_blast_radius_panel(
+                frame,
+                content_area,
+                &app.current_blast_radius,
+                app.blast_impact_scroll,
+            );
         }
     }
 }
@@ -2191,7 +2477,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "j/k:Navigate  enter:Inspect  s:Sort  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
         }
         FocusedPanel::Graph => {
-            "r:Reheat  c:Center  enter:Inspect  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
+            "r:Reheat  c:Center  x:Blast  enter:Inspect  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
         }
         FocusedPanel::Insights => "j/k:Navigate  h/l:Tab  enter:Inspect  s:Sort  ?:Help  q:Quit",
         FocusedPanel::Timeline => "j/k:±1  h/l:±10  g/G:Start/End  Space:Play  +/-:Speed  ?:Help",
@@ -2232,7 +2518,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         FocusedPanel::Timeline => "TIMELINE",
     };
 
-    let status = Line::from(vec![
+    let mut status = Line::from(vec![
         Span::styled(
             format!(" [{}]", view_label),
             Style::default()
@@ -2283,6 +2569,17 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(FG_OVERLAY),
         ),
     ]);
+
+    if app.blast_overlay_active {
+        status.spans.push(Span::styled(
+            " [BLAST]",
+            Style::default()
+                .fg(Color::Rgb(30, 30, 46))
+                .bg(Color::Rgb(243, 139, 168))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(BG_BASE)),
         rows[1],
@@ -2352,7 +2649,9 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(" enter  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Drill in", Style::default().fg(FG_TEXT)),
+            Span::styled("Drill in        ", Style::default().fg(FG_TEXT)),
+            Span::styled(" x    ", Style::default().fg(ACCENT_BLUE)),
+            Span::styled("Blast overlay", Style::default().fg(FG_TEXT)),
         ]),
         Line::from(vec![
             Span::styled(" esc    ", Style::default().fg(ACCENT_BLUE)),

@@ -53,6 +53,9 @@ pub struct GraphSnapshot {
     pub timestamp: i64,
     #[serde(default)]
     pub drift: Option<DriftScore>,
+    /// Blast radius analysis (computed during scan, None for old snapshots)
+    #[serde(default)]
+    pub blast_radius: Option<BlastRadiusReport>,
 }
 
 /// Lighter version of GraphSnapshot for UI lists and timelines.
@@ -109,4 +112,79 @@ pub struct DriftScore {
     /// Instability debt sub-score (weight: 8%)
     #[serde(default)]
     pub instability_debt: f64,
+}
+
+// ── Blast Radius Cartography ──
+
+/// Blast radius analysis for a single graph snapshot.
+///
+/// Contains per-module impact scores, articulation points (structural
+/// keystones), and critical dependency chains.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlastRadiusReport {
+    /// Per-module impact scores, sorted by blast_score descending
+    pub impacts: Vec<ModuleImpact>,
+    /// Articulation points — nodes whose removal fragments the graph
+    pub articulation_points: Vec<ArticulationPoint>,
+    /// Top critical dependency chains (longest weighted paths)
+    pub critical_paths: Vec<CascadePath>,
+    /// Graph-level summary statistics
+    pub summary: BlastRadiusSummary,
+}
+
+/// Blast radius impact score for a single module.
+///
+/// `blast_score` is 0.0–1.0: fraction of downstream graph reachable,
+/// weighted by inverse-square distance decay and coupling intensity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleImpact {
+    /// Module name (matches graph node label)
+    pub module_name: String,
+    /// Normalized blast score (0.0 = leaf, 1.0 = affects everything)
+    pub blast_score: f64,
+    /// Count of transitively reachable downstream modules
+    pub downstream_count: usize,
+    /// Sum of decay-weighted reachability (raw, before normalization)
+    pub weighted_reach: f64,
+    /// Whether this module is an articulation point
+    pub is_articulation_point: bool,
+}
+
+/// A structural keystone whose removal would fragment the dependency graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticulationPoint {
+    /// Module name
+    pub module_name: String,
+    /// Number of biconnected components this point bridges
+    pub components_bridged: usize,
+    /// Fan-in count (how many depend on it)
+    pub fan_in: usize,
+    /// Fan-out count (how many it depends on)
+    pub fan_out: usize,
+}
+
+/// A critical dependency chain — longest weighted path through the graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadePath {
+    /// Ordered list of module names from root to leaf
+    pub chain: Vec<String>,
+    /// Total coupling weight along the path (sum of edge weights)
+    pub total_weight: u32,
+    /// Chain length (number of modules)
+    pub depth: usize,
+}
+
+/// Graph-level blast radius summary statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlastRadiusSummary {
+    /// Number of articulation points in the graph
+    pub articulation_point_count: usize,
+    /// Maximum blast score across all modules
+    pub max_blast_score: f64,
+    /// Module with the highest blast score
+    pub most_impactful_module: String,
+    /// Average blast score
+    pub mean_blast_score: f64,
+    /// Length of the longest critical path
+    pub longest_chain_depth: usize,
 }

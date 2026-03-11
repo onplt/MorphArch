@@ -27,7 +27,7 @@ morpharch scan [path] [flags]
 - `path`: The local directory of the monorepo (default: `.`).
 
 **Flags:**
-- `-n, --max-commits <N>`: Limit the scan to the last N commits. Set to `0` for full history.
+- `-n, --max-commits <N>`: Limit the scan to the last N commits. Set to `0` for full history (default).
 
 ---
 
@@ -38,22 +38,45 @@ Perform a scan and launch the interactive, animated TUI.
 morpharch watch [path] [flags]
 ```
 
+**Arguments:**
+- `path`: The local directory of the monorepo (default: `.`).
+
 **Flags:**
-- `-n, --max-commits <N>`: Limit the history visible in the TUI timeline.
+- `-n, --max-commits <N>`: Limit the history visible in the TUI timeline. Set to `0` for unlimited (default).
 - `-s, --max-snapshots <N>`: Max number of data points in the timeline (default: `200`).
 
 ---
 
 ### `analyze`
-Perform a deep architectural audit of the current HEAD or a specific commit.
+Perform a deep architectural audit of a specific commit.
 
 ```bash
 morpharch analyze [commit] [flags]
 ```
 
+**Arguments:**
+- `commit`: Commit reference to analyze (e.g., `HEAD`, `main~5`, `abc1234`). Defaults to HEAD if omitted.
+
 **Flags:**
-- `--json`: Output the report in machine-readable JSON format.
-- `-p, --path <PATH>`: Path to the repo (default: `.`).
+- `-p, --path <PATH>`: Path to the Git repository (default: `.`).
+
+The analyze command outputs a comprehensive report including:
+- Health score breakdown (6-component debt analysis)
+- Boundary violation details
+- Circular dependency detection (SCCs)
+- Blast radius analysis (articulation points, downstream impact)
+- AI-driven improvement recommendations
+
+---
+
+### `list-graphs`
+List recent dependency graph snapshots stored in the database.
+
+```bash
+morpharch list-graphs
+```
+
+Shows the last 10 graph snapshots with commit info.
 
 ---
 
@@ -64,9 +87,11 @@ Display a historical trend of health scores in a table format.
 morpharch list-drift
 ```
 
+Shows drift scores, node/edge counts, and delta changes compared to the previous commit for the last 20 commits.
+
 ---
 
-## 🛠 Automation & CI/CD
+## Automation & CI/CD
 
 ### Exit Codes
 MorphArch follows standard Unix exit codes to indicate status:
@@ -76,43 +101,3 @@ MorphArch follows standard Unix exit codes to indicate status:
 | `0`  | **Success**: Command completed successfully. |
 | `1`  | **Runtime Error**: General failure (e.g., path not found, Git error). |
 | `2`  | **Panic**: Internal program failure (please report as a bug). |
-
-:::tip Pro Tip
-In CI/CD, use `morpharch analyze --json | jq '.total'` to extract the health score and fail the build if it falls below your team's threshold.
-:::
-
----
-
-### JSON Output Schema (`analyze --json`)
-
-When running with the `--json` flag, MorphArch returns a structured object. Use this for custom reporting or dashboards.
-
-```json
-{
-  "commit": "abc1234...",
-  "total": 92,
-  "fan_in_delta": 0,
-  "fan_out_delta": 1,
-  "new_cycles": 1,
-  "boundary_violations": 2,
-  "cognitive_complexity": 5.4,
-  "cycle_debt": 4.5,
-  "layering_debt": 2.0,
-  "hub_debt": 0.0,
-  "coupling_debt": 1.5,
-  "cognitive_debt": 0.0,
-  "instability_debt": 0.0,
-  "metadata": {
-    "node_count": 12,
-    "edge_count": 45,
-    "timestamp": 1709812345
-  }
-}
-```
-
-#### Field Definitions:
-- `total`: The final Health Score (0-100).
-- `new_cycles`: Number of circular dependency groups detected (SCCs).
-- `boundary_violations`: Back-edges in the topological ordering of the dependency graph.
-- `*_debt`: The exact sub-score calculated by the 6-component scoring algorithm for each specific architecture risk.
-- `fan_in_delta` / `fan_out_delta`: Median change in module fan-in/fan-out compared to the previous commit.

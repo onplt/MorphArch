@@ -1,6 +1,6 @@
 [package]
 name = "morpharch"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Onur <onur@morpharch.dev>"]
@@ -21,6 +21,11 @@ exclude = [
     "screenshots/",
     "*.gif",
     "*.mp4",
+    "npm/",
+    "dist/",
+    "Dockerfile",
+    "install.sh",
+    "install.ps1",
 ]
 
 [dependencies]
@@ -102,3 +107,52 @@ globset = "0.4"
 lto = true
 codegen-units = 1
 strip = true
+
+# ── Distribution metadata ──
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-{ target }{ archive-suffix }"
+bin-dir = "morpharch{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-linux-x86_64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-linux-aarch64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-macos-x86_64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-macos-aarch64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/morpharch-windows-x86_64.zip"
+pkg-fmt = "zip"
+
+[package.metadata.deb]
+maintainer = "Onur <onur@morpharch.dev>"
+copyright = "2026 Onur"
+license-file = ["LICENSE-MIT", "0"]
+extended-description = """\
+MorphArch scans monorepo Git history, builds per-commit dependency \
+graphs using tree-sitter AST parsing, calculates architectural health \
+scores, and renders the results as an animated force-directed graph \
+in your terminal."""
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/morpharch", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/morpharch/README.md", "644"],
+    ["LICENSE-MIT", "usr/share/doc/morpharch/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/morpharch/LICENSE-APACHE", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/morpharch", dest = "/usr/bin/morpharch", mode = "0755" },
+    { source = "README.md", dest = "/usr/share/doc/morpharch/README.md", mode = "0644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/morpharch/LICENSE-MIT", mode = "0644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/morpharch/LICENSE-APACHE", mode = "0644" },
+]
