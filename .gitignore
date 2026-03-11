@@ -64,3 +64,8 @@ heaptrack.*
 
 # Local history
 .history/
+
+# npm distribution artifacts (local builds)
+npm/*/bin/morpharch
+npm/*/bin/morpharch.exe
+node_modules/

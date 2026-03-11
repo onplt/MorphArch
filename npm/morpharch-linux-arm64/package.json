@@ -1,0 +1,14 @@
+{
+  "name": "@morpharch/cli-linux-arm64",
+  "version": "0.0.0",
+  "description": "MorphArch binary for linux-arm64",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onplt/morpharch"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin"],
+  "preferUnplugged": true
+}

@@ -1,0 +1,36 @@
+{
+  "name": "morpharch",
+  "version": "0.0.0",
+  "description": "Monorepo architecture health visualizer with animated TUI",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onplt/morpharch"
+  },
+  "homepage": "https://github.com/onplt/morpharch",
+  "keywords": [
+    "monorepo",
+    "architecture",
+    "dependency-graph",
+    "tui",
+    "drift",
+    "health-score"
+  ],
+  "bin": {
+    "morpharch": "bin/morpharch"
+  },
+  "files": [
+    "bin",
+    "postinstall.js"
+  ],
+  "optionalDependencies": {
+    "@morpharch/cli-linux-x64": "0.0.0",
+    "@morpharch/cli-linux-arm64": "0.0.0",
+    "@morpharch/cli-darwin-x64": "0.0.0",
+    "@morpharch/cli-darwin-arm64": "0.0.0",
+    "@morpharch/cli-win32-x64": "0.0.0"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}

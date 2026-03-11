@@ -129,6 +129,10 @@ pub fn run_analyze(
     println!();
     print_cycle_info(&snapshot.nodes, &snapshot.edges);
 
+    // ── Blast Radius Analysis ──
+    println!();
+    print_blast_radius(&snapshot);
+
     // ── Recommendations ──
     println!();
     print_recommendations(&snapshot.drift);
@@ -345,5 +349,71 @@ fn print_recommendations(drift: &Option<DriftScore>) {
 
     for suggestion in &suggestions {
         println!("{suggestion}");
+    }
+}
+
+fn print_blast_radius(snapshot: &crate::models::GraphSnapshot) {
+    println!("  ── Blast Radius Analysis ──");
+    println!();
+
+    match &snapshot.blast_radius {
+        Some(br) => {
+            // Articulation points
+            if br.articulation_points.is_empty() {
+                println!("     Structural Keystones: None — graph has good redundancy.");
+            } else {
+                println!(
+                    "     Structural Keystones ({} found):",
+                    br.articulation_points.len()
+                );
+                for (i, ap) in br.articulation_points.iter().enumerate().take(5) {
+                    println!(
+                        "       {}. {} (bridges {} components, {}in/{}out)",
+                        i + 1,
+                        ap.module_name,
+                        ap.components_bridged,
+                        ap.fan_in,
+                        ap.fan_out
+                    );
+                }
+            }
+            println!();
+
+            // Top impact modules
+            println!("     Highest Impact Modules:");
+            for (i, m) in br.impacts.iter().take(5).enumerate() {
+                let ap_marker = if m.is_articulation_point {
+                    " [keystone]"
+                } else {
+                    ""
+                };
+                println!(
+                    "       {}. {} — {:.0}% blast radius ({} downstream){}",
+                    i + 1,
+                    m.module_name,
+                    m.blast_score * 100.0,
+                    m.downstream_count,
+                    ap_marker,
+                );
+            }
+            println!();
+
+            // Critical paths
+            if !br.critical_paths.is_empty() {
+                println!("     Critical Dependency Chains:");
+                for (i, path) in br.critical_paths.iter().take(3).enumerate() {
+                    println!(
+                        "       {}. {} (depth {}, weight {})",
+                        i + 1,
+                        path.chain.join(" → "),
+                        path.depth,
+                        path.total_weight,
+                    );
+                }
+            }
+        }
+        None => {
+            println!("     Not computed. Re-scan to generate blast radius data.");
+        }
     }
 }

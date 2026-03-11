@@ -1,0 +1,23 @@
+{
+  "version": "{{VERSION}}",
+  "description": "Monorepo architecture health visualizer with animated TUI",
+  "homepage": "https://github.com/onplt/morpharch",
+  "license": "MIT|Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/onplt/morpharch/releases/download/v{{VERSION}}/morpharch-windows-x86_64.zip",
+      "hash": "{{SHA256_WINDOWS_X86_64}}"
+    }
+  },
+  "bin": "morpharch.exe",
+  "checkver": {
+    "github": "https://github.com/onplt/morpharch"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/onplt/morpharch/releases/download/v$version/morpharch-windows-x86_64.zip"
+      }
+    }
+  }
+}

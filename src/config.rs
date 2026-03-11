@@ -279,6 +279,14 @@ pub struct Thresholds {
     /// brittle (default: 0.8).
     #[serde(default = "default_brittle_instability_ratio")]
     pub brittle_instability_ratio: f64,
+
+    /// Blast radius score threshold for "high impact" module classification (default: 0.3).
+    #[serde(default = "default_blast_high_impact_threshold")]
+    pub blast_high_impact_threshold: f64,
+
+    /// Maximum number of critical paths to compute (default: 5).
+    #[serde(default = "default_blast_max_critical_paths")]
+    pub blast_max_critical_paths: usize,
 }
 
 fn default_hub_exemption_ratio() -> f64 {
@@ -290,6 +298,12 @@ fn default_entry_point_max_fan_in() -> usize {
 fn default_brittle_instability_ratio() -> f64 {
     0.8
 }
+fn default_blast_high_impact_threshold() -> f64 {
+    0.3
+}
+fn default_blast_max_critical_paths() -> usize {
+    5
+}
 
 impl Default for Thresholds {
     fn default() -> Self {
@@ -297,6 +311,8 @@ impl Default for Thresholds {
             hub_exemption_ratio: 0.3,
             entry_point_max_fan_in: 2,
             brittle_instability_ratio: 0.8,
+            blast_high_impact_threshold: 0.3,
+            blast_max_critical_paths: 5,
         }
     }
 }
@@ -417,6 +433,8 @@ mod tests {
         assert!((t.hub_exemption_ratio - 0.3).abs() < f64::EPSILON);
         assert_eq!(t.entry_point_max_fan_in, 2);
         assert!((t.brittle_instability_ratio - 0.8).abs() < f64::EPSILON);
+        assert!((t.blast_high_impact_threshold - 0.3).abs() < f64::EPSILON);
+        assert_eq!(t.blast_max_critical_paths, 5);
     }
 
     #[test]

@@ -1,0 +1,21 @@
+# Maintainer: Onur <onur@morpharch.dev>
+pkgname=morpharch-bin
+pkgver=1.2.1
+pkgrel=1
+pkgdesc='Monorepo architecture health visualizer with animated TUI'
+arch=('x86_64' 'aarch64')
+url='https://github.com/onplt/morpharch'
+license=('MIT' 'Apache-2.0')
+provides=('morpharch')
+conflicts=('morpharch')
+
+source_x86_64=("${url}/releases/download/v${pkgver}/morpharch-linux-x86_64.tar.gz")
+source_aarch64=("${url}/releases/download/v${pkgver}/morpharch-linux-aarch64.tar.gz")
+
+# Run 'updpkgsums' to populate before publishing to AUR
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    install -Dm755 morpharch "${pkgdir}/usr/bin/morpharch"
+}

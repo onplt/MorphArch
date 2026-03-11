@@ -10,10 +10,10 @@ use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Wrap};
 
 use super::app::App;
 use super::graph_renderer::{
-    ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, drift_color,
+    ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, blast_color, drift_color,
 };
 use crate::config::Weights;
-use crate::models::DriftScore;
+use crate::models::{BlastRadiusReport, DriftScore};
 
 pub fn render_insight_panel(
     frame: &mut Frame,
@@ -546,5 +546,199 @@ fn generate_recommendation(drift: &DriftScore) -> String {
                 worst.1.to_lowercase()
             ),
         }
+    }
+}
+
+// ── Blast Radius Panel ──
+
+/// Renders the Blast Radius insight tab.
+///
+/// Layout:
+///   - Summary: keystones count, max impact, chain depth
+///   - Keystones: top articulation points
+///   - Top Impact: sorted module list with blast score bars
+pub fn render_blast_radius_panel(
+    frame: &mut Frame,
+    area: Rect,
+    blast_radius: &Option<BlastRadiusReport>,
+    scroll_offset: usize,
+) {
+    if let Some(br) = blast_radius {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Summary stats
+                Constraint::Length(5), // Articulation points
+                Constraint::Min(3),    // Top impact modules
+            ])
+            .split(area);
+
+        // ── Summary ──
+        let summary_lines = vec![
+            Line::from(vec![
+                Span::styled(" Keystones: ", Style::default().fg(ACCENT_LAVENDER)),
+                Span::styled(
+                    format!("{}", br.summary.articulation_point_count),
+                    Style::default().fg(FG_TEXT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  Chain: {}", br.summary.longest_chain_depth),
+                    Style::default().fg(FG_OVERLAY),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Max Impact: ", Style::default().fg(ACCENT_LAVENDER)),
+                Span::styled(
+                    format!("{:.0}%", br.summary.max_blast_score * 100.0),
+                    Style::default()
+                        .fg(blast_color(br.summary.max_blast_score))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if br.summary.most_impactful_module.len() > 16 {
+                        format!(" ({}…)", &br.summary.most_impactful_module[..15])
+                    } else {
+                        format!(" ({})", br.summary.most_impactful_module)
+                    },
+                    Style::default().fg(FG_OVERLAY),
+                ),
+            ]),
+        ];
+        frame.render_widget(
+            Paragraph::new(summary_lines).block(
+                Block::default()
+                    .title(Span::styled(
+                        " BLAST RADIUS ",
+                        Style::default()
+                            .fg(Color::Rgb(30, 30, 46))
+                            .bg(ACCENT_LAVENDER)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .style(Style::default().bg(BG_SURFACE)),
+            ),
+            chunks[0],
+        );
+
+        // ── Articulation Points ──
+        let ap_lines: Vec<Line> = if br.articulation_points.is_empty() {
+            vec![Line::from(Span::styled(
+                " No keystones — redundant graph",
+                Style::default().fg(FG_OVERLAY),
+            ))]
+        } else {
+            br.articulation_points
+                .iter()
+                .take(4)
+                .map(|ap| {
+                    let name_display = if ap.module_name.len() > 16 {
+                        format!("{}…", &ap.module_name[..15])
+                    } else {
+                        ap.module_name.clone()
+                    };
+                    Line::from(vec![
+                        Span::styled(" ◆ ", Style::default().fg(Color::Rgb(243, 139, 168))),
+                        Span::styled(name_display, Style::default().fg(FG_TEXT)),
+                        Span::styled(
+                            format!(" ({}in/{}out)", ap.fan_in, ap.fan_out),
+                            Style::default().fg(FG_OVERLAY),
+                        ),
+                    ])
+                })
+                .collect()
+        };
+        frame.render_widget(
+            Paragraph::new(ap_lines).block(
+                Block::default()
+                    .title(Span::styled(
+                        " KEYSTONES ",
+                        Style::default()
+                            .fg(ACCENT_LAVENDER)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .style(Style::default().bg(BG_SURFACE)),
+            ),
+            chunks[1],
+        );
+
+        // ── Top Impact Modules (scrollable) ──
+        let total_impacts = br.impacts.len();
+        // Reserve 1 row for the block title
+        let avail_rows = chunks[2].height.saturating_sub(1) as usize;
+        let has_more_above = scroll_offset > 0;
+        // Two-pass: estimate data_rows accounting for indicators
+        let above_row = if has_more_above { 1 } else { 0 };
+        // Pessimistic: assume "more below" takes a row, compute data_rows
+        let data_rows_pessimistic = avail_rows.saturating_sub(above_row + 1).max(1);
+        let has_more_below = total_impacts > scroll_offset + data_rows_pessimistic;
+        // Final calculation with actual indicator count
+        let below_row = if has_more_below { 1 } else { 0 };
+        let data_rows = avail_rows.saturating_sub(above_row + below_row).max(1);
+
+        let mut impact_lines: Vec<Line> = Vec::new();
+
+        // Scroll-up indicator
+        if has_more_above {
+            impact_lines.push(Line::from(Span::styled(
+                format!(" ▲ {} more above", scroll_offset),
+                Style::default().fg(FG_OVERLAY),
+            )));
+        }
+
+        // Visible impact entries
+        for m in br.impacts.iter().skip(scroll_offset).take(data_rows) {
+            let score_pct = (m.blast_score * 100.0) as u32;
+            let bar_width = (score_pct / 5).min(10) as usize;
+            let bar = "█".repeat(bar_width);
+            let name_display = if m.module_name.len() > 14 {
+                format!("{}…", &m.module_name[..13])
+            } else {
+                m.module_name.clone()
+            };
+            impact_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:>3}% ", score_pct),
+                    Style::default().fg(blast_color(m.blast_score)),
+                ),
+                Span::styled(bar, Style::default().fg(blast_color(m.blast_score))),
+                Span::raw(" "),
+                Span::styled(
+                    name_display,
+                    Style::default().fg(if m.is_articulation_point {
+                        Color::Rgb(243, 139, 168) // Red for APs
+                    } else {
+                        FG_TEXT
+                    }),
+                ),
+            ]));
+        }
+
+        // Scroll-down indicator
+        if has_more_below {
+            let remaining = total_impacts.saturating_sub(scroll_offset + data_rows);
+            impact_lines.push(Line::from(Span::styled(
+                format!(" ▼ {} more below", remaining),
+                Style::default().fg(FG_OVERLAY),
+            )));
+        }
+
+        frame.render_widget(
+            Paragraph::new(impact_lines).block(
+                Block::default()
+                    .title(Span::styled(
+                        " TOP IMPACT ",
+                        Style::default()
+                            .fg(ACCENT_LAVENDER)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .style(Style::default().bg(BG_SURFACE)),
+            ),
+            chunks[2],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(" No blast radius data. Run scan first.")
+                .style(Style::default().fg(FG_OVERLAY)),
+            area,
+        );
     }
 }
