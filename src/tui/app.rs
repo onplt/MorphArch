@@ -368,12 +368,12 @@ impl App {
     }
 
     fn focus_selected_hotspot(&mut self) {
-        if let Some(i) = self.hotspots_state.selected() {
-            if let Some(pkg) = self.brittle_packages.get(i) {
-                // Focus the graph on the selected node if it exists
-                if let Some(idx) = self.graph_layout.labels.iter().position(|l| l == &pkg.0) {
-                    self.hovered_node = Some(idx);
-                }
+        if let Some(i) = self.hotspots_state.selected()
+            && let Some(pkg) = self.brittle_packages.get(i)
+        {
+            // Focus the graph on the selected node if it exists
+            if let Some(idx) = self.graph_layout.labels.iter().position(|l| l == &pkg.0) {
+                self.hovered_node = Some(idx);
             }
         }
     }
@@ -523,12 +523,11 @@ impl App {
     pub fn push_view(&mut self, ctx: ViewContext) {
         // If the top of the stack is already a ModuleInspect, replace it
         // instead of appending (prevents infinite breadcrumb stacking)
-        if let Some(last) = self.nav_stack.last() {
-            if matches!(last, ViewContext::ModuleInspect(_))
-                && matches!(ctx, ViewContext::ModuleInspect(_))
-            {
-                self.nav_stack.pop();
-            }
+        if let Some(last) = self.nav_stack.last()
+            && matches!(last, ViewContext::ModuleInspect(_))
+            && matches!(ctx, ViewContext::ModuleInspect(_))
+        {
+            self.nav_stack.pop();
         }
         self.nav_stack.push(ctx);
     }
@@ -833,10 +832,10 @@ impl App {
                         .unwrap_or(0),
                 );
                 // Scroll to keep selection visible
-                if let Some(idx) = self.selected_pkg_index {
-                    if idx >= self.pkg_scroll_offset + 20 {
-                        self.pkg_scroll_offset = idx.saturating_sub(19);
-                    }
+                if let Some(idx) = self.selected_pkg_index
+                    && idx >= self.pkg_scroll_offset + 20
+                {
+                    self.pkg_scroll_offset = idx.saturating_sub(19);
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -848,10 +847,10 @@ impl App {
                         .map(|i| i.saturating_sub(1))
                         .unwrap_or(0),
                 );
-                if let Some(idx) = self.selected_pkg_index {
-                    if idx < self.pkg_scroll_offset {
-                        self.pkg_scroll_offset = idx;
-                    }
+                if let Some(idx) = self.selected_pkg_index
+                    && idx < self.pkg_scroll_offset
+                {
+                    self.pkg_scroll_offset = idx;
                 }
             }
             KeyCode::Char('g') => {
@@ -865,21 +864,21 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(idx) = self.selected_pkg_index {
-                    if let Some(name) = pkgs.get(idx) {
-                        let name = name.clone();
-                        if self.blast_overlay_active {
-                            // In blast mode: compute cascade for the selected package
-                            if let Some(layout_idx) =
-                                self.graph_layout.labels.iter().position(|l| *l == name)
-                            {
-                                self.hovered_node = Some(layout_idx);
-                                self.compute_cascade_for_node(layout_idx);
-                            }
-                        } else {
-                            self.active_view = ActiveView::Inspect(name.clone());
-                            self.push_view(ViewContext::ModuleInspect(name));
+                if let Some(idx) = self.selected_pkg_index
+                    && let Some(name) = pkgs.get(idx)
+                {
+                    let name = name.clone();
+                    if self.blast_overlay_active {
+                        // In blast mode: compute cascade for the selected package
+                        if let Some(layout_idx) =
+                            self.graph_layout.labels.iter().position(|l| *l == name)
+                        {
+                            self.hovered_node = Some(layout_idx);
+                            self.compute_cascade_for_node(layout_idx);
                         }
+                    } else {
+                        self.active_view = ActiveView::Inspect(name.clone());
+                        self.push_view(ViewContext::ModuleInspect(name));
                     }
                 }
             }
@@ -999,26 +998,26 @@ impl App {
             }
             KeyCode::Enter => match self.insight_tab {
                 InsightTab::Hotspots => {
-                    if let Some(i) = self.hotspots_state.selected() {
-                        if let Some(pkg) = self.brittle_packages.get(i) {
-                            let name = pkg.0.clone();
-                            self.active_view = ActiveView::Inspect(name.clone());
-                            self.push_view(ViewContext::ModuleInspect(name));
-                        }
+                    if let Some(i) = self.hotspots_state.selected()
+                        && let Some(pkg) = self.brittle_packages.get(i)
+                    {
+                        let name = pkg.0.clone();
+                        self.active_view = ActiveView::Inspect(name.clone());
+                        self.push_view(ViewContext::ModuleInspect(name));
                     }
                 }
                 InsightTab::Blast => {
                     // Enter on Blast tab: compute cascade for the impact at scroll position
-                    if let Some(br) = &self.current_blast_radius {
-                        if let Some(impact) = br.impacts.get(self.blast_impact_scroll) {
-                            let module = impact.module_name.clone();
-                            if let Some(idx) =
-                                self.graph_layout.labels.iter().position(|l| *l == module)
-                            {
-                                self.blast_overlay_active = true;
-                                self.hovered_node = Some(idx);
-                                self.compute_cascade_for_node(idx);
-                            }
+                    if let Some(br) = &self.current_blast_radius
+                        && let Some(impact) = br.impacts.get(self.blast_impact_scroll)
+                    {
+                        let module = impact.module_name.clone();
+                        if let Some(idx) =
+                            self.graph_layout.labels.iter().position(|l| *l == module)
+                        {
+                            self.blast_overlay_active = true;
+                            self.hovered_node = Some(idx);
+                            self.compute_cascade_for_node(idx);
                         }
                     }
                 }
@@ -1162,10 +1161,10 @@ impl App {
                 self.dragging_timeline = false;
             }
             MouseEventKind::Down(MouseButton::Left) if in_canvas => {
-                if let Some(old_idx) = self.dragging_node.take() {
-                    if old_idx < self.graph_layout.positions.len() {
-                        self.graph_layout.positions[old_idx].pinned = false;
-                    }
+                if let Some(old_idx) = self.dragging_node.take()
+                    && old_idx < self.graph_layout.positions.len()
+                {
+                    self.graph_layout.positions[old_idx].pinned = false;
                 }
                 let (px, py) =
                     self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
@@ -1176,10 +1175,10 @@ impl App {
                 let mut closest: Option<(usize, f64)> = None;
                 for (i, pos) in self.graph_layout.positions.iter().enumerate() {
                     // Skip nodes hidden by inspect/filter
-                    if let Some(ref v) = vis {
-                        if !v.contains(&i) {
-                            continue;
-                        }
+                    if let Some(ref v) = vis
+                        && !v.contains(&i)
+                    {
+                        continue;
                     }
                     let dx = pos.x - px;
                     let dy = pos.y - py;
@@ -1194,23 +1193,23 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(idx) = self.dragging_node {
-                    if idx < self.graph_layout.positions.len() {
-                        let (px, py) =
-                            self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                        self.graph_layout.positions[idx].x = px;
-                        self.graph_layout.positions[idx].y = py;
-                        self.graph_layout.positions[idx].prev_x = px;
-                        self.graph_layout.positions[idx].prev_y = py;
-                    }
+                if let Some(idx) = self.dragging_node
+                    && idx < self.graph_layout.positions.len()
+                {
+                    let (px, py) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    self.graph_layout.positions[idx].x = px;
+                    self.graph_layout.positions[idx].y = py;
+                    self.graph_layout.positions[idx].prev_x = px;
+                    self.graph_layout.positions[idx].prev_y = py;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(idx) = self.dragging_node.take() {
-                    if idx < self.graph_layout.positions.len() {
-                        self.graph_layout.positions[idx].pinned = false;
-                        self.graph_layout.temperature = 0.01;
-                    }
+                if let Some(idx) = self.dragging_node.take()
+                    && idx < self.graph_layout.positions.len()
+                {
+                    self.graph_layout.positions[idx].pinned = false;
+                    self.graph_layout.temperature = 0.01;
                 }
             }
             MouseEventKind::Moved => {
@@ -1225,10 +1224,10 @@ impl App {
                     let mut closest: Option<(usize, f64)> = None;
                     for (i, pos) in self.graph_layout.positions.iter().enumerate() {
                         // Skip nodes hidden by inspect/filter
-                        if let Some(ref v) = vis {
-                            if !v.contains(&i) {
-                                continue;
-                            }
+                        if let Some(ref v) = vis
+                            && !v.contains(&i)
+                        {
+                            continue;
                         }
                         let dist = ((pos.x - px).powi(2) + (pos.y - py).powi(2)).sqrt();
                         if dist < 10.0 && (closest.is_none() || dist < closest.unwrap().1) {
@@ -1280,17 +1279,17 @@ impl App {
                         let indicator_offset = if has_above { 1u16 } else { 0 };
                         let row_idx = row.saturating_sub(content_start + indicator_offset) as usize
                             + self.blast_impact_scroll;
-                        if let Some(br) = &self.current_blast_radius {
-                            if row_idx < br.impacts.len() {
-                                let module = br.impacts[row_idx].module_name.clone();
-                                // Find this module's node index in the graph
-                                if let Some(idx) =
-                                    self.graph_layout.labels.iter().position(|l| *l == module)
-                                {
-                                    self.hovered_node = Some(idx);
-                                    if self.blast_overlay_active {
-                                        self.compute_cascade_for_node(idx);
-                                    }
+                        if let Some(br) = &self.current_blast_radius
+                            && row_idx < br.impacts.len()
+                        {
+                            let module = br.impacts[row_idx].module_name.clone();
+                            // Find this module's node index in the graph
+                            if let Some(idx) =
+                                self.graph_layout.labels.iter().position(|l| *l == module)
+                            {
+                                self.hovered_node = Some(idx);
+                                if self.blast_overlay_active {
+                                    self.compute_cascade_for_node(idx);
                                 }
                             }
                         }
@@ -1913,14 +1912,14 @@ fn render_breadcrumb(frame: &mut Frame, area: Rect, app: &App) {
         let short = if hash.len() >= 7 { &hash[..7] } else { hash };
         spans.push(Span::styled(" ❯ ", Style::default().fg(FG_OVERLAY)));
         spans.push(Span::styled(short, Style::default().fg(ACCENT_BLUE)));
-        if let Some(msg) = app.timeline.current_commit_message() {
-            if !msg.is_empty() {
-                let truncated = super::widgets::truncate_str(msg, 40);
-                spans.push(Span::styled(
-                    format!(" \"{}\"", truncated),
-                    Style::default().fg(FG_SUBTEXT),
-                ));
-            }
+        if let Some(msg) = app.timeline.current_commit_message()
+            && !msg.is_empty()
+        {
+            let truncated = super::widgets::truncate_str(msg, 40);
+            spans.push(Span::styled(
+                format!(" \"{}\"", truncated),
+                Style::default().fg(FG_SUBTEXT),
+            ));
         }
     }
 
@@ -2793,13 +2792,12 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
     terminal.clear()?;
 
     loop {
-        if let Some(hash) = app.loading_hash.take() {
-            if let Some(db) = &app.db {
-                if let Ok(Some(snapshot)) = db.get_graph_snapshot(&hash) {
-                    app.snapshot_cache.insert(hash.clone(), snapshot.clone());
-                    app.apply_snapshot(&snapshot);
-                }
-            }
+        if let Some(hash) = app.loading_hash.take()
+            && let Some(db) = &app.db
+            && let Ok(Some(snapshot)) = db.get_graph_snapshot(&hash)
+        {
+            app.snapshot_cache.insert(hash.clone(), snapshot.clone());
+            app.apply_snapshot(&snapshot);
         }
 
         terminal.draw(|f| {

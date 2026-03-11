@@ -260,11 +260,11 @@ pub fn run_scan(
     let commit_hashes: Vec<String> = commit_hashes_from_commits(&commits_raw);
 
     let mut prev_graph: Option<DiGraph<String, u32>> = None;
-    if let Some(ref last_hash) = last_commit {
-        if let Some(snapshot) = db.get_graph_snapshot(last_hash)? {
-            let nodes: HashSet<String> = snapshot.nodes.into_iter().collect();
-            prev_graph = Some(graph_builder::build_graph(&nodes, &snapshot.edges));
-        }
+    if let Some(ref last_hash) = last_commit
+        && let Some(snapshot) = db.get_graph_snapshot(last_hash)?
+    {
+        let nodes: HashSet<String> = snapshot.nodes.into_iter().collect();
+        prev_graph = Some(graph_builder::build_graph(&nodes, &snapshot.edges));
     }
 
     let ctx = Arc::new(ScanContext {
@@ -339,18 +339,17 @@ pub fn run_scan(
                         }
                     } else {
                         let blob = repo.find_object(blob_oid)?;
-                        if let Ok(content) = std::str::from_utf8(&blob.data) {
-                            if let Some(lang) =
+                        if let Ok(content) = std::str::from_utf8(&blob.data)
+                            && let Some(lang) =
                                 parser::detect_language(&file_path.to_string_lossy())
-                            {
-                                parse_jobs.push((
-                                    source_pkg,
-                                    oid_key,
-                                    content.to_string(),
-                                    file_path.clone(),
-                                    lang,
-                                ));
-                            }
+                        {
+                            parse_jobs.push((
+                                source_pkg,
+                                oid_key,
+                                content.to_string(),
+                                file_path.clone(),
+                                lang,
+                            ));
                         }
                     }
                 }

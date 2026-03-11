@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MorphArch is a monorepo architecture health visualizer with an animated TUI. It scans Git history, builds dependency graphs per commit, calculates absolute health scores, and renders an interactive force-directed graph in the terminal.
 
-- Rust 2024 edition, MSRV 1.85
+- Rust 2024 edition, MSRV 1.88
 - Uses `gix` (pure-Rust Git) — no subprocess/shell calls to git
 - SQLite via `rusqlite` (bundled) at `~/.morpharch/morpharch.db`
 - Tree-sitter for import extraction (Rust, TypeScript, JavaScript, Python, Go)
