@@ -271,6 +271,7 @@ jobs:
           destination-repository-name: homebrew-morpharch
           target-directory: Formula
           target-branch: main
+          create-target-branch-if-needed: true
           commit-message: "morpharch ${{ github.ref_name }}"
           user-email: onur@morpharch.dev
           user-name: morpharch-bot
@@ -314,6 +315,7 @@ jobs:
           destination-repository-name: scoop-morpharch
           target-directory: bucket
           target-branch: main
+          create-target-branch-if-needed: true
           commit-message: "morpharch ${{ github.ref_name }}"
           user-email: onur@morpharch.dev
           user-name: morpharch-bot

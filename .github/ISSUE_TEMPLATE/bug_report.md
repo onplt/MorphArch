@@ -28,7 +28,7 @@ What actually happened.
 
 - OS: [e.g., Ubuntu 24.04, macOS 15, Windows 11]
 - Rust version: [e.g., 1.88.0]
-- MorphArch version: [e.g., 1.2.3]
+- MorphArch version: [e.g., 1.2.4]
 - Terminal: [e.g., kitty, Windows Terminal, iTerm2]
 
 ## Repository Under Analysis
