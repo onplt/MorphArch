@@ -5,7 +5,7 @@ everything you need to get started.
 
 ## Prerequisites
 
-- **Rust 1.85 or later** (the project's MSRV)
+- **Rust 1.88 or later** (the project's MSRV)
 - **A C compiler** (required by `rusqlite` bundled SQLite and tree-sitter grammars)
   - Linux: `gcc` or `clang` (install via your package manager)
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
@@ -90,7 +90,7 @@ cargo doc --no-deps --open
 
 ## Pull Request Process
 
-1. Ensure your changes compile on the MSRV (Rust 1.85).
+1. Ensure your changes compile on the MSRV (Rust 1.88).
 2. Run `cargo fmt`, `cargo clippy`, and `cargo test` locally.
 3. Write clear, descriptive commit messages.
 4. Open a pull request against the `main` branch.

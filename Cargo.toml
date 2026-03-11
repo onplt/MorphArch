@@ -2,7 +2,7 @@
 name = "morpharch"
 version = "1.2.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Onur <onur@morpharch.dev>"]
 description = "Monorepo architecture drift visualizer with animated TUI"
 license = "MIT OR Apache-2.0"
