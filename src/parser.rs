@@ -60,10 +60,10 @@ pub fn extract_package_name(file_path: &Path) -> String {
     let dirs = &components[..components.len() - 1];
 
     // Check for monorepo patterns: packages/X/... or apps/X/...
-    if let Some(pos) = dirs.iter().position(|c| *c == "packages" || *c == "apps") {
-        if pos + 1 < dirs.len() {
-            return dirs[pos + 1].to_string();
-        }
+    if let Some(pos) = dirs.iter().position(|c| *c == "packages" || *c == "apps")
+        && pos + 1 < dirs.len()
+    {
+        return dirs[pos + 1].to_string();
     }
 
     // Skip common meaningless root directories
@@ -133,12 +133,12 @@ fn extract_rust_imports(root: Node, source: &[u8]) -> Vec<String> {
                 }
             }
             "extern_crate_declaration" => {
-                if let Ok(text) = child.utf8_text(source) {
-                    if let Some(name) = text.strip_prefix("extern crate ") {
-                        let name = name.trim_end_matches(';').trim();
-                        if !name.is_empty() {
-                            imports.push(name.to_string());
-                        }
+                if let Ok(text) = child.utf8_text(source)
+                    && let Some(name) = text.strip_prefix("extern crate ")
+                {
+                    let name = name.trim_end_matches(';').trim();
+                    if !name.is_empty() {
+                        imports.push(name.to_string());
                     }
                 }
             }
@@ -152,15 +152,15 @@ fn extract_typescript_imports(root: Node, source: &[u8]) -> Vec<String> {
     let mut imports = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        if child.kind() == "import_statement" {
-            if let Some(module) = find_string_literal_in_node(child, source) {
-                if module.starts_with('.') {
-                    if let Some(stem) = Path::new(&module).file_stem() {
-                        imports.push(stem.to_string_lossy().to_string());
-                    }
-                } else {
-                    imports.push(module);
+        if child.kind() == "import_statement"
+            && let Some(module) = find_string_literal_in_node(child, source)
+        {
+            if module.starts_with('.') {
+                if let Some(stem) = Path::new(&module).file_stem() {
+                    imports.push(stem.to_string_lossy().to_string());
                 }
+            } else {
+                imports.push(module);
             }
         }
     }
@@ -173,27 +173,27 @@ fn extract_python_imports(root: Node, source: &[u8]) -> Vec<String> {
     for child in root.children(&mut cursor) {
         match child.kind() {
             "import_statement" => {
-                if let Ok(text) = child.utf8_text(source) {
-                    if let Some(module_part) = text.trim().strip_prefix("import ") {
-                        for module in module_part.split(',') {
-                            let m = module.trim().split(" as ").next().unwrap_or("").trim();
-                            let top = m.split('.').next().unwrap_or(m);
-                            if !top.is_empty() {
-                                imports.push(top.to_string());
-                            }
+                if let Ok(text) = child.utf8_text(source)
+                    && let Some(module_part) = text.trim().strip_prefix("import ")
+                {
+                    for module in module_part.split(',') {
+                        let m = module.trim().split(" as ").next().unwrap_or("").trim();
+                        let top = m.split('.').next().unwrap_or(m);
+                        if !top.is_empty() {
+                            imports.push(top.to_string());
                         }
                     }
                 }
             }
             "import_from_statement" => {
-                if let Ok(text) = child.utf8_text(source) {
-                    if let Some(rest) = text.trim().strip_prefix("from ") {
-                        let m_path = rest.split_whitespace().next().unwrap_or("");
-                        if !m_path.starts_with('.') {
-                            let top = m_path.split('.').next().unwrap_or(m_path);
-                            if !top.is_empty() {
-                                imports.push(top.to_string());
-                            }
+                if let Ok(text) = child.utf8_text(source)
+                    && let Some(rest) = text.trim().strip_prefix("from ")
+                {
+                    let m_path = rest.split_whitespace().next().unwrap_or("");
+                    if !m_path.starts_with('.') {
+                        let top = m_path.split('.').next().unwrap_or(m_path);
+                        if !top.is_empty() {
+                            imports.push(top.to_string());
                         }
                     }
                 }
@@ -234,27 +234,25 @@ fn collect_go_import_strings(node: Node, source: &[u8], imports: &mut Vec<String
 
 fn find_string_literal_in_node(node: Node, source: &[u8]) -> Option<String> {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if (child.kind() == "string" || child.kind() == "string_literal")
-                && let Ok(text) = child.utf8_text(source)
-            {
-                return Some(text.trim_matches(|c| c == '\'' || c == '"').to_string());
-            }
+        if let Some(child) = node.child(i)
+            && (child.kind() == "string" || child.kind() == "string_literal")
+            && let Ok(text) = child.utf8_text(source)
+        {
+            return Some(text.trim_matches(|c| c == '\'' || c == '"').to_string());
         }
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             for j in 0..child.child_count() {
-                if let Some(gc) = child.child(j) {
-                    if (gc.kind() == "string"
+                if let Some(gc) = child.child(j)
+                    && (gc.kind() == "string"
                         || gc.kind() == "string_literal"
                         || gc.kind() == "string_fragment")
-                        && let Ok(text) = gc.utf8_text(source)
-                    {
-                        let m = text.trim_matches(|c| c == '\'' || c == '"');
-                        if !m.is_empty() {
-                            return Some(m.to_string());
-                        }
+                    && let Ok(text) = gc.utf8_text(source)
+                {
+                    let m = text.trim_matches(|c| c == '\'' || c == '"');
+                    if !m.is_empty() {
+                        return Some(m.to_string());
                     }
                 }
             }
