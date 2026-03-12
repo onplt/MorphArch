@@ -11,25 +11,35 @@ MorphArch is distributed as a high-performance Rust binary. You can install it u
 
 ## Quick Install (Recommended)
 
-The fastest way to install MorphArch — no Rust toolchain required.
+The fastest way to install MorphArch.
 
-**Linux / macOS:**
+**Via Cargo (Crates.io):**
+
+```bash
+cargo install morpharch
+```
+
+**Via Shell Script (Linux / macOS):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/onplt/morpharch/main/install.sh | sh
 ```
 
-**Windows (PowerShell):**
+**Via PowerShell (Windows):**
 
 ```powershell
 irm https://raw.githubusercontent.com/onplt/morpharch/main/install.ps1 | iex
 ```
 
-These scripts automatically detect your platform, download the correct pre-built binary from GitHub Releases, and place it in your PATH.
-
 ---
 
 ## Installation Methods
+
+### From crates.io
+
+```bash
+cargo install morpharch
+```
 
 ### Homebrew (macOS/Linux)
 
@@ -41,12 +51,6 @@ brew install onplt/morpharch
 
 ```bash
 npm install -g morpharch
-```
-
-### From crates.io
-
-```bash
-cargo install morpharch
 ```
 
 ### cargo-binstall
