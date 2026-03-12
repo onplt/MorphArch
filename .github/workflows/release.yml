@@ -252,21 +252,22 @@ jobs:
           SHA_MACOS_X86=$(grep 'macos-x86_64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
           SHA_MACOS_ARM=$(grep 'macos-aarch64\.tar\.gz' SHA256SUMS.txt | awk '{print $1}')
 
+          mkdir -p dist/homebrew
           sed -e "s/{{VERSION}}/${VERSION}/g" \
               -e "s/{{SHA256_LINUX_X86_64}}/${SHA_LINUX_X86}/g" \
               -e "s/{{SHA256_LINUX_AARCH64}}/${SHA_LINUX_ARM}/g" \
               -e "s/{{SHA256_MACOS_X86_64}}/${SHA_MACOS_X86}/g" \
               -e "s/{{SHA256_MACOS_AARCH64}}/${SHA_MACOS_ARM}/g" \
-              dist/formula/morpharch.rb.template > morpharch.rb
+              dist/formula/morpharch.rb.template > dist/homebrew/morpharch.rb
 
-          cat morpharch.rb
+          cat dist/homebrew/morpharch.rb
 
       - name: Push to Homebrew tap
         uses: cpina/github-action-push-to-another-repository@main
         env:
           API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         with:
-          source-directory: .
+          source-directory: 'dist/homebrew'
           destination-github-username: onplt
           destination-repository-name: homebrew-morpharch
           target-directory: Formula
@@ -299,18 +300,19 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           SHA_WIN=$(grep 'windows-x86_64\.zip' SHA256SUMS.txt | awk '{print $1}')
 
+          mkdir -p dist/scoop_out
           sed -e "s/{{VERSION}}/${VERSION}/g" \
               -e "s/{{SHA256_WINDOWS_X86_64}}/${SHA_WIN}/g" \
-              dist/scoop/morpharch.json.template > morpharch.json
+              dist/scoop/morpharch.json.template > dist/scoop_out/morpharch.json
 
-          cat morpharch.json
+          cat dist/scoop_out/morpharch.json
 
       - name: Push to Scoop bucket
         uses: cpina/github-action-push-to-another-repository@main
         env:
           API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         with:
-          source-directory: .
+          source-directory: 'dist/scoop_out'
           destination-github-username: onplt
           destination-repository-name: scoop-morpharch
           target-directory: bucket
