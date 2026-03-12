@@ -60,7 +60,13 @@ box, with language-level import extraction for Rust, TypeScript, JavaScript, Pyt
 
 ### Quick Install
 
-**Linux / macOS:**
+**Via Cargo (Crates.io):**
+
+```bash
+cargo install morpharch
+```
+
+**Linux / macOS (Shell Script):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/onplt/morpharch/main/install.sh | sh

@@ -293,7 +293,7 @@ function BottomCTA() {
         </p>
         <div className="install-command-wrapper" style={{ justifyContent: 'center' }}>
           <div className="install-command" style={{ margin: 0 }}>
-            <code>$ brew install onplt/morpharch</code>
+            <code>$ cargo install morpharch</code>
           </div>
         </div>
         <div style={{ marginTop: '2rem' }}>
@@ -313,7 +313,7 @@ function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
   
   const handleCopy = () => {
-    navigator.clipboard.writeText('brew install onplt/morpharch');
+    navigator.clipboard.writeText('cargo install morpharch');
     const btn = document.querySelector('.copy-button');
     if (btn) {
       const originalText = btn.textContent;
@@ -344,7 +344,7 @@ function HomepageHeader() {
 
             <div className="install-command-wrapper">
               <div className="install-command" style={{ margin: 0 }}>
-                <code>$ brew install onplt/morpharch</code>
+                <code>$ cargo install morpharch</code>
               </div>
               <button className="copy-button" onClick={handleCopy}>Copy</button>
             </div>
