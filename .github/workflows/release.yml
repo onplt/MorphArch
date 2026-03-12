@@ -269,7 +269,7 @@ jobs:
         with:
           source-directory: 'dist/homebrew'
           destination-github-username: onplt
-          destination-repository-name: homebrew-morpharch
+          destination-repository-name: homebrew-tap
           target-directory: Formula
           target-branch: main
           create-target-branch-if-needed: true
