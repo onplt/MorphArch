@@ -1264,9 +1264,12 @@ impl App {
                     self.graph_layout.positions[idx].prev_y = py;
                 } else if self.dragging_pan {
                     if let Some((last_col, last_row)) = self.last_mouse_pos {
-                        let (px_now, py_now) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                        let (px_last, py_last) = self.terminal_to_physics(last_col, last_row, inner_x, inner_y, inner_w, inner_h);
-                        
+                        let (px_now, py_now) =
+                            self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                        let (px_last, py_last) = self.terminal_to_physics(
+                            last_col, last_row, inner_x, inner_y, inner_w, inner_h,
+                        );
+
                         self.graph_pan_x -= px_now - px_last;
                         self.graph_pan_y -= py_now - py_last;
                     }
@@ -1395,14 +1398,16 @@ impl App {
                 } else if in_canvas {
                     // Zoom in
                     let scale_factor = 1.1;
-                    
+
                     // Keep the physical point under the cursor in the same screen position
-                    let (px_before, py_before) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                    
+                    let (px_before, py_before) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+
                     self.graph_scale = (self.graph_scale * scale_factor).min(10.0);
-                    
-                    let (px_after, py_after) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                    
+
+                    let (px_after, py_after) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+
                     self.graph_pan_x -= px_after - px_before;
                     self.graph_pan_y -= py_after - py_before;
                 }
@@ -1437,13 +1442,15 @@ impl App {
                 } else if in_canvas {
                     // Zoom out
                     let scale_factor = 1.1;
-                    
-                    let (px_before, py_before) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                    
+
+                    let (px_before, py_before) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+
                     self.graph_scale = (self.graph_scale / scale_factor).max(0.1);
-                    
-                    let (px_after, py_after) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
-                    
+
+                    let (px_after, py_after) =
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+
                     self.graph_pan_x -= px_after - px_before;
                     self.graph_pan_y -= py_after - py_before;
                 }
@@ -1463,7 +1470,7 @@ impl App {
     ) -> (f64, f64) {
         let nx = (col.saturating_sub(ix) as f64) / iw.max(1) as f64;
         let ny = (row.saturating_sub(iy) as f64) / ih.max(1) as f64;
-        
+
         let visible_w = self.graph_layout.width / self.graph_scale;
         let visible_h = self.graph_layout.height / self.graph_scale;
 
@@ -1775,7 +1782,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     let visible_h = canvas_h.max(1.0) / app.graph_scale;
     let pan_x = app.graph_pan_x;
     let pan_y = app.graph_pan_y;
-    
+
     let canvas = Canvas::default()
         .block(block)
         .marker(ratatui::symbols::Marker::Braille)
@@ -1891,10 +1898,9 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         // Semantic Zooming: Hide labels if zoomed out too far, unless hovered or filtered
         let is_zoomed_out = app.graph_scale < 0.6;
         let show_l = is_h
-            || (!is_zoomed_out && (
-                (is_filtered && is_v)
-                || (!is_filtered && cache.is_some_and(|c| c.label_visible.contains(&i)))
-            ));
+            || (!is_zoomed_out
+                && ((is_filtered && is_v)
+                    || (!is_filtered && cache.is_some_and(|c| c.label_visible.contains(&i)))));
 
         let screen_x = (px - app.graph_pan_x) * app.graph_scale;
         let screen_y = (py - app.graph_pan_y) * app.graph_scale;
@@ -2158,9 +2164,7 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
             (FG_TEXT, BG_SURFACE)
         };
 
-        let modifier = if is_selected && is_focused {
-            Modifier::BOLD
-        } else if is_filter_match {
+        let modifier = if (is_selected && is_focused) || is_filter_match {
             Modifier::BOLD
         } else {
             Modifier::empty()
@@ -2288,7 +2292,8 @@ fn render_hotspots_tab(frame: &mut Frame, area: Rect, app: &mut App) {
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spin_frame = spinner[(app.frame_count as usize / 2) % spinner.len()];
         frame.render_widget(
-            Paragraph::new(format!("  {} Analyzing...", spin_frame)).style(Style::default().fg(ACCENT_LAVENDER)),
+            Paragraph::new(format!("  {} Analyzing...", spin_frame))
+                .style(Style::default().fg(ACCENT_LAVENDER)),
             area,
         );
         return;
