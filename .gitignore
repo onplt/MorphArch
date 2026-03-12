@@ -69,3 +69,6 @@ heaptrack.*
 npm/*/bin/morpharch
 npm/*/bin/morpharch.exe
 node_modules/
+
+# local docs
+localdocs/

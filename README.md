@@ -44,8 +44,11 @@ box, with language-level import extraction for Rust, TypeScript, JavaScript, Pyt
   subsequent runs.
 - **Parallel parsing** -- rayon-powered data-parallel import extraction across
   all workspace packages.
-- **Mouse interaction** -- click and drag graph nodes to rearrange the layout
-  in real time.
+- **Advanced Mouse Interaction** -- Zoom, pan, node dragging, and interactive
+  timeline scrubbing.
+- **Dynamic UI** -- Resizable sidebars and detail panels via mouse dragging.
+- **Blast Radius Analysis** -- Visualize the potential impact of changes to a
+  module across the entire architecture.
 - **Search filtering** -- press `/` in the TUI to filter nodes by name.
 - **SQLite persistence** -- all scan data is stored in
   `~/.morpharch/morpharch.db` for instant replay and historical analysis.
@@ -151,17 +154,38 @@ improvement recommendations.
 
 ---
 
-## TUI Keyboard Shortcuts
+## TUI Interaction
+
+### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `j` / `Down` | Navigate to the next (older) commit |
-| `k` / `Up` | Navigate to the previous (newer) commit |
+| `Tab` | Switch focus between panels (Packages, Graph, Insights, Timeline) |
+| `j` / `k` | Navigate items in the active list (Packages or Insights) |
+| `Enter` | Inspect the selected module (drill-down view) |
+| `←` / `→` | Change commit in timeline (or switch tabs in Insights) |
+| `1` - `4` | Directly switch between Insight tabs (Health, Spots, Trend, Blast) |
 | `p` / `Space` | Play / pause auto-play through the timeline |
-| `r` | Reheat the graph (re-energize Verlet temperature) |
-| `/` | Enter search mode to filter nodes by name |
-| `Esc` | Exit search mode, or quit the TUI |
+| `r` | Reheat the graph (re-energize physics temperature) |
+| `c` | Center the graph view |
+| `x` | Toggle **Blast Radius** overlay mode |
+| `b` | Toggle **Packages** sidebar visibility |
+| `i` | Toggle **Insights** panel visibility |
+| `/` | Enter filter mode to search nodes by name |
+| `Esc` | Clear filter or exit current view |
 | `q` | Quit the TUI |
+
+### Mouse Interaction
+
+- **Graph Interaction:**
+  - **Scroll Wheel:** Zoom in and out toward the cursor position.
+  - **Click & Drag (Background):** Pan the graph view.
+  - **Click & Drag (Node):** Move and pin a module node manually.
+- **UI Management:**
+  - **Click & Drag (Borders):** Resize the Packages sidebar and Insights panel.
+- **Navigation:**
+  - **Click (Timeline):** Scrub to a specific point in history.
+  - **Click (Lists):** Select and inspect a module from the sidebar or Spots table.
 
 ---
 
