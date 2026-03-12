@@ -102,6 +102,11 @@ pub struct App {
     pub resizing_pkg: bool,
     pub dragging_timeline: bool,
     pub hovered_node: Option<usize>,
+    pub graph_scale: f64,
+    pub graph_pan_x: f64,
+    pub graph_pan_y: f64,
+    pub dragging_pan: bool,
+    pub last_mouse_pos: Option<(u16, u16)>,
     render_cache: Option<GraphRenderCache>,
     /// Commit hash currently being loaded from DB
     pub loading_hash: Option<String>,
@@ -136,6 +141,8 @@ pub struct App {
     pub insights_panel_width: u16,
     /// Insights panel area (for mouse interaction)
     pub insights_area: Rect,
+    /// Is the user currently dragging the insights panel border?
+    pub resizing_insights: bool,
     /// Component diagnostic advisory lines (computed from current graph)
     pub advisory_lines: Vec<String>,
     /// Scoring configuration for diagnostics generation
@@ -222,6 +229,11 @@ impl App {
             resizing_pkg: false,
             dragging_timeline: false,
             hovered_node: None,
+            graph_scale: 1.0,
+            graph_pan_x: 0.0,
+            graph_pan_y: 0.0,
+            dragging_pan: false,
+            last_mouse_pos: None,
             render_cache: None,
             loading_hash: None,
             brittle_packages: Vec::new(),
@@ -241,6 +253,7 @@ impl App {
             repo_name: String::new(),
             insights_panel_width: 36,
             insights_area: Rect::default(),
+            resizing_insights: false,
             advisory_lines: Vec::new(),
             scoring_config: ScoringConfig::default(),
             // Blast radius cartography
@@ -980,7 +993,7 @@ impl App {
                 }
                 _ => {}
             },
-            KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Left | KeyCode::Char('[') => {
                 self.insight_tab = match self.insight_tab {
                     InsightTab::Health => InsightTab::Blast,
                     InsightTab::Hotspots => InsightTab::Health,
@@ -988,7 +1001,7 @@ impl App {
                     InsightTab::Blast => InsightTab::Trends,
                 };
             }
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Right | KeyCode::Char(']') => {
                 self.insight_tab = match self.insight_tab {
                     InsightTab::Health => InsightTab::Hotspots,
                     InsightTab::Hotspots => InsightTab::Trends,
@@ -996,6 +1009,10 @@ impl App {
                     InsightTab::Blast => InsightTab::Health,
                 };
             }
+            KeyCode::Char('1') => self.insight_tab = InsightTab::Health,
+            KeyCode::Char('2') => self.insight_tab = InsightTab::Hotspots,
+            KeyCode::Char('3') => self.insight_tab = InsightTab::Trends,
+            KeyCode::Char('4') => self.insight_tab = InsightTab::Blast,
             KeyCode::Enter => match self.insight_tab {
                 InsightTab::Hotspots => {
                     if let Some(i) = self.hotspots_state.selected()
@@ -1106,6 +1123,31 @@ impl App {
             return;
         }
 
+        let on_insights_border = (col as i16 - self.insights_area.x as i16).unsigned_abs() <= 1
+            && row >= self.insights_area.y
+            && row < self.insights_area.y + self.insights_area.height;
+
+        if self.resizing_insights {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Down(MouseButton::Left) => {
+                    let right_edge = self.insights_area.x + self.insights_area.width;
+                    self.insights_panel_width = right_edge.saturating_sub(col).clamp(20, 80);
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resizing_insights = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_insights_border {
+            self.resizing_insights = true;
+            return;
+        }
+
         // Click on a package in the sidebar
         let in_pkg = self
             .pkg_area
@@ -1113,12 +1155,27 @@ impl App {
             && self.pkg_area.width > 0;
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && in_pkg {
             self.focused_panel = FocusedPanel::Packages;
-            // 2 rows offset for border + title
-            let row_offset = row.saturating_sub(self.pkg_area.y + 2) as usize;
+            // 1 row offset for border (title is drawn on the border)
+            let row_offset = row.saturating_sub(self.pkg_area.y + 1) as usize;
             let clicked_idx = self.pkg_scroll_offset + row_offset;
             let pkgs = self.get_sorted_packages();
             if clicked_idx < pkgs.len() {
                 self.selected_pkg_index = Some(clicked_idx);
+                // Emulate Enter key
+                if let Some(name) = pkgs.get(clicked_idx) {
+                    let name = name.clone();
+                    if self.blast_overlay_active {
+                        if let Some(layout_idx) =
+                            self.graph_layout.labels.iter().position(|l| *l == name)
+                        {
+                            self.hovered_node = Some(layout_idx);
+                            self.compute_cascade_for_node(layout_idx);
+                        }
+                    } else {
+                        self.active_view = ActiveView::Inspect(name.clone());
+                        self.push_view(ViewContext::ModuleInspect(name));
+                    }
+                }
             }
             return;
         }
@@ -1190,6 +1247,9 @@ impl App {
                 if let Some((idx, _)) = closest {
                     self.dragging_node = Some(idx);
                     self.graph_layout.positions[idx].pinned = true;
+                } else {
+                    self.dragging_pan = true;
+                    self.last_mouse_pos = Some((col, row));
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -1202,6 +1262,15 @@ impl App {
                     self.graph_layout.positions[idx].y = py;
                     self.graph_layout.positions[idx].prev_x = px;
                     self.graph_layout.positions[idx].prev_y = py;
+                } else if self.dragging_pan {
+                    if let Some((last_col, last_row)) = self.last_mouse_pos {
+                        let (px_now, py_now) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                        let (px_last, py_last) = self.terminal_to_physics(last_col, last_row, inner_x, inner_y, inner_w, inner_h);
+                        
+                        self.graph_pan_x -= px_now - px_last;
+                        self.graph_pan_y -= py_now - py_last;
+                    }
+                    self.last_mouse_pos = Some((col, row));
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -1211,6 +1280,8 @@ impl App {
                     self.graph_layout.positions[idx].pinned = false;
                     self.graph_layout.temperature = 0.01;
                 }
+                self.dragging_pan = false;
+                self.last_mouse_pos = None;
             }
             MouseEventKind::Moved => {
                 // When a cascade highlight is active, lock hovered_node to the
@@ -1262,12 +1333,18 @@ impl App {
                     }
                 } else if self.insight_tab == InsightTab::Hotspots {
                     // Click on hotspots table row
-                    // Header row + tab bar + block border = offset ~3 rows
-                    let row_offset = row.saturating_sub(self.insights_area.y + 3);
-                    let clicked_idx = row_offset as usize;
+                    // Content starts at y + 4 (1: panel border, 1: tab bar, 1: table title, 1: table header)
+                    let row_offset = row.saturating_sub(self.insights_area.y + 4) as usize;
+                    let clicked_idx = self.hotspots_state.offset() + row_offset;
                     if clicked_idx < self.brittle_packages.len() {
                         self.hotspots_state.select(Some(clicked_idx));
                         self.focus_selected_hotspot();
+                        // Emulate Enter key
+                        if let Some(pkg) = self.brittle_packages.get(clicked_idx) {
+                            let name = pkg.0.clone();
+                            self.active_view = ActiveView::Inspect(name.clone());
+                            self.push_view(ViewContext::ModuleInspect(name));
+                        }
                     }
                 } else if self.insight_tab == InsightTab::Blast {
                     // Click on blast impact row — trigger cascade for that module
@@ -1315,6 +1392,19 @@ impl App {
                             };
                         }
                     }
+                } else if in_canvas {
+                    // Zoom in
+                    let scale_factor = 1.1;
+                    
+                    // Keep the physical point under the cursor in the same screen position
+                    let (px_before, py_before) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    
+                    self.graph_scale = (self.graph_scale * scale_factor).min(10.0);
+                    
+                    let (px_after, py_after) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    
+                    self.graph_pan_x -= px_after - px_before;
+                    self.graph_pan_y -= py_after - py_before;
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -1344,6 +1434,18 @@ impl App {
                             };
                         }
                     }
+                } else if in_canvas {
+                    // Zoom out
+                    let scale_factor = 1.1;
+                    
+                    let (px_before, py_before) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    
+                    self.graph_scale = (self.graph_scale / scale_factor).max(0.1);
+                    
+                    let (px_after, py_after) = self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    
+                    self.graph_pan_x -= px_after - px_before;
+                    self.graph_pan_y -= py_after - py_before;
                 }
             }
             _ => {}
@@ -1361,9 +1463,13 @@ impl App {
     ) -> (f64, f64) {
         let nx = (col.saturating_sub(ix) as f64) / iw.max(1) as f64;
         let ny = (row.saturating_sub(iy) as f64) / ih.max(1) as f64;
+        
+        let visible_w = self.graph_layout.width / self.graph_scale;
+        let visible_h = self.graph_layout.height / self.graph_scale;
+
         (
-            nx * self.graph_layout.width,
-            (1.0 - ny) * self.graph_layout.height,
+            self.graph_pan_x + nx * visible_w,
+            self.graph_pan_y + (1.0 - ny) * visible_h,
         )
     }
 
@@ -1638,11 +1744,10 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         .positions
         .iter()
         .map(|p| {
-            let sx = (p.x / layout.width) * canvas_w;
-            let sy = (p.y / layout.height) * canvas_h;
+            // Provide raw physical coordinates (with slight anti-jitter rounding)
             (
-                (sx / 2.0).floor() * 2.0 + 1.0,
-                (sy / 4.0).floor() * 4.0 + 2.0,
+                (p.x / 2.0).floor() * 2.0 + 1.0,
+                (p.y / 4.0).floor() * 4.0 + 2.0,
             )
         })
         .collect();
@@ -1666,11 +1771,16 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     let cascade_cloned = app.cascade_highlight.clone();
     let hovered_cloned = app.hovered_node;
 
+    let visible_w = canvas_w.max(1.0) / app.graph_scale;
+    let visible_h = canvas_h.max(1.0) / app.graph_scale;
+    let pan_x = app.graph_pan_x;
+    let pan_y = app.graph_pan_y;
+    
     let canvas = Canvas::default()
         .block(block)
         .marker(ratatui::symbols::Marker::Braille)
-        .x_bounds([0.0, canvas_w.max(1.0)])
-        .y_bounds([0.0, canvas_h.max(1.0)])
+        .x_bounds([pan_x, pan_x + visible_w])
+        .y_bounds([pan_y, pan_y + visible_h])
         .paint(move |ctx| {
             // Pre-compute whether cascade should affect edge rendering
             let edge_use_cascade = cascade_cloned.is_some()
@@ -1768,7 +1878,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 .hovered_node
                 .is_some_and(|h| search_visible.contains(&h)));
 
-    for (i, &(sx, sy)) in snapped.iter().enumerate() {
+    for (i, &(px, py)) in snapped.iter().enumerate() {
         let is_m = is_filtered && search_matched.contains(&i);
         let is_v = is_filtered && search_visible.contains(&i);
         let is_h = app.hovered_node == Some(i);
@@ -1778,13 +1888,24 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             continue;
         }
 
-        // Show labels for visible nodes in filtered view, hovered nodes, or top-degree nodes
+        // Semantic Zooming: Hide labels if zoomed out too far, unless hovered or filtered
+        let is_zoomed_out = app.graph_scale < 0.6;
         let show_l = is_h
-            || (is_filtered && is_v)
-            || (!is_filtered && cache.is_some_and(|c| c.label_visible.contains(&i)));
+            || (!is_zoomed_out && (
+                (is_filtered && is_v)
+                || (!is_filtered && cache.is_some_and(|c| c.label_visible.contains(&i)))
+            ));
 
-        let col = area.x + 1 + (sx / 2.0) as u16;
-        let row = area.y + 1 + ((canvas_h - sy) / 4.0) as u16;
+        let screen_x = (px - app.graph_pan_x) * app.graph_scale;
+        let screen_y = (py - app.graph_pan_y) * app.graph_scale;
+
+        // Skip if outside canvas
+        if screen_x < 0.0 || screen_x > canvas_w || screen_y < 0.0 || screen_y > canvas_h {
+            continue;
+        }
+
+        let col = area.x + 1 + (screen_x / 2.0) as u16;
+        let row = area.y + 1 + ((canvas_h - screen_y) / 4.0) as u16;
 
         if col < area.x + area.width - 1 && row < area.y + area.height - 1 {
             let color = if app.blast_overlay_active {
@@ -2029,12 +2150,20 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
         let is_filter_match =
             !filter_lower.is_empty() && label.to_lowercase().contains(&filter_lower);
 
-        let (fg, bg, modifier) = if is_selected && is_focused {
-            (Color::White, BG_SURFACE1, Modifier::BOLD)
+        let (fg, bg) = if is_selected && is_focused {
+            (Color::White, BG_SURFACE1)
         } else if is_filter_match {
-            (ACCENT_LAVENDER, BG_SURFACE, Modifier::BOLD)
+            (ACCENT_LAVENDER, BG_SURFACE)
         } else {
-            (FG_TEXT, BG_SURFACE, Modifier::empty())
+            (FG_TEXT, BG_SURFACE)
+        };
+
+        let modifier = if is_selected && is_focused {
+            Modifier::BOLD
+        } else if is_filter_match {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
         };
 
         let prefix = if is_selected && is_focused {
@@ -2156,8 +2285,10 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Renders the hotspots tab content
 fn render_hotspots_tab(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.brittle_packages.is_empty() {
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spin_frame = spinner[(app.frame_count as usize / 2) % spinner.len()];
         frame.render_widget(
-            Paragraph::new("  Analyzing...").style(Style::default().fg(FG_OVERLAY)),
+            Paragraph::new(format!("  {} Analyzing...", spin_frame)).style(Style::default().fg(ACCENT_LAVENDER)),
             area,
         );
         return;
@@ -2478,7 +2609,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         FocusedPanel::Graph => {
             "r:Reheat  c:Center  x:Blast  enter:Inspect  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
         }
-        FocusedPanel::Insights => "j/k:Navigate  h/l:Tab  enter:Inspect  s:Sort  ?:Help  q:Quit",
+        FocusedPanel::Insights => "j/k:Navigate  ←/→:Tab  enter:Inspect  s:Sort  ?:Help  q:Quit",
         FocusedPanel::Timeline => "j/k:±1  h/l:±10  g/G:Start/End  Space:Play  +/-:Speed  ?:Help",
     };
     frame.render_widget(
