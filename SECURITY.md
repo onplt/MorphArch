@@ -15,8 +15,9 @@ responsibly.
 ## Scope
 
 MorphArch is a local CLI tool that reads Git repositories and stores data in a
-local SQLite database (`~/.morpharch/morpharch.db`). It does not expose network
-services or handle authentication credentials.
+local SQLite database (`~/.morpharch/morpharch.db`) plus a local subtree cache
+directory (`~/.morpharch/subtree-cache/`). It does not expose network services
+or handle authentication credentials.
 
 Security concerns most relevant to this project include:
 

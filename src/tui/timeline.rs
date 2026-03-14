@@ -143,7 +143,7 @@ pub fn render_timeline(frame: &mut Frame, area: Rect, state: &TimelineState, foc
     frame.render_widget(block, area);
 
     if state.is_empty() {
-        let empty = Paragraph::new("  No commits yet. Run 'morpharch scan .' first.")
+        let empty = Paragraph::new("  No history yet. Run `morpharch scan .` first.")
             .style(Style::default().fg(FG_OVERLAY));
         frame.render_widget(empty, inner);
         return;

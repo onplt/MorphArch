@@ -6,29 +6,39 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Sparkline, Wrap};
 
 use super::app::App;
 use super::graph_renderer::{
     ACCENT_BLUE, ACCENT_LAVENDER, BG_SURFACE, FG_OVERLAY, FG_TEXT, blast_color, drift_color,
 };
+use super::widgets::truncate_str;
 use crate::config::Weights;
 use crate::models::{BlastRadiusReport, DriftScore};
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_insight_panel(
     frame: &mut Frame,
     area: Rect,
     drift: &Option<DriftScore>,
+    context_lines: &[String],
     advisory_lines: &[String],
     weights: &Weights,
+    trend_data: &[u64],
+    current_index: usize,
+    total_commits: usize,
 ) {
     if let Some(d) = drift {
+        let area = inset_rect(area, 1, 0);
         let health = 100u8.saturating_sub(d.total);
         let health_color = drift_color(d.total);
+        let health_data: Vec<u64> = trend_data
+            .iter()
+            .map(|debt| 100u64.saturating_sub(*debt))
+            .collect();
+        let (trend_label, trend_color) = trend_direction(trend_data);
 
-        // Adaptive layout based on available height
         if area.height < 4 {
-            // Ultra-compact: single line summary
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {}% ", health),
@@ -37,10 +47,17 @@ pub fn render_insight_panel(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(
-                        "C:{} L:{} H:{:.0}",
-                        d.new_cycles, d.boundary_violations, d.hub_debt
-                    ),
+                    format!("Debt {}  ", d.total),
+                    Style::default().fg(FG_OVERLAY),
+                ),
+                Span::styled(
+                    trend_label,
+                    Style::default()
+                        .fg(trend_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {} commits", trend_data.len()),
                     Style::default().fg(FG_OVERLAY),
                 ),
             ]);
@@ -48,17 +65,22 @@ pub fn render_insight_panel(
             return;
         }
 
-        if area.height < 8 {
-            // Compact: health gauge + top 3 sub-scores inline
+        if area.height < 10 {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
                 .split(area);
 
             let health_gauge = LineGauge::default()
                 .block(
                     Block::default().title(Span::styled(
-                        format!(" HEALTH {}% ", health),
+                        format!(" Overview {}% ", health),
                         Style::default()
                             .fg(health_color)
                             .add_modifier(Modifier::BOLD),
@@ -70,7 +92,27 @@ pub fn render_insight_panel(
                 .line_set(ratatui::symbols::line::THICK);
             frame.render_widget(health_gauge, chunks[0]);
 
+            let sparkline = Sparkline::default()
+                .block(
+                    Block::default()
+                        .title(Span::styled(
+                            format!(" Recent trend {} ", trend_label),
+                            Style::default()
+                                .fg(trend_color)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .borders(Borders::TOP),
+                )
+                .data(&health_data)
+                .max(100)
+                .style(Style::default().fg(health_color));
+            frame.render_widget(sparkline, chunks[2]);
+
             let metrics = Line::from(vec![
+                Span::styled(
+                    format!(" Debt {}  ", d.total),
+                    Style::default().fg(FG_OVERLAY),
+                ),
                 metric_chip("CYC", &format!("{:.0}", d.cycle_debt), d.cycle_debt > 10.0),
                 Span::raw(" "),
                 metric_chip(
@@ -81,39 +123,119 @@ pub fn render_insight_panel(
                 Span::raw(" "),
                 metric_chip("HUB", &format!("{:.0}", d.hub_debt), d.hub_debt > 10.0),
             ]);
-            frame.render_widget(Paragraph::new(metrics), chunks[1]);
+            frame.render_widget(Paragraph::new(metrics), chunks[4]);
             return;
         }
 
-        // Full layout
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // Health gauge
+                Constraint::Length(4), // Current state
+                Constraint::Length(1), // Spacer
+                Constraint::Length(5), // Trajectory chart
+                Constraint::Length(2), // Trajectory stats
+                Constraint::Length(1), // Spacer
                 Constraint::Length(7), // 6-component metrics grid
-                Constraint::Min(2),    // Advisory
+                Constraint::Length(1), // Spacer
+                Constraint::Min(2),    // Context + actions
             ])
             .split(area);
 
-        // ── SYSTEM HEALTH (Gauge) ──
-        let health_label = format!(" {}% ", health);
-        let health_gauge = LineGauge::default()
-            .block(
-                Block::default().title(Span::styled(
-                    " SYSTEM HEALTH ",
+        let state_lines = vec![
+            Line::from(vec![
+                Span::styled(" Current", Style::default().fg(FG_OVERLAY)),
+                Span::styled(
+                    format!("  {}%", health),
                     Style::default()
-                        .fg(Color::White)
+                        .fg(health_color)
                         .add_modifier(Modifier::BOLD),
-                )),
-            )
-            .filled_style(Style::default().fg(health_color))
-            .unfilled_style(Style::default().fg(Color::Rgb(50, 50, 70)))
-            .ratio(health as f64 / 100.0)
-            .label(health_label)
-            .line_set(ratatui::symbols::line::THICK);
-        frame.render_widget(health_gauge, chunks[0]);
+                ),
+                Span::styled(
+                    format!("  Debt {}", d.total),
+                    Style::default().fg(FG_OVERLAY),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Trajectory", Style::default().fg(FG_OVERLAY)),
+                Span::styled(
+                    format!(" {}", trend_label),
+                    Style::default()
+                        .fg(trend_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  Last {} commits  {}/{}",
+                        trend_data.len(),
+                        current_index + 1,
+                        total_commits
+                    ),
+                    Style::default().fg(FG_OVERLAY),
+                ),
+            ]),
+        ];
+        frame.render_widget(
+            Paragraph::new(state_lines).block(
+                Block::default()
+                    .title(Span::styled(
+                        " Current state ",
+                        Style::default().fg(FG_OVERLAY).add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
+            ),
+            chunks[0],
+        );
 
-        // ── 6-COMPONENT METRICS GRID ──
+        let trend_block = Block::default()
+            .title(Span::styled(
+                " Recent trend ",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::TOP);
+        let sparkline = Sparkline::default()
+            .block(trend_block)
+            .data(&health_data)
+            .max(100)
+            .style(Style::default().fg(health_color));
+        frame.render_widget(sparkline, chunks[2]);
+
+        let (min_h, max_h, avg_h) = health_stats(&health_data);
+        let stats_line = Line::from(vec![
+            Span::styled(" Current:", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                format!("{:>3}%", health),
+                Style::default()
+                    .fg(health_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Min:", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                format!("{:>3}%", min_h),
+                Style::default().fg(drift_color(100 - min_h as u8)),
+            ),
+            Span::styled("  Avg:", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                format!("{:>3}%", avg_h),
+                Style::default().fg(drift_color(100 - avg_h as u8)),
+            ),
+            Span::styled("  Max:", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                format!("{:>3}%", max_h),
+                Style::default().fg(drift_color(100 - max_h as u8)),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(stats_line).block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
+            ),
+            chunks[3],
+        );
+
         let n = weights.normalized();
         let fmt_pct = |v: f64| -> String {
             let pct = (v * 100.0).round() as u32;
@@ -124,59 +246,110 @@ pub fn render_insight_panel(
             }
         };
         let metric_lines = vec![
-            subscore_row(
+            padded_line(subscore_row(
                 "Cycles",
                 &fmt_pct(n.cycle),
                 d.cycle_debt,
                 d.new_cycles as f64,
-            ),
-            subscore_row(
+            )),
+            padded_line(subscore_row(
                 "Layering",
                 &fmt_pct(n.layering),
                 d.layering_debt,
-                d.boundary_violations as f64,
-            ),
-            subscore_row("Hub/God", &fmt_pct(n.hub), d.hub_debt, 0.0),
-            subscore_row("Coupling", &fmt_pct(n.coupling), d.coupling_debt, 0.0),
-            subscore_row("Cognitive", &fmt_pct(n.cognitive), d.cognitive_debt, 0.0),
-            subscore_row(
+                d.layering_violations as f64,
+            )),
+            padded_line(subscore_row("Hub/God", &fmt_pct(n.hub), d.hub_debt, 0.0)),
+            padded_line(subscore_row(
+                "Coupling",
+                &fmt_pct(n.coupling),
+                d.coupling_debt,
+                0.0,
+            )),
+            padded_line(subscore_row(
+                "Cognitive",
+                &fmt_pct(n.cognitive),
+                d.cognitive_debt,
+                0.0,
+            )),
+            padded_line(subscore_row(
                 "Instability",
                 &fmt_pct(n.instability),
                 d.instability_debt,
                 0.0,
-            ),
+            )),
         ];
         frame.render_widget(
             Paragraph::new(metric_lines).block(
-                Block::default().title(Span::styled(
-                    " COMPONENTS ",
-                    Style::default()
-                        .fg(ACCENT_LAVENDER)
-                        .add_modifier(Modifier::BOLD),
-                )),
+                Block::default()
+                    .title(Span::styled(
+                        " Risk drivers ",
+                        Style::default()
+                            .fg(ACCENT_LAVENDER)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
             ),
-            chunks[1],
+            chunks[5],
         );
 
-        // ── ADVISORY (with diagnostics) ──
+        let advisory_lines = advisory_lines
+            .iter()
+            .filter(|line| is_actionable_advisory_line(line))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut adv_lines: Vec<Line> = Vec::new();
 
-        // Show component-specific diagnostics from scoring engine
-        if !advisory_lines.is_empty() {
-            let max_lines = (chunks[2].height.saturating_sub(1) as usize).max(2);
-            for line in advisory_lines.iter().take(max_lines) {
+        let max_lines = (chunks[7].height.saturating_sub(1) as usize).max(2);
+        let mut used_lines = 0usize;
+
+        if !context_lines.is_empty() {
+            adv_lines.push(Line::from(Span::styled(
+                " Context",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for line in context_lines {
+                if used_lines >= max_lines.saturating_sub(1) {
+                    break;
+                }
+                adv_lines.push(Line::from(vec![
+                    Span::styled(" \u{25b8} ", Style::default().fg(ACCENT_BLUE)),
+                    Span::styled(line.clone(), Style::default().fg(FG_TEXT)),
+                ]));
+                used_lines += 1;
+            }
+        }
+
+        if !advisory_lines.is_empty() && used_lines < max_lines {
+            if !adv_lines.is_empty() {
+                adv_lines.push(Line::from(""));
+            }
+            for line in &advisory_lines {
+                if used_lines >= max_lines {
+                    break;
+                }
                 adv_lines.push(Line::from(vec![
                     Span::styled(" \u{25b8} ", Style::default().fg(ACCENT_LAVENDER)),
                     Span::styled(line.clone(), Style::default().fg(FG_TEXT)),
                 ]));
+                used_lines += 1;
             }
-            if advisory_lines.len() > max_lines {
+            if advisory_lines.len() > used_lines.saturating_sub(context_lines.len()) {
                 adv_lines.push(Line::from(Span::styled(
-                    format!("   +{} more insights", advisory_lines.len() - max_lines),
+                    format!(
+                        "   +{} more suggestions",
+                        advisory_lines
+                            .len()
+                            .saturating_sub(used_lines.saturating_sub(context_lines.len()))
+                    ),
                     Style::default().fg(FG_OVERLAY),
                 )));
             }
-        } else {
+        }
+
+        if adv_lines.is_empty() {
             // Fallback: generic recommendation
             let rec = generate_recommendation(d);
             adv_lines.push(Line::from(Span::styled(
@@ -186,21 +359,91 @@ pub fn render_insight_panel(
         }
 
         let advisory = Paragraph::new(adv_lines).wrap(Wrap { trim: true }).block(
-            Block::default().title(Span::styled(
-                " ADVISORY ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Block::default()
+                .title(Span::styled(
+                    " Suggested actions ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(ACCENT_LAVENDER)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
         );
-        frame.render_widget(advisory, chunks[2]);
+        frame.render_widget(advisory, chunks[7]);
     } else {
         frame.render_widget(
             Paragraph::new(" WAITING FOR DATA...").style(Style::default().fg(FG_OVERLAY)),
             area,
         );
     }
+}
+
+fn trend_direction(trend_data: &[u64]) -> (&'static str, Color) {
+    if trend_data.len() >= 2 {
+        let prev = trend_data[trend_data.len().saturating_sub(2)];
+        let curr = trend_data[trend_data.len() - 1];
+        if curr < prev {
+            ("improving", Color::Rgb(166, 227, 161))
+        } else if curr > prev {
+            ("degrading", Color::Rgb(243, 139, 168))
+        } else {
+            ("stable", ACCENT_BLUE)
+        }
+    } else {
+        ("stable", FG_OVERLAY)
+    }
+}
+
+fn health_stats(health_data: &[u64]) -> (u64, u64, u64) {
+    if !health_data.is_empty() {
+        let min = *health_data.iter().min().unwrap_or(&0);
+        let max = *health_data.iter().max().unwrap_or(&100);
+        let sum: u64 = health_data.iter().sum();
+        let avg = sum / health_data.len() as u64;
+        (min, max, avg)
+    } else {
+        (0, 100, 50)
+    }
+}
+
+fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let x = area.x.saturating_add(horizontal);
+    let y = area.y.saturating_add(vertical);
+    let width = area
+        .width
+        .saturating_sub(horizontal.saturating_mul(2))
+        .max(1);
+    let height = area
+        .height
+        .saturating_sub(vertical.saturating_mul(2))
+        .max(1);
+    Rect::new(x, y, width, height)
+}
+
+fn padded_line(line: Line<'static>) -> Line<'static> {
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::raw(" "));
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
+fn is_actionable_advisory_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "break ",
+        "consider ",
+        "simplify",
+        "tighten",
+        "review ",
+        "split ",
+        "introduce ",
+        "stabilize ",
+        "add abstractions",
+        "reduce ",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 pub fn render_module_inspector(frame: &mut Frame, area: Rect, app: &App) {
@@ -234,7 +477,7 @@ pub fn render_module_inspector(frame: &mut Frame, area: Rect, app: &App) {
     let mut imported_by = Vec::new();
     let mut depends_on = Vec::new();
 
-    if let Some(snapshot) = app.snapshot_cache.get(&current_meta.commit_hash) {
+    if let Some(snapshot) = app.snapshot_cache.peek(&current_meta.commit_hash) {
         for edge in &snapshot.edges {
             if edge.to_module == *module_name {
                 imported_by.push((edge.from_module.clone(), edge.weight));
@@ -362,10 +605,11 @@ pub fn render_module_inspector(frame: &mut Frame, area: Rect, app: &App) {
         };
 
         for (i, (name, weight)) in imported_by.iter().take(display_count).enumerate() {
+            let display_name = truncate_str(name, 14);
             in_lines.push(Line::from(vec![
                 Span::styled(format!("{:>2}. ", i + 1), Style::default().fg(FG_OVERLAY)),
                 Span::styled(
-                    format!("{:<15}", if name.len() > 14 { &name[..13] } else { name }),
+                    format!("{:<15}", display_name),
                     Style::default().fg(FG_TEXT),
                 ),
                 Span::styled(format!(" (w: {})", weight), Style::default().fg(FG_OVERLAY)),
@@ -412,10 +656,11 @@ pub fn render_module_inspector(frame: &mut Frame, area: Rect, app: &App) {
         };
 
         for (i, (name, weight)) in depends_on.iter().take(display_count).enumerate() {
+            let display_name = truncate_str(name, 14);
             out_lines.push(Line::from(vec![
                 Span::styled(format!("{:>2}. ", i + 1), Style::default().fg(FG_OVERLAY)),
                 Span::styled(
-                    format!("{:<15}", if name.len() > 14 { &name[..13] } else { name }),
+                    format!("{:<15}", display_name),
                     Style::default().fg(FG_TEXT),
                 ),
                 Span::styled(format!(" (w: {})", weight), Style::default().fg(FG_OVERLAY)),
@@ -595,11 +840,7 @@ pub fn render_blast_radius_panel(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    if br.summary.most_impactful_module.len() > 16 {
-                        format!(" ({}…)", &br.summary.most_impactful_module[..15])
-                    } else {
-                        format!(" ({})", br.summary.most_impactful_module)
-                    },
+                    format!(" ({})", truncate_str(&br.summary.most_impactful_module, 16)),
                     Style::default().fg(FG_OVERLAY),
                 ),
             ]),
@@ -608,7 +849,7 @@ pub fn render_blast_radius_panel(
             Paragraph::new(summary_lines).block(
                 Block::default()
                     .title(Span::styled(
-                        " BLAST RADIUS ",
+                        " REPO BLAST ",
                         Style::default()
                             .fg(Color::Rgb(30, 30, 46))
                             .bg(ACCENT_LAVENDER)
@@ -630,11 +871,7 @@ pub fn render_blast_radius_panel(
                 .iter()
                 .take(4)
                 .map(|ap| {
-                    let name_display = if ap.module_name.len() > 16 {
-                        format!("{}…", &ap.module_name[..15])
-                    } else {
-                        ap.module_name.clone()
-                    };
+                    let name_display = truncate_str(&ap.module_name, 16);
                     Line::from(vec![
                         Span::styled(" ◆ ", Style::default().fg(Color::Rgb(243, 139, 168))),
                         Span::styled(name_display, Style::default().fg(FG_TEXT)),
@@ -650,7 +887,7 @@ pub fn render_blast_radius_panel(
             Paragraph::new(ap_lines).block(
                 Block::default()
                     .title(Span::styled(
-                        " KEYSTONES ",
+                        " REPO KEYSTONES ",
                         Style::default()
                             .fg(ACCENT_LAVENDER)
                             .add_modifier(Modifier::BOLD),
@@ -689,11 +926,7 @@ pub fn render_blast_radius_panel(
             let score_pct = (m.blast_score * 100.0) as u32;
             let bar_width = (score_pct / 5).min(10) as usize;
             let bar = "█".repeat(bar_width);
-            let name_display = if m.module_name.len() > 14 {
-                format!("{}…", &m.module_name[..13])
-            } else {
-                m.module_name.clone()
-            };
+            let name_display = truncate_str(&m.module_name, 14);
             impact_lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {:>3}% ", score_pct),
@@ -725,7 +958,7 @@ pub fn render_blast_radius_panel(
             Paragraph::new(impact_lines).block(
                 Block::default()
                     .title(Span::styled(
-                        " TOP IMPACT ",
+                        " REPO TOP IMPACT ",
                         Style::default()
                             .fg(ACCENT_LAVENDER)
                             .add_modifier(Modifier::BOLD),
@@ -740,5 +973,30 @@ pub fn render_blast_radius_panel(
                 .style(Style::default().fg(FG_OVERLAY)),
             area,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_actionable_advisory_line;
+
+    #[test]
+    fn actionable_advisory_filter_keeps_recommendations() {
+        assert!(is_actionable_advisory_line(
+            "Some modules share more dependencies than expected. Review coupling and consider interfaces."
+        ));
+        assert!(is_actionable_advisory_line(
+            "2 circular dependency groups found. Consider dependency inversion."
+        ));
+    }
+
+    #[test]
+    fn actionable_advisory_filter_drops_plain_facts() {
+        assert!(!is_actionable_advisory_line(
+            "Strongest link: libs/core → std (399 imports). This tight binding makes both harder to change."
+        ));
+        assert!(!is_actionable_advisory_line(
+            "The graph has 173% more connections than typical. Fewer links would make the architecture easier to reason about."
+        ));
     }
 }

@@ -14,14 +14,15 @@ morpharch scan /path/to/monorepo
 # Scan with a commit limit
 morpharch scan /path/to/monorepo -n 100
 
-# Launch the animated TUI
+# Launch the TUI
 morpharch watch /path/to/monorepo
 
 # Analyze architecture for the current HEAD
-morpharch analyze
+morpharch analyze --path /path/to/monorepo
 
-# View health trend
-morpharch list-drift
+# View health trend and cached graph frames
+morpharch list-drift --path /path/to/monorepo
+morpharch list-graphs --path /path/to/monorepo
 ```
 
 ## Scanning a Monorepo
@@ -54,31 +55,34 @@ morpharch watch . -n 100 -s 50
 
 | Key | Action |
 |-----|--------|
-| `j` / `Down` | Navigate to next (older) commit |
-| `k` / `Up` | Navigate to previous (newer) commit |
+| `j` / `k` | Move selection inside the active panel |
+| `Tab` | Switch panel focus |
+| `h` / `l` | Switch local views or insight tabs |
+| `Enter` | Open a cluster, item, or inspect target |
+| `Left` / `Right` | Move through timeline |
 | `p` / `Space` | Play / pause auto-play |
 | `r` | Reheat graph physics |
 | `/` | Enter search mode |
-| `Esc` | Exit search / quit |
+| `Esc` | Exit search / drill out |
 | `q` | Quit |
 
 ## Architecture Analysis
 
 ```bash
 # Analyze the current HEAD commit
-morpharch analyze
+morpharch analyze --path .
 
 # Analyze a specific commit
-morpharch analyze abc1234
+morpharch analyze abc1234 --path .
 
 # Analyze a relative reference
-morpharch analyze main~10
+morpharch analyze main~10 --path .
 
 # View the health trend over the last 20 commits
-morpharch list-drift
+morpharch list-drift --path .
 
 # List stored graph snapshots
-morpharch list-graphs
+morpharch list-graphs --path .
 ```
 
 ## CI Integration
@@ -95,9 +99,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history needed
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install morpharch
       - run: morpharch scan . -n 50
-      - run: morpharch analyze
+      - run: morpharch analyze --path .
 ```

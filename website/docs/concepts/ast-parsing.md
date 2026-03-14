@@ -1,79 +1,108 @@
-# AST-Native Parsing
+# Language-Aware Parsing
 
-MorphArch distinguishes itself by performing deep **Abstract Syntax Tree (AST)** parsing instead of relying on simple text searches. This page details how we handle different programming languages.
+MorphArch does not rely on plain regex matching. It uses a hybrid parsing
+strategy that keeps scans fast while still protecting dependency accuracy.
 
-## The Core Logic: Tree-sitter
+## The Core Logic
 
-We use **Tree-sitter**, an incremental parsing library, to build a full syntax tree of every source file. This allows us to:
-1.  **Differentiate Context**: We know the difference between an `import` statement and a string inside a comment.
-2.  **Handle Aliases**: We correctly resolve renamed imports (e.g., `import { X as Y }`).
-3.  **Language Specificity**: Each language has a dedicated grammar and resolution strategy.
+MorphArch parses source files in two stages:
+
+1. **Safe fast path**
+   Comment-aware and string-aware scanners handle the common import forms
+   quickly.
+2. **AST fallback**
+   When the fast path is not reliable, MorphArch falls back to Tree-sitter for
+   language-aware parsing.
+
+This design gives you:
+
+1. **Context awareness**: imports inside comments and strings are ignored.
+2. **Language specificity**: each supported language has dedicated extraction logic.
+3. **Good repeated-scan performance**: unchanged blobs are cached and reused.
 
 ---
 
-## 🟦 TypeScript & JavaScript
+## TypeScript & JavaScript
 
-Modern frontend and backend JS/TS monorepos often have complex import structures.
+Modern JS/TS monorepos use several import styles, and MorphArch supports the
+common static forms.
 
 ### Supported Patterns
-- **ES6 Imports**: `import { a } from './b'`
-- **Dynamic Imports**: `import('./lazy')`
+
+- **ES module imports**: `import {a} from './b'`
+- **Dynamic imports with a static literal**: `import('./lazy')`
 - **CommonJS**: `require('../legacy')`
+- **TypeScript import assignment**: `import fs = require('fs')`
 - **Re-exports**: `export * from './internal'`
 
-### Path Mapping & Aliases
-MorphArch understands `paths` defined in `tsconfig.json` or `jsconfig.json`.
-- **Scenario**: If you use `@core/auth` which points to `packages/auth/src/index.ts`, MorphArch resolves this alias to the correct package boundary.
-- **Resolution**: We recursively walk up the directory tree to find the nearest config file and apply the mapping rules.
+### Important behavior
+
+- Static literal imports are tracked.
+- Template-literal imports with interpolation such as ``import(`./${name}`)``
+  are treated as dynamic and are not turned into fake static dependencies.
+- Relative imports are normalized into repo-local module labels.
+- Third-party packages are kept as external dependency nodes when they are
+  meaningful enough to show in the architecture view.
 
 ---
 
-## 🦀 Rust
+## Rust
 
-Rust's module system is powerful but non-trivial to parse without a full compiler.
+Rust's module system is rich, so MorphArch focuses on import-level dependency
+signals that are stable at the architectural level.
 
 ### Supported Patterns
-- **External Crates**: `use serde::Serialize;`
-- **Internal Modules**: `mod scanner;` or `use crate::db::Database;`
-- **Relative Imports**: `use super::utils;`
 
-### Resolution Strategy
-- **Workspace Awareness**: MorphArch reads your root `Cargo.toml` to identify workspace members.
-- **Dependency Mapping**: If `app-a` has a `[dependencies]` entry for `lib-b`, any `use lib_b::...` statement is correctly mapped as an edge in the graph.
+- **External crates**: `use serde::Serialize;`
+- **Internal modules**: `mod scanner;` or `use crate::db::Database;`
+- **Relative imports**: `use super::utils;`
+
+### Important behavior
+
+- Commented-out `use` lines and string literals do not create edges.
+- Relative imports are normalized against the source file path.
+- The graph is package-oriented, so imports roll up to repo-local modules rather
+  than acting like a compiler-level resolver.
 
 ---
 
-## 🐍 Python
+## Python
 
-Python's import system is dynamic, but most architectural drift happens at the package level.
+Python's import system is dynamic, but most architectural drift happens at the
+package level.
 
 ### Supported Patterns
-- **Absolute Imports**: `import my_package.models`
-- **Relative Imports**: `from ..utils import helper`
+
+- **Absolute imports**: `import my_package.models`
+- **Relative imports**: `from ..utils import helper`
 - **Sub-modules**: `from my_package.api import routes`
 
-### Resolution Strategy
-MorphArch identifies the Python package boundaries by looking for `__init__.py` files or `pyproject.toml` definitions.
+### Important behavior
+
+- Comments and docstrings do not create false dependencies.
+- Relative imports stay relative to the source package and are normalized into
+  repo-local module labels when possible.
 
 ---
 
-## 🐹 Go
+## Go
 
-Go enforces a very strict package structure which makes analysis highly accurate.
+Go's import system is rigid enough that MorphArch can extract useful package
+edges accurately.
 
 ### Supported Patterns
-- **Internal Imports**: `import "github.com/org/repo/pkg/auth"`
-- **Alias Imports**: `import auth "github.com/org/repo/pkg/security"`
 
-### Resolution Strategy
-- **Go Mod Support**: MorphArch parses `go.mod` to determine the module's root name.
-- **Boundary Detection**: Any import path that starts with the module root name is identified as an internal dependency edge.
+- **Internal imports**: `import "github.com/org/repo/pkg/auth"`
+- **Alias imports**: `import auth "github.com/org/repo/pkg/security"`
 
 ---
 
 ## Performance & Caching
 
-AST parsing is CPU-intensive. To maintain high performance, MorphArch implements:
-- **Subtree Caching**: If a directory hasn't changed (based on Git tree hash), we skip all files inside it.
-- **Blob Cache**: Individual file AST results are stored in an LRU cache (default size: 50,000 files).
-- **Rayon Parallelism**: Parsing is distributed across all available CPU cores.
+Parsing is CPU-intensive. To maintain high performance, MorphArch implements:
+
+- **Subtree caching**: if a directory hasn't changed, we skip all files inside it
+- **Blob cache**: file import results are cached across the scan
+- **Parallel parsing**: parsing is distributed across available CPU cores
+- **Safe fallbacks**: when fast parsing is uncertain, MorphArch falls back to
+  AST parsing instead of emitting bad edges

@@ -1,130 +1,207 @@
 # Configuration Guide
 
-MorphArch is designed to work **out of the box** with zero configuration. Its topological analysis automatically detects cycles, boundary violations, and god modules without any manual setup.
+MorphArch works without a config file, but `morpharch.toml` lets you tune both
+analysis and presentation for your repository.
 
-When you need to fine-tune the scoring engine for your specific project, place a `morpharch.toml` file at the root of your Git repository. This file is designed to be version-controlled alongside your code so your entire team shares the same architectural health standards.
+Use config when you need to:
 
-:::tip Zero-Config First
-If you don't create a `morpharch.toml`, MorphArch uses sensible defaults that work well for most monorepos. Start without a config file and add one only when you need to customize behavior.
+- ignore generated or irrelevant paths
+- enable or disable built-in ignore presets
+- tune health scoring for your architecture standards
+- define explicit dependency boundaries
+- exempt known entry points or shared cores
+- improve semantic grouping and clustering stability for your monorepo
+
+:::tip Zero-config first
+Start without a config file. Add overrides only when the defaults stop matching
+how your repo is organized.
 :::
 
 ---
 
 ## Config File Location
 
-MorphArch looks for `morpharch.toml` at the root of the repository you pass to `scan`, `watch`, or `analyze`:
+Put `morpharch.toml` at the repository root:
 
-```
+```text
 my-monorepo/
-  morpharch.toml   <-- loaded automatically
-  src/
+  morpharch.toml
+  apps/
   packages/
-  ...
+  crates/
 ```
 
-If the file is missing, all defaults apply. If the file exists but contains invalid TOML, MorphArch will exit with a clear error message.
+MorphArch loads it automatically for `scan`, `watch`, and `analyze`.
 
 ---
 
 ## Ignore Rules
 
-Exclude paths from AST parsing and scoring. Ignored paths are skipped during the Git tree walk, which also improves scan performance for large repositories.
+Skip paths entirely during repository discovery and parsing.
 
 ```toml
 [ignore]
-paths = ["tests/**", "benches/**", "**/generated_*.rs", "vendor/**"]
+use_defaults = true
+presets = ["repo_noise"]
+paths = ["tests/**", "vendor/**", "benchmarks/**"]
+
+[ignore.custom_presets]
+repo_noise = [".circleci/**", "scripts/dev/**"]
 ```
 
-Patterns use standard glob syntax:
-- `*` matches any sequence of characters within a path segment
-- `**` matches any number of path segments (including zero)
-- `?` matches any single character
+Use this for:
 
-:::info Performance Benefit
-Ignore rules are applied at the Git tree-walk level, meaning entire subtrees are skipped before any file I/O or parsing occurs. This can significantly speed up scans for repositories with large test or vendor directories.
-:::
+- generated code
+- vendored dependencies
+- benchmark fixtures
+- directories that are not part of the architecture you want to reason about
+
+### Built-in presets
+
+By default MorphArch enables built-in ignore presets for:
+
+- tooling directories such as `.github/**` and `.vscode/**`
+- build artifacts such as `dist/**`, `build/**`, and `target/**`
+- generated code such as `**/__generated__/**` and `**/*.d.ts`
+
+If you want full manual control:
+
+```toml
+[ignore]
+use_defaults = false
+paths = ["tests/**"]
+```
+
+---
+
+## Scan Heuristics
+
+Tune how MorphArch converts file paths and imports into package-level graph
+nodes before scoring and clustering.
+
+```toml
+[scan]
+package_depth = 2
+external_min_importers = 3
+test_path_patterns = [
+  "/test/",
+  "/tests/",
+  "/testdata/",
+  "/__tests__/",
+  "/fixtures/",
+  "/e2e/",
+]
+```
+
+### What these mean
+
+- `package_depth`
+  Controls how many meaningful path segments are collapsed into one package
+  label. With `1`, paths like `src/auth/utils.rs` and
+  `src/auth/strategies/jwt.rs` both resolve to `auth`. With `2`, the second
+  path becomes `auth/strategies`.
+- `external_min_importers`
+  Hides low-signal third-party dependencies from overview-style views unless at
+  least that many internal packages import them. Set this to `0` if you want
+  every external dependency to stay visible.
+- `test_path_patterns`
+  Path fragments treated as non-architectural test or fixture code during scan
+  discovery. These are normalized fragments, not glob patterns.
+
+### Defaults and behavior
+
+- `package_depth = 2`
+- `external_min_importers = 3`
+- `test_path_patterns` defaults to a narrow set of canonical test paths:
+  - `/test/`
+  - `/tests/`
+  - `/testdata/`
+  - `/test_data/`
+  - `/__tests__/`
+  - `/spec/`
+  - `/fixtures/`
+  - `/fixture/`
+  - `/snapshots/`
+  - `/e2e/`
+
+Notably, `examples/`, `bench/`, `benchmarks/`, `mock/`, and `mocks/` are no
+longer filtered by default. If those paths are not part of your architecture,
+add them explicitly here or under `[ignore]`.
+
+### Python relative imports
+
+MorphArch now resolves Python relative imports into internal dependencies when
+possible:
+
+- `from . import config`
+- `from .sub import item`
+- `from ..shared import util`
+
+This means Python-first repositories no longer lose large portions of their
+internal dependency graph just because they use relative imports.
 
 ---
 
 ## Scoring Weights
 
-Control how much each debt component contributes to the final health score. Values are relative and normalized internally to sum to 1.0, so they don't need to add up to any specific number.
+Control how strongly each debt component affects the health score.
 
 ```toml
 [scoring.weights]
-cycle = 30         # Circular dependencies (SCC analysis)
-layering = 25      # Back-edges violating layered architecture
-hub = 15           # God modules (high fan-in AND fan-out)
-coupling = 12      # Edge weight density (import concentration)
-cognitive = 10     # Graph complexity (edge excess + degree excess)
-instability = 8    # Brittle modules (Martin instability metric)
+cycle = 30
+layering = 25
+hub = 15
+coupling = 12
+cognitive = 10
+instability = 8
 ```
 
-The values above are the **defaults**. Adjust them to match your project's priorities:
+These values are normalized internally, so they do not need to sum to `100`.
 
-| Project Type | Recommended Adjustment |
-|---|---|
-| **Legacy codebase** | Lower `cycle` weight to make adoption gradual |
-| **Microservices** | Raise `coupling` weight to catch tight bindings early |
-| **Monolith** | Raise `hub` weight to catch god modules early |
-| **Library/SDK** | Raise `instability` weight to catch fragile public APIs |
+### Recommended tuning patterns
 
-### How normalization works
-
-MorphArch normalizes your weights so they always sum to 1.0 internally. For example, if you set:
-
-```toml
-[scoring.weights]
-cycle = 50
-layering = 50
-```
-
-The other four components default to their standard values (hub=15, coupling=12, cognitive=10, instability=8), giving a total of 145. Each weight is divided by 145, so cycles would be ~34.5% and layering ~34.5%.
-
-If all weights are set to zero, MorphArch falls back to the default weights automatically.
+| Repo Type | Consider |
+| --- | --- |
+| Large monolith | Raise `hub` and `coupling` |
+| Plugin architecture | Raise `layering` |
+| Shared library platform | Raise `instability` |
+| Legacy migration | Lower `cycle` at first to reduce noise |
 
 ---
 
 ## Scoring Thresholds
 
-Fine-tune when exemptions and penalties kick in.
+Control when a module is treated as a legitimate shared core, entry point, or
+unstable dependency sink.
 
 ```toml
 [scoring.thresholds]
 hub_exemption_ratio = 0.3
 entry_point_max_fan_in = 2
 brittle_instability_ratio = 0.8
+blast_high_impact_threshold = 0.3
+blast_max_critical_paths = 5
 ```
 
-### `hub_exemption_ratio` (default: `0.3`)
+### What these mean
 
-Modules with `fan_out / (fan_in + 1)` below this ratio are treated as **legitimate shared cores** rather than god modules. These are modules that many packages import but that themselves import relatively few things (e.g., a shared `core` or `utils` package).
-
-Lower this value to be stricter about what counts as a legitimate hub.
-
-### `entry_point_max_fan_in` (default: `2`)
-
-Modules with fan-in at or below this value are treated as **entry-point composition roots** and exempt from hub debt. Entry points like `main.rs` or `cli/tools.ts` naturally wire many packages together but have few (or no) incoming dependencies.
-
-Raise this value if your project has entry points that are imported by a few test or build files.
-
-### `brittle_instability_ratio` (default: `0.8`)
-
-Modules with an instability index `I` greater than this threshold are flagged as brittle. The instability index is calculated as:
-
-```
-I = Ce / (Ca + Ce)
-```
-
-Where `Ca` = fan-in (afferent coupling) and `Ce` = fan-out (efferent coupling). A module with `I = 1.0` depends on others but nothing depends on it, making it maximally unstable.
-
-Raise this value (e.g., `0.9`) to be more lenient, or lower it (e.g., `0.7`) to catch fragility earlier.
+- `hub_exemption_ratio`
+  Treats low-fan-out shared cores as legitimate instead of god modules.
+- `entry_point_max_fan_in`
+  Prevents main entry points and composition roots from being penalized like
+  ordinary modules.
+- `brittle_instability_ratio`
+  Flags modules that depend heavily on others while few things depend on them.
+- `blast_high_impact_threshold`
+  Controls which modules count as high impact in blast analysis.
+- `blast_max_critical_paths`
+  Limits how many critical dependency chains MorphArch keeps in the blast view.
 
 ---
 
 ## Boundary Rules
 
-Define explicit architectural boundaries: forbidden dependency directions. These are checked during `morpharch analyze` and reported as violations.
+Define dependency directions that are not allowed in your architecture.
 
 ```toml
 [[scoring.boundaries]]
@@ -132,116 +209,337 @@ from = "packages/**"
 deny = ["apps/**", "cmd/**"]
 
 [[scoring.boundaries]]
-from = "libs/shared/**"
-deny = ["libs/feature_*/**"]
-
-[[scoring.boundaries]]
-from = "modules/billing/**"
-deny = ["modules/auth/**"]
+from = "runtime/**"
+deny = ["cli/**"]
 ```
 
-Each rule means: modules matching `from` must **NOT** depend on modules matching `deny`. Matching uses prefix comparison (glob wildcards in the pattern are stripped for matching purposes).
+Use boundary rules when you want MorphArch to enforce business rules such as:
 
-:::info Legacy Fallback
-When no `[[scoring.boundaries]]` are configured, MorphArch falls back to its built-in topological layering analysis. Boundary rules give you explicit control on top of the automatic detection.
-:::
+- shared packages must not depend on apps
+- runtime layers must not depend on tooling
+- domain modules must not depend on presentation code
 
-### Common patterns
-
-| Rule | Meaning |
-|---|---|
-| `from = "packages/**"`, `deny = ["apps/**"]` | Shared packages cannot depend on application code |
-| `from = "runtime/"`, `deny = ["cli/"]` | Runtime library cannot depend on CLI tooling |
-| `from = "core/"`, `deny = ["plugins/**"]` | Core cannot depend on plugins |
+If no explicit boundaries are configured, MorphArch still uses its built-in
+layering analysis.
 
 ---
 
 ## Exemptions
 
-Exempt specific modules from certain debt calculations. Useful for intentional design decisions that would otherwise trigger false positives.
+Exempt intentional design choices from specific debt calculations.
 
 ```toml
 [scoring.exemptions]
-hub_exempt = ["src/utils.rs", "libs/core/index.ts"]
+hub_exempt = ["libs/core", "deno_core"]
 instability_exempt = ["packages/ui-kit/src/index.ts"]
-entry_point_stems = ["main", "index", "app", "lib", "mod"]
+entry_point_stems = ["main", "index", "app", "lib", "mod", "server"]
 ```
 
-### `hub_exempt` (default: `[]`)
-
-Modules listed here are completely exempt from hub/god-module debt calculation. Use this for intentional utility modules or framework entry points that you know will have high fan-in and fan-out.
-
-### `instability_exempt` (default: `[]`)
-
-Modules listed here are exempt from instability debt calculation. Use this for barrel/re-export files or UI kit entry points that naturally have high fan-out.
-
-### `entry_point_stems` (default: `["main", "index", "app", "lib", "mod"]`)
-
-File stems (filename without extension) that are treated as entry points. Entry points are automatically exempt from fragility penalties because they naturally have high fan-out and low fan-in.
-
-Add custom stems if your project uses non-standard entry point names:
-
-```toml
-entry_point_stems = ["main", "index", "app", "lib", "mod", "server", "worker", "cli"]
-```
+Use exemptions sparingly. They are most valuable when you know a module is
+supposed to behave like a facade, barrel file, or composition root.
 
 ---
 
-## Zero-Config Topology
+## Clustering
 
-Even without a `morpharch.toml`, MorphArch provides powerful analysis through automatic detection:
+Clustering controls how MorphArch turns a raw dependency graph into the
+`Map -> Cluster details -> Inspect` navigation model.
 
-### Topological Layering
-Instead of requiring manual boundary rules, MorphArch uses **Topological Sorting** to analyze the natural dependency flow. It detects **back-edges** (when a lower-level module unexpectedly imports a higher-level module) algorithmically.
+The modern config model is layered:
 
-### Entry Point Detection
-MorphArch automatically recognizes composition roots. Any module with a stem matching the `entry_point_stems` list (default: `main`, `index`, `app`, `lib`, `mod`) is forgiven for high fan-out.
+- `semantic`: naming-driven grouping and fallback behavior
+- `structural`: split/merge refinement after semantic grouping
+- `families`: explicit semantic family definitions
+- `rules`: label-based fallback grouping for dynamic naming cases
+- `constraints`: hard grouping / separation rules
+- `presentation`: user-facing aliases, kind mode, and color mode
 
-### Scale-Aware Scoring
-The scoring engine dynamically adjusts baseline expectations based on repository size. Larger monorepos are given more leniency for natural coupling, while smaller projects are held to stricter standards.
+```toml
+[clustering]
+strategy = "hybrid"
+
+[clustering.semantic]
+collapse_external = true
+fallback_family = "workspace"
+root_token_min_repeats = 2
+include_exact_roots_for_known_heads = true
+
+[clustering.structural]
+enabled = true
+min_cluster_size = 2
+split_threshold = 6
+max_cluster_share = 0.45
+preserve_family_purity = true
+post_merge_small_clusters = true
+disambiguate_duplicate_names = true
+```
+
+### Strategy
+
+| Key | Meaning |
+| --- | --- |
+| `hybrid` | Best default: semantic grouping first, structural cleanup second |
+| `namespace` | Prefer names and paths over graph structure |
+| `structural` | Prefer graph structure when naming is weak |
+
+### Semantic options
+
+| Key | Meaning |
+| --- | --- |
+| `collapse_external` | Collapse third-party dependency families when possible |
+| `fallback_family` | Name used for generic leftovers that do not fit a better family |
+| `root_token_min_repeats` | Minimum repeated token count before a root token becomes a semantic hint |
+| `include_exact_roots_for_known_heads` | Merge exact roots like `serde_v8` with `serde_v8/**` when appropriate |
+
+### Structural options
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | Turn structural refinement on or off |
+| `min_cluster_size` | Smallest cluster MorphArch tries to preserve before merging |
+| `split_threshold` | Re-split a dominant cluster when it grows too large |
+| `max_cluster_share` | Maximum share of internal nodes one generic cluster should absorb |
+| `preserve_family_purity` | Avoid splitting a semantically pure family into noisy subclusters |
+| `post_merge_small_clusters` | Re-merge tiny artifacts after split passes |
+| `disambiguate_duplicate_names` | Add suffixes when multiple clusters resolve to the same display name |
+
+---
+
+## Semantic Families
+
+Define explicit semantic families when default grouping is too generic.
+
+```toml
+[[clustering.families]]
+name = "git"
+kind = "infra"
+include = ["git", "git/**", "git_*"]
+split = "never"
+
+[[clustering.families]]
+name = "frontend"
+kind = "entry"
+include = ["apps/web/**", "website/**"]
+priority = 20
+```
+
+Useful family fields:
+
+| Key | Meaning |
+| --- | --- |
+| `name` | Family name before presentation aliases are applied |
+| `include` | Labels or globs to match into this family |
+| `exclude` | Optional negative patterns |
+| `kind` | Optional presentation hint for the family |
+| `split` | `never`, `allow`, or `prefer` |
+| `priority` | Higher-priority families win when patterns overlap |
+| `merge_small_into_family` | Prefer merging tiny leftovers back into this family |
+
+Families are the best place to:
+
+- group exact roots with namespaced members
+- protect stable subsystems from over-splitting
+- override weak default naming in one place
+
+---
+
+## Label-Based Rules
+
+Use clustering rules when you want to group labels by glob without defining a
+full semantic family.
+
+```toml
+[[clustering.rules]]
+name = "node_compat"
+kind = "domain"
+match = ["node", "node/**", "node_*"]
+```
+
+Rules are useful for:
+
+- crate families such as `deno_*`
+- compatibility layers such as `node_*`
+- repos where exact-root and prefix matching matters more than path hierarchy
+
+---
+
+## Clustering Constraints
+
+Use hard constraints when a few architectural groups must stay together or must
+never land in the same cluster.
+
+```toml
+[[clustering.constraints]]
+type = "must_group"
+members = ["core", "core/**"]
+
+[[clustering.constraints]]
+type = "must_separate"
+left = ["apps/**"]
+right = ["packages/**"]
+```
+
+Constraint types:
+
+- `must_group`: keep matching labels together
+- `must_separate`: force the left and right groups apart
+
+`must_group` is best for shared cores and exact-root-plus-namespace families.
+`must_separate` is best for project-specific edge cases where topology alone is
+not enough.
+
+---
+
+## Presentation Overrides
+
+Rename cluster labels or override their badge/kind without changing the
+underlying clustering logic.
+
+```toml
+[clustering.presentation]
+kind_mode = "explicit_only"
+color_mode = "minimal"
+
+[clustering.presentation.aliases]
+workspace = "platform"
+deps = "third-party"
+
+[clustering.presentation.kinds]
+platform = "infra"
+third-party = "deps"
+frontend = "entry"
+```
+
+Presentation options:
+
+| Key | Meaning |
+| --- | --- |
+| `kind_mode` | `explicit_then_heuristic` or `explicit_only` |
+| `color_mode` | `minimal` or `semantic` |
+| `aliases` | rename cluster labels in the TUI |
+| `kinds` | assign presentation kinds without changing clustering |
+
+Supported kinds:
+
+- `workspace`
+- `deps`
+- `entry`
+- `external`
+- `infra`
+- `domain`
+- `group`
+
+Cluster kinds are presentation hints. They affect labels and badges in the TUI,
+not the underlying dependency graph.
 
 ---
 
 ## Full Example
 
-Here is a complete `morpharch.toml` for a Deno-like monorepo:
-
 ```toml
 [ignore]
-paths = ["tests/**", "cli/tests/**", "tools/**", "bench_util/**"]
+use_defaults = true
+paths = ["tests/**", "vendor/**", "dist/**", "tools/**"]
+
+[scan]
+package_depth = 2
+external_min_importers = 3
+test_path_patterns = ["/tests/", "/__tests__/", "/fixtures/"]
 
 [scoring.weights]
-cycle = 35
+cycle = 30
 layering = 25
-hub = 20
-coupling = 10
-cognitive = 5
-instability = 5
+hub = 15
+coupling = 12
+cognitive = 10
+instability = 8
 
 [scoring.thresholds]
-entry_point_max_fan_in = 3
 hub_exemption_ratio = 0.25
+entry_point_max_fan_in = 3
 brittle_instability_ratio = 0.85
 
 [[scoring.boundaries]]
-from = "runtime/"
-deny = ["cli/"]
+from = "runtime/**"
+deny = ["cli/**"]
 
 [[scoring.boundaries]]
-from = "ext/"
-deny = ["cli/"]
+from = "packages/**"
+deny = ["apps/**"]
 
 [scoring.exemptions]
 hub_exempt = ["deno_core"]
-entry_point_stems = ["main", "index", "app", "lib", "mod", "tools"]
-```
+entry_point_stems = ["main", "index", "app", "lib", "mod", "server"]
 
-See also: [`morpharch.example.toml`](https://github.com/onplt/morpharch/blob/main/morpharch.example.toml) in the repository root for a fully commented reference.
+[clustering]
+strategy = "hybrid"
+
+[clustering.semantic]
+collapse_external = true
+fallback_family = "workspace"
+root_token_min_repeats = 2
+include_exact_roots_for_known_heads = true
+
+[clustering.structural]
+enabled = true
+min_cluster_size = 2
+split_threshold = 6
+max_cluster_share = 0.45
+preserve_family_purity = true
+post_merge_small_clusters = true
+disambiguate_duplicate_names = true
+
+[[clustering.families]]
+name = "git"
+kind = "infra"
+include = ["git", "git/**", "git_*"]
+split = "never"
+
+[[clustering.families]]
+name = "frontend"
+kind = "entry"
+include = ["apps/web/**", "website/**"]
+
+[[clustering.rules]]
+name = "node_compat"
+kind = "domain"
+match = ["node", "node/**", "node_*"]
+
+[[clustering.constraints]]
+type = "must_group"
+members = ["core", "core/**"]
+
+[clustering.presentation]
+kind_mode = "explicit_only"
+color_mode = "minimal"
+
+[clustering.presentation.aliases]
+workspace = "platform"
+deps = "third-party"
+
+[clustering.presentation.kinds]
+platform = "infra"
+third-party = "deps"
+frontend = "entry"
+```
 
 ---
 
 ## Environment Variables
 
-For CI/CD environments, you can override system-level settings:
+- `MORPHARCH_DB_PATH`: custom path to the local SQLite database
 
-- `MORPHARCH_DB_PATH`: Path to the SQLite database (default: `~/.morpharch/morpharch.db`).
+---
+
+## Guidance
+
+If the architecture map feels too generic:
+
+1. add a few explicit `clustering.families`
+2. add `clustering.rules` for naming-heavy leftovers
+3. add `clustering.constraints` for true edge cases
+4. rename things with `clustering.presentation.aliases`
+5. only then tune `clustering.structural`
+
+That usually produces a better result than jumping straight to a fully custom
+structural strategy.

@@ -1,41 +1,37 @@
 # Website
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+This folder contains the MorphArch documentation site and landing page, built
+with [Docusaurus](https://docusaurus.io/).
 
-## Installation
+## What lives here
 
-```bash
-yarn
-```
+- `docs/`: product documentation
+- `src/pages/index.tsx`: landing page
+- `src/components/`: shared homepage components
+- `static/`: demo assets and images
 
-## Local Development
-
-```bash
-yarn start
-```
-
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
-
-## Build
+## Install
 
 ```bash
-yarn build
+npm install
 ```
 
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-## Deployment
-
-Using SSH:
+## Local development
 
 ```bash
-USE_SSH=true yarn deploy
+npm run start
 ```
 
-Not using SSH:
+## Typecheck
 
 ```bash
-GIT_USER=<Your GitHub username> yarn deploy
+npm run typecheck
 ```
 
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+## Production build
+
+```bash
+npm run build
+```
+
+The static output is generated into `build/`.

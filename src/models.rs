@@ -9,7 +9,11 @@
 //!
 //! All types implement `Serialize` and `Deserialize` for JSON persistence.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+pub const CURRENT_ANALYSIS_VERSION: u32 = 3;
 
 /// Metadata for a single Git commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,15 +35,91 @@ pub struct DependencyEdge {
     pub from_module: String,
     pub to_module: String,
     pub file_path: String,
-    pub line: usize,
+    #[serde(default)]
+    pub line: Option<usize>,
     /// Number of import statements for this edge (1 = single import, N = N files import this)
     #[serde(default = "default_weight")]
     pub weight: u32,
+    #[serde(default)]
+    pub sample_origins: Vec<EdgeOrigin>,
 }
 
 /// Default edge weight for backwards-compatible deserialization of old snapshots.
 fn default_weight() -> u32 {
     1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EdgeOrigin {
+    pub file_path: String,
+    #[serde(default)]
+    pub line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NodeKind {
+    Internal,
+    External,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeMetadata {
+    pub kind: NodeKind,
+    #[serde(default)]
+    pub importer_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FilteredExternalSample {
+    pub module_name: String,
+    pub importer_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileImportTarget {
+    pub module_name: String,
+    pub weight: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileDependencyState {
+    pub package_name: String,
+    #[serde(default)]
+    pub imports: Vec<FileImportTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RepoScanState {
+    #[serde(default)]
+    pub files: HashMap<String, FileDependencyState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GraphDelta {
+    #[serde(default)]
+    pub upserts: Vec<(String, FileDependencyState)>,
+    #[serde(default)]
+    pub deletes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScanMetadata {
+    #[serde(default)]
+    pub external_min_importers: u32,
+    #[serde(default)]
+    pub included_external_count: usize,
+    #[serde(default)]
+    pub filtered_external_count: usize,
+    #[serde(default)]
+    pub filtered_external_samples: Vec<FilteredExternalSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstabilityMetric {
+    pub module_name: String,
+    pub instability: f64,
+    pub fan_in: usize,
+    pub fan_out: usize,
 }
 
 /// Full dependency graph at a specific commit.
@@ -52,18 +132,85 @@ pub struct GraphSnapshot {
     pub edge_count: usize,
     pub timestamp: i64,
     #[serde(default)]
+    pub analysis_version: u32,
+    #[serde(default)]
+    pub config_fingerprint: String,
+    #[serde(default)]
+    pub node_metadata: HashMap<String, NodeMetadata>,
+    #[serde(default)]
+    pub scan_metadata: ScanMetadata,
+    #[serde(default)]
     pub drift: Option<DriftScore>,
     /// Blast radius analysis (computed during scan, None for old snapshots)
     #[serde(default)]
     pub blast_radius: Option<BlastRadiusReport>,
+    #[serde(default)]
+    pub instability_metrics: Vec<InstabilityMetric>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
 }
 
 /// Lighter version of GraphSnapshot for UI lists and timelines.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
     pub commit_hash: String,
+    pub scan_order: i64,
     pub timestamp: i64,
     pub drift: Option<DriftScore>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotFrame {
+    pub commit_hash: String,
+    pub scan_order: i64,
+    pub timestamp: i64,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub analysis_version: u32,
+    pub config_fingerprint: String,
+    pub drift: Option<DriftScore>,
+    pub scan_metadata: ScanMetadata,
+    pub delta: GraphDelta,
+    pub has_full_artifacts: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeavySnapshotArtifacts {
+    pub blast_radius: BlastRadiusReport,
+    pub instability_metrics: Vec<InstabilityMetric>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphCheckpoint {
+    pub commit_hash: String,
+    pub scan_order: i64,
+    pub state: RepoScanState,
+    #[serde(default)]
+    pub full_artifacts: Option<HeavySnapshotArtifacts>,
+}
+
+impl GraphSnapshot {
+    pub fn requires_core_recompute(&self) -> bool {
+        self.analysis_version < CURRENT_ANALYSIS_VERSION
+            || self.config_fingerprint.is_empty()
+            || self.node_metadata.is_empty()
+            || self.drift.is_none()
+    }
+
+    pub fn needs_runtime_insights(&self) -> bool {
+        self.instability_metrics.is_empty() || self.diagnostics.is_empty()
+    }
+
+    pub fn needs_full_analysis(&self) -> bool {
+        self.blast_radius.is_none()
+    }
+
+    pub fn requires_artifact_recompute(&self) -> bool {
+        self.requires_core_recompute()
+            || self.needs_runtime_insights()
+            || self.needs_full_analysis()
+    }
 }
 
 /// Architecture drift score — measures graph "health" (0-100).
@@ -86,8 +233,11 @@ pub struct DriftScore {
     pub fan_out_delta: i32,
     /// Circular dependency (SCC) count
     pub new_cycles: usize,
-    /// Back-edge count in topological layering (real boundary violations)
+    /// Configured package-boundary rule violations.
     pub boundary_violations: usize,
+    /// Extra cross-cutting edges inside SCCs.
+    #[serde(default)]
+    pub layering_violations: usize,
     /// Cognitive complexity: Shannon entropy + edge excess ratio
     pub cognitive_complexity: f64,
     /// Score computation timestamp

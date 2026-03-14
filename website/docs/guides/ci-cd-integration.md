@@ -1,10 +1,15 @@
 # CI/CD Integration
 
-Integrate MorphArch into your continuous integration pipeline to enforce architectural standards on every Pull Request.
+Integrate MorphArch into your CI pipeline to capture architectural drift on
+every pull request.
 
 ## GitHub Actions Example
 
-You can use MorphArch to fail a build if the architectural health score drops below a certain threshold (e.g., 80/100).
+This example runs a shallow scan, prints a human-readable report for `HEAD`, and
+fails the build when the reported health drops below a threshold.
+
+MorphArch currently emits human-readable CLI output, so the example extracts the
+health percentage from `morpharch analyze`.
 
 ```yaml
 # .github/workflows/architecture.yml
@@ -18,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Full history is required for scan
+          fetch-depth: 0
 
       - name: Install MorphArch
         run: |
@@ -26,24 +31,34 @@ jobs:
 
       - name: Run Architecture Analysis
         run: |
-          # Scan the repository
+          # Scan only the current commit for CI feedback
           morpharch scan . --max-commits 1
 
-          # Analyze the HEAD commit and extract the score
-          SCORE=$(morpharch analyze --json | jq '.total')
+          # Analyze HEAD and capture the report
+          REPORT="$(morpharch analyze HEAD --path .)"
+          printf '%s\n' "$REPORT"
+
+          # Extract the "Health: NN%" line from the report
+          SCORE="$(printf '%s\n' "$REPORT" | sed -n 's/^     Health: \([0-9][0-9]*\)%.*/\1/p' | head -n 1)"
+
+          if [ -z "$SCORE" ]; then
+            echo "Failed to extract health score from MorphArch output."
+            exit 1
+          fi
 
           echo "Architectural Health Score: $SCORE"
 
           # Fail if score is below 80
           if [ "$SCORE" -lt 80 ]; then
-            echo "Architecture health is too low ($SCORE)! Please fix circular dependencies or architectural debt."
+            echo "Architecture health is too low ($SCORE)! Please review cycles, coupling, or boundary drift."
             exit 1
           fi
 ```
 
 ### Alternative Install Methods for CI
 
-The shell script installer is the fastest option since it downloads a pre-built binary. If you prefer other methods:
+The shell script installer is the fastest option since it downloads a pre-built
+binary. If you prefer other methods:
 
 | Method | Command | Notes |
 |--------|---------|-------|
@@ -55,10 +70,11 @@ The shell script installer is the fastest option since it downloads a pre-built 
 
 ## Why run in CI/CD?
 
-- **Prevent Architecture Decay**: Detect circular dependencies as soon as they are introduced.
-- **Enforce Layer Boundaries**: Ensure that `shared` packages never depend on `app` code.
-- **Track Drift**: Monitor how architectural debt changes over time in your repository history.
+- **Prevent architecture decay**: detect circular dependencies as soon as they are introduced.
+- **Enforce layer boundaries**: ensure that `shared` packages never depend on `app` code.
+- **Track drift**: monitor how architectural debt changes over time in your repository history.
 
-:::tip Outputting JSON
-The `morpharch analyze --json` flag is designed for easy integration with tools like `jq` in CI/CD environments.
+:::tip Keep CI scans shallow
+For pull requests, `--max-commits 1` or another small number is usually enough.
+Use deeper scans for scheduled jobs or local investigation.
 :::

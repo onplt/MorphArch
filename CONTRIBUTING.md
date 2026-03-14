@@ -120,14 +120,17 @@ Use concise, imperative-mood commit messages:
 MorphArch is a binary crate structured around these core areas:
 
 - **Git scanning** -- repository traversal via `gix`
-- **Parsing** -- tree-sitter grammars for multi-language import extraction
+- **Parsing** -- language-aware import extraction with safe fast paths and AST fallback
 - **Graph** -- `petgraph`-based dependency graph with drift scoring
-- **Storage** -- SQLite persistence via `rusqlite`
+- **Storage** -- repo-scoped SQLite persistence via frames, checkpoints, and scan state
 - **TUI** -- `ratatui` + `crossterm` animated graph renderer
 
-When adding a new language parser, add the corresponding `tree-sitter-*` crate
-to `Cargo.toml` and implement the import extraction logic following the patterns
-in existing language modules.
+When adding a new language parser, follow the existing pattern:
+
+1. add language detection
+2. implement a safe fast path when possible
+3. add AST fallback support when needed
+4. cover false-positive cases with tests
 
 ## Reporting Issues
 

@@ -3,23 +3,28 @@
 // =============================================================================
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use lru::LruCache;
 use petgraph::graph::DiGraph;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::Canvas;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+use super::architecture_map::{ArchitectureMap, ClusterEdge, ClusterNode, ClusterOverviewRole};
+use crate::analysis;
 use crate::blast_radius;
-use crate::config::ScoringConfig;
+use crate::config::{ClusterColorMode, ClusteringConfig, ScoringConfig};
 use crate::db::Database;
-use crate::models::{BlastRadiusReport, DriftScore, GraphSnapshot, SnapshotMetadata};
+use crate::graph_builder;
+use crate::models::{BlastRadiusReport, DriftScore, GraphSnapshot, NodeKind, SnapshotMetadata};
 use crate::scoring;
 
 /// Which panel currently has keyboard focus
@@ -42,9 +47,8 @@ pub enum ViewContext {
 /// Active tab in the insights panel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsightTab {
-    Health,
+    Overview,
     Hotspots,
-    Trends,
     Blast,
 }
 
@@ -56,9 +60,16 @@ pub enum ActiveView {
     MacroGraph,
 }
 
+#[derive(Debug, Clone)]
+enum SidebarEntry {
+    Cluster { id: usize, label: String },
+    Member { id: usize, label: String },
+}
+
 use super::graph_renderer::{
-    ACCENT_BLUE, ACCENT_LAVENDER, ACCENT_MAUVE, BG_BASE, BG_SURFACE, FG_OVERLAY, FG_TEXT,
-    GraphLayout, NODE_PALETTE, drift_color, weighted_edge_color,
+    ACCENT_BLUE, ACCENT_LAVENDER, ACCENT_MAUVE, BG_BASE, BG_SURFACE, ClusterMapSemantic,
+    FG_OVERLAY, FG_TEXT, GraphLayout, GraphRelationSemantic, OverviewEdgeSemantic,
+    cluster_map_color, graph_relation_color, overview_edge_color, weighted_edge_color,
 };
 use super::insight_panel::render_insight_panel;
 use super::timeline::{TimelineState, render_timeline};
@@ -80,10 +91,11 @@ pub enum HotspotsSort {
 
 pub struct App {
     pub db: Option<Database>,
+    pub repo_id: String,
     pub graph_layout: GraphLayout,
     pub timeline: TimelineState,
     pub snapshots_metadata: Vec<SnapshotMetadata>,
-    pub snapshot_cache: HashMap<String, GraphSnapshot>,
+    pub snapshot_cache: LruCache<String, GraphSnapshot>,
     pub current_drift: Option<DriftScore>,
     pub is_playing: bool,
     pub should_quit: bool,
@@ -107,7 +119,12 @@ pub struct App {
     pub graph_pan_y: f64,
     pub dragging_pan: bool,
     pub last_mouse_pos: Option<(u16, u16)>,
+    pending_graph_focus: bool,
     render_cache: Option<GraphRenderCache>,
+    pub architecture_map: Option<ArchitectureMap>,
+    pub internal_node_indices: HashSet<usize>,
+    pub selected_cluster: Option<usize>,
+    pub hovered_cluster: Option<usize>,
     /// Commit hash currently being loaded from DB
     pub loading_hash: Option<String>,
     /// List of (package_name, instability_score) for the current graph
@@ -143,10 +160,15 @@ pub struct App {
     pub insights_area: Rect,
     /// Is the user currently dragging the insights panel border?
     pub resizing_insights: bool,
+    /// Whether the sidebar was visible in the last rendered layout
+    effective_sidebar_visible: bool,
+    /// Whether the insights panel was visible in the last rendered layout
+    effective_insights_visible: bool,
     /// Component diagnostic advisory lines (computed from current graph)
     pub advisory_lines: Vec<String>,
     /// Scoring configuration for diagnostics generation
     pub scoring_config: ScoringConfig,
+    pub clustering_config: ClusteringConfig,
 
     // ── Blast Radius Cartography ──
     /// Blast radius overlay mode active (toggle with 'x')
@@ -159,6 +181,10 @@ pub struct App {
     pub cascade_highlight: Option<Vec<(usize, u32, f64)>>,
     /// Scroll offset for the Blast tab TOP IMPACT list
     pub blast_impact_scroll: usize,
+    /// Number of snapshots skipped during initial load due to corruption
+    pub skipped_snapshot_count: usize,
+    /// Whether the current snapshot required legacy artifact recomputation
+    pub legacy_snapshot_recomputed: bool,
 }
 
 struct GraphRenderCache {
@@ -166,39 +192,41 @@ struct GraphRenderCache {
     sorted_edge_indices: Vec<usize>,
 }
 
+struct ResolvedSnapshotAnalysis {
+    drift: Option<DriftScore>,
+    blast_radius: Option<BlastRadiusReport>,
+    instability_metrics: Vec<(String, f64, usize, usize)>,
+    diagnostics: Vec<String>,
+    legacy_recomputed: bool,
+}
+
 impl App {
-    pub fn new(db: Option<Database>, snapshots: Vec<GraphSnapshot>) -> Self {
-        // ... (existing constructor logic) ...
-        let timeline_commits: Vec<(String, String, i64)> = snapshots
+    pub fn new(
+        db: Option<Database>,
+        repo_id: String,
+        snapshots_metadata: Vec<SnapshotMetadata>,
+        initial_snapshot: Option<GraphSnapshot>,
+    ) -> Self {
+        let timeline_commits: Vec<(String, String, i64)> = snapshots_metadata
             .iter()
-            .map(|s| (s.commit_hash.clone(), String::new(), s.timestamp))
+            .map(|meta| (meta.commit_hash.clone(), String::new(), meta.timestamp))
             .collect();
 
         let timeline = TimelineState::new(timeline_commits);
-
-        let snapshots_metadata: Vec<SnapshotMetadata> = snapshots
-            .iter()
-            .map(|s| SnapshotMetadata {
-                commit_hash: s.commit_hash.clone(),
-                timestamp: s.timestamp,
-                drift: s.drift.clone(),
-            })
-            .collect();
-
-        let mut snapshot_cache = HashMap::new();
-        for s in snapshots {
-            snapshot_cache.insert(s.commit_hash.clone(), s);
+        let mut snapshot_cache = LruCache::new(NonZeroUsize::new(8).expect("non-zero cache size"));
+        if let Some(snapshot) = initial_snapshot {
+            snapshot_cache.put(snapshot.commit_hash.clone(), snapshot);
         }
 
-        let (labels, edges, weights) = if let Some(first_meta) = snapshots_metadata.first() {
-            if let Some(first) = snapshot_cache.get(&first_meta.commit_hash) {
-                snapshot_to_layout_data(first)
-            } else {
-                (vec![], vec![], vec![])
-            }
-        } else {
-            (vec![], vec![], vec![])
-        };
+        let (labels, edges, weights, internal_node_indices) = snapshots_metadata
+            .first()
+            .and_then(|first_meta| snapshot_cache.peek(&first_meta.commit_hash))
+            .map(|first| {
+                let (labels, edges, weights) = snapshot_to_layout_data(first);
+                let internal = snapshot_internal_nodes(first, &labels);
+                (labels, edges, weights, internal)
+            })
+            .unwrap_or_else(|| (vec![], vec![], vec![], HashSet::new()));
 
         let graph_layout = GraphLayout::new(labels, edges, weights, 500.0, 500.0);
         let current_drift = snapshots_metadata.first().and_then(|m| m.drift.clone());
@@ -207,6 +235,7 @@ impl App {
 
         let mut app = Self {
             db,
+            repo_id,
             graph_layout,
             timeline,
             snapshots_metadata,
@@ -234,7 +263,12 @@ impl App {
             graph_pan_y: 0.0,
             dragging_pan: false,
             last_mouse_pos: None,
+            pending_graph_focus: false,
             render_cache: None,
+            architecture_map: None,
+            internal_node_indices,
+            selected_cluster: None,
+            hovered_cluster: None,
             loading_hash: None,
             brittle_packages: Vec::new(),
             hotspots_state: ratatui::widgets::TableState::default(),
@@ -243,7 +277,7 @@ impl App {
             // New TUI redesign fields
             focused_panel: FocusedPanel::Graph,
             nav_stack: vec![ViewContext::Overview],
-            insight_tab: InsightTab::Health,
+            insight_tab: InsightTab::Overview,
             show_help: false,
             sidebar_visible: true,
             insights_visible: true,
@@ -254,20 +288,27 @@ impl App {
             insights_panel_width: 36,
             insights_area: Rect::default(),
             resizing_insights: false,
+            effective_sidebar_visible: true,
+            effective_insights_visible: true,
             advisory_lines: Vec::new(),
             scoring_config: ScoringConfig::default(),
+            clustering_config: ClusteringConfig::default(),
             // Blast radius cartography
             blast_overlay_active: false,
             current_blast_radius: None,
             node_blast_scores: Vec::new(),
             cascade_highlight: None,
             blast_impact_scroll: 0,
+            skipped_snapshot_count: 0,
+            legacy_snapshot_recomputed: false,
         };
 
         if let Some(first_meta) = app.snapshots_metadata.first() {
             let hash = first_meta.commit_hash.clone();
             app.refresh_render_cache(&hash);
             app.compute_insights();
+            app.sync_sidebar_selection();
+            app.focus_current_graph_view();
         }
 
         app
@@ -275,58 +316,49 @@ impl App {
 
     /// Computes architectural insights like instability for the current graph.
     pub fn compute_insights(&mut self) {
-        // Build a temporary petgraph from current layout to run metrics
-        let mut g: DiGraph<String, u32> = DiGraph::new();
-        let mut node_map = HashMap::new();
-        for label in &self.graph_layout.labels {
-            node_map.insert(label.clone(), g.add_node(label.clone()));
-        }
-        for (idx, &(from, to)) in self.graph_layout.edges.iter().enumerate() {
-            if from < self.graph_layout.labels.len() && to < self.graph_layout.labels.len() {
-                let from_n = &self.graph_layout.labels[from];
-                let to_n = &self.graph_layout.labels[to];
-                let weight = self
-                    .graph_layout
-                    .edge_weights
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(1);
-                g.add_edge(node_map[from_n], node_map[to_n], weight);
-            }
-        }
-        let metrics = scoring::compute_instability_metrics(&g);
-        self.brittle_packages = metrics;
-        self.apply_hotspots_sort();
-
-        // Compute component diagnostics for advisory display
-        if let Some(ref drift) = self.current_drift {
-            self.advisory_lines = scoring::generate_diagnostics(&g, drift, &self.scoring_config);
-        } else {
-            self.advisory_lines.clear();
-        }
-
-        // Compute blast radius for current graph
-        let blast_report = blast_radius::compute_blast_radius_report(
-            &g,
-            self.scoring_config.thresholds.blast_max_critical_paths,
+        self.architecture_map = ArchitectureMap::build(
+            &self.graph_layout.labels,
+            &self.graph_layout.edges,
+            &self.graph_layout.edge_weights,
+            Some(&self.internal_node_indices),
+            &self.clustering_config,
         );
 
-        // Map blast scores to layout indices for rendering
-        self.node_blast_scores = self
-            .graph_layout
-            .labels
-            .iter()
-            .map(|label| {
-                blast_report
-                    .impacts
-                    .iter()
-                    .find(|m| m.module_name == *label)
-                    .map(|m| m.blast_score)
-                    .unwrap_or(0.0)
-            })
-            .collect();
+        let Some(snapshot) = self.current_snapshot().cloned() else {
+            self.current_drift = None;
+            self.brittle_packages.clear();
+            self.advisory_lines.clear();
+            self.current_blast_radius = None;
+            self.node_blast_scores.clear();
+            self.legacy_snapshot_recomputed = false;
+            return;
+        };
 
-        self.current_blast_radius = Some(blast_report);
+        let resolved = self.resolve_snapshot_analysis(&snapshot);
+        self.current_drift = resolved.drift;
+        self.brittle_packages = resolved.instability_metrics;
+        self.apply_hotspots_sort();
+        self.advisory_lines = resolved.diagnostics;
+        self.legacy_snapshot_recomputed = resolved.legacy_recomputed;
+        self.current_blast_radius = resolved.blast_radius;
+        self.node_blast_scores = self
+            .current_blast_radius
+            .as_ref()
+            .map(|blast_report| {
+                self.graph_layout
+                    .labels
+                    .iter()
+                    .map(|label| {
+                        blast_report
+                            .impacts
+                            .iter()
+                            .find(|m| m.module_name == *label)
+                            .map(|m| m.blast_score)
+                            .unwrap_or(0.0)
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![0.0; self.graph_layout.labels.len()]);
         self.cascade_highlight = None;
         self.blast_impact_scroll = 0;
     }
@@ -444,7 +476,7 @@ impl App {
         let hash = meta.commit_hash.clone();
 
         // Clone from cache to avoid borrow checker conflicts
-        let cached_snapshot = self.snapshot_cache.get(&hash).cloned();
+        let cached_snapshot = self.snapshot_cache.peek(&hash).cloned();
 
         if let Some(snapshot) = cached_snapshot {
             self.apply_snapshot(&snapshot);
@@ -456,12 +488,17 @@ impl App {
 
     fn apply_snapshot(&mut self, snapshot: &GraphSnapshot) {
         let (labels, edges, weights) = snapshot_to_layout_data(snapshot);
+        self.internal_node_indices = snapshot_internal_nodes(snapshot, &labels);
         self.graph_layout.update_graph(labels, edges, weights);
-        self.current_drift = snapshot.drift.clone();
         self.refresh_render_cache(&snapshot.commit_hash);
         self.compute_insights();
         self.dragging_node = None;
         self.hovered_node = None;
+        self.hovered_cluster = None;
+        self.selected_cluster = None;
+        self.active_view = ActiveView::Dashboard;
+        self.nav_stack = vec![ViewContext::Overview];
+        self.selected_pkg_index = None;
         self.pkg_scroll_offset = 0;
         for pos in &mut self.graph_layout.positions {
             pos.prev_x = pos.x;
@@ -472,6 +509,8 @@ impl App {
         self.graph_layout.multi_step(steps);
         self.graph_layout.center_layout();
         self.graph_layout.temperature = 0.01;
+        self.sync_sidebar_selection();
+        self.focus_current_graph_view();
     }
 
     pub fn next_commit(&mut self) {
@@ -542,6 +581,12 @@ impl App {
         {
             self.nav_stack.pop();
         }
+        if let Some(last) = self.nav_stack.last()
+            && matches!(last, ViewContext::PackageDetail(_))
+            && matches!(ctx, ViewContext::PackageDetail(_))
+        {
+            self.nav_stack.pop();
+        }
         self.nav_stack.push(ctx);
     }
 
@@ -551,13 +596,22 @@ impl App {
             self.nav_stack.pop();
             // Sync active_view for graph rendering compatibility
             match self.current_view() {
-                ViewContext::Overview | ViewContext::PackageDetail(_) => {
+                ViewContext::Overview => {
+                    self.active_view = ActiveView::Dashboard;
+                    self.selected_cluster = None;
+                    self.hovered_cluster = None;
+                    self.selected_pkg_index = None;
+                    self.pkg_scroll_offset = 0;
+                }
+                ViewContext::PackageDetail(_) => {
                     self.active_view = ActiveView::Dashboard;
                 }
                 ViewContext::ModuleInspect(name) => {
                     self.active_view = ActiveView::Inspect(name.clone());
                 }
             }
+            self.sync_sidebar_selection();
+            self.focus_current_graph_view();
             true
         } else {
             false
@@ -569,7 +623,7 @@ impl App {
         self.focused_panel = match self.focused_panel {
             FocusedPanel::Packages => FocusedPanel::Graph,
             FocusedPanel::Graph => {
-                if self.insights_visible {
+                if self.effective_insights_visible {
                     FocusedPanel::Insights
                 } else {
                     FocusedPanel::Timeline
@@ -577,7 +631,7 @@ impl App {
             }
             FocusedPanel::Insights => FocusedPanel::Timeline,
             FocusedPanel::Timeline => {
-                if self.sidebar_visible {
+                if self.effective_sidebar_visible {
                     FocusedPanel::Packages
                 } else {
                     FocusedPanel::Graph
@@ -591,7 +645,7 @@ impl App {
         self.focused_panel = match self.focused_panel {
             FocusedPanel::Packages => FocusedPanel::Timeline,
             FocusedPanel::Graph => {
-                if self.sidebar_visible {
+                if self.effective_sidebar_visible {
                     FocusedPanel::Packages
                 } else {
                     FocusedPanel::Timeline
@@ -599,13 +653,24 @@ impl App {
             }
             FocusedPanel::Insights => FocusedPanel::Graph,
             FocusedPanel::Timeline => {
-                if self.insights_visible {
+                if self.effective_insights_visible {
                     FocusedPanel::Insights
                 } else {
                     FocusedPanel::Graph
                 }
             }
         };
+    }
+
+    fn sync_visible_panels(&mut self, sidebar: bool, insights: bool) {
+        self.effective_sidebar_visible = sidebar;
+        self.effective_insights_visible = insights;
+
+        if (matches!(self.focused_panel, FocusedPanel::Packages) && !sidebar)
+            || (matches!(self.focused_panel, FocusedPanel::Insights) && !insights)
+        {
+            self.focused_panel = FocusedPanel::Graph;
+        }
     }
 
     /// Compute the set of visible node indices for the current inspect/filter state.
@@ -652,6 +717,387 @@ impl App {
         }
     }
 
+    fn should_show_architecture_overview(&self) -> bool {
+        self.selected_cluster.is_none()
+            && !matches!(self.active_view, ActiveView::Inspect(_))
+            && self.architecture_map.is_some()
+    }
+
+    fn reset_graph_viewport(&mut self) {
+        self.graph_scale = 1.0;
+        self.graph_pan_x = 0.0;
+        self.graph_pan_y = 0.0;
+    }
+
+    fn focus_current_graph_view(&mut self) {
+        self.reset_graph_viewport();
+        self.pending_graph_focus = true;
+        if self.selected_cluster.is_none() && !self.should_show_architecture_overview() {
+            self.graph_layout.center_layout();
+        }
+    }
+
+    fn apply_pending_graph_focus(
+        &mut self,
+        canvas_w: f64,
+        canvas_h: f64,
+        center_idx: Option<usize>,
+    ) {
+        if !self.pending_graph_focus {
+            return;
+        }
+        self.pending_graph_focus = false;
+
+        let Some(center_idx) = center_idx else {
+            return;
+        };
+        let Some(pos) = self.graph_layout.positions.get(center_idx) else {
+            return;
+        };
+
+        let visible_w = canvas_w.max(1.0) / self.graph_scale.max(0.1);
+        let visible_h = canvas_h.max(1.0) / self.graph_scale.max(0.1);
+        self.graph_pan_x = pos.x - visible_w / 2.0;
+        self.graph_pan_y = pos.y - visible_h / 2.0;
+    }
+
+    fn node_total_weight(&self, node_id: usize) -> u32 {
+        self.graph_layout
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(edge_idx, &(from, to))| {
+                if from == node_id || to == node_id {
+                    Some(
+                        self.graph_layout
+                            .edge_weights
+                            .get(edge_idx)
+                            .copied()
+                            .unwrap_or(1),
+                    )
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
+    fn set_selected_sidebar_index(&mut self, idx: usize) {
+        self.selected_pkg_index = Some(idx);
+        self.sync_sidebar_selection();
+    }
+
+    fn sidebar_visible_capacity(&self, total_entries: usize) -> usize {
+        let inner_rows = self.pkg_area.height.saturating_sub(2) as usize;
+        if inner_rows == 0 {
+            0
+        } else if total_entries > inner_rows {
+            inner_rows.saturating_sub(1).max(1)
+        } else {
+            inner_rows
+        }
+    }
+
+    fn normalize_sidebar_scroll(&mut self, total_entries: usize) {
+        let visible_capacity = self.sidebar_visible_capacity(total_entries);
+        if visible_capacity == 0 || total_entries <= visible_capacity {
+            self.pkg_scroll_offset = 0;
+            return;
+        }
+
+        let max_offset = total_entries.saturating_sub(visible_capacity);
+        self.pkg_scroll_offset = self.pkg_scroll_offset.min(max_offset);
+    }
+
+    fn ensure_sidebar_index_visible(&mut self, idx: usize, total_entries: usize) {
+        let visible_capacity = self.sidebar_visible_capacity(total_entries);
+        if visible_capacity == 0 || total_entries <= visible_capacity {
+            self.pkg_scroll_offset = 0;
+            return;
+        }
+
+        if idx < self.pkg_scroll_offset {
+            self.pkg_scroll_offset = idx;
+        } else if idx >= self.pkg_scroll_offset + visible_capacity {
+            self.pkg_scroll_offset = idx.saturating_sub(visible_capacity.saturating_sub(1));
+        }
+        self.normalize_sidebar_scroll(total_entries);
+    }
+
+    fn open_member_inspect(&mut self, node_id: usize) {
+        let Some(label) = self.graph_layout.labels.get(node_id).cloned() else {
+            return;
+        };
+
+        self.hovered_node = Some(node_id);
+        self.active_view = ActiveView::Inspect(label.clone());
+        self.push_view(ViewContext::ModuleInspect(label));
+        self.focus_current_graph_view();
+    }
+
+    fn sync_active_inspect_with_sidebar(&mut self) {
+        if self.blast_overlay_active || !matches!(self.active_view, ActiveView::Inspect(_)) {
+            return;
+        }
+
+        if let Some(node_id) = self.selected_sidebar_member() {
+            self.open_member_inspect(node_id);
+        }
+    }
+
+    fn sync_sidebar_selection(&mut self) {
+        let entries = self.sidebar_entries();
+        if entries.is_empty() {
+            self.selected_pkg_index = None;
+            self.hovered_node = None;
+            self.hovered_cluster = None;
+            self.pkg_scroll_offset = 0;
+            return;
+        }
+
+        let preferred_idx = if let Some(cluster_id) = self.hovered_cluster {
+            entries.iter().position(|entry| match entry {
+                SidebarEntry::Cluster { id, .. } => *id == cluster_id,
+                SidebarEntry::Member { .. } => false,
+            })
+        } else if let Some(node_id) = self.hovered_node {
+            entries.iter().position(|entry| match entry {
+                SidebarEntry::Member { id, .. } => *id == node_id,
+                SidebarEntry::Cluster { .. } => false,
+            })
+        } else {
+            None
+        };
+
+        let idx = self
+            .selected_pkg_index
+            .or(preferred_idx)
+            .unwrap_or(0)
+            .min(entries.len() - 1);
+        self.selected_pkg_index = Some(idx);
+        self.ensure_sidebar_index_visible(idx, entries.len());
+
+        match &entries[idx] {
+            SidebarEntry::Cluster { id, .. } => {
+                self.hovered_cluster = Some(*id);
+                self.hovered_node = None;
+            }
+            SidebarEntry::Member { id, .. } => {
+                self.hovered_node = Some(*id);
+                self.hovered_cluster = self.selected_cluster;
+            }
+        }
+
+        self.sync_active_inspect_with_sidebar();
+    }
+
+    fn sidebar_entries(&self) -> Vec<SidebarEntry> {
+        let filter = self.filter_text.to_lowercase();
+        let overview_mode = self.should_show_architecture_overview();
+        let mut entries = if overview_mode {
+            self.architecture_map
+                .as_ref()
+                .map(|map| {
+                    let mut clusters = map.clusters.iter().collect::<Vec<_>>();
+                    clusters.sort_by(|a, b| {
+                        cluster_overview_rank(b)
+                            .cmp(&cluster_overview_rank(a))
+                            .then_with(|| a.name.cmp(&b.name))
+                    });
+                    clusters
+                        .into_iter()
+                        .map(|cluster| SidebarEntry::Cluster {
+                            id: cluster.id,
+                            label: format!("{} ({})", cluster.name, cluster.members.len()),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else if let Some(cluster_id) = self.selected_cluster {
+            self.architecture_map
+                .as_ref()
+                .and_then(|map| map.clusters.get(cluster_id))
+                .map(|cluster| {
+                    let mut members = cluster
+                        .members
+                        .iter()
+                        .filter_map(|&member| {
+                            self.graph_layout
+                                .labels
+                                .get(member)
+                                .map(|label| SidebarEntry::Member {
+                                    id: member,
+                                    label: label.clone(),
+                                })
+                        })
+                        .collect::<Vec<_>>();
+
+                    members.sort_by(|a, b| match (a, b) {
+                        (
+                            SidebarEntry::Member {
+                                id: a_id,
+                                label: a_label,
+                            },
+                            SidebarEntry::Member {
+                                id: b_id,
+                                label: b_label,
+                            },
+                        ) => {
+                            let a_internal = self.internal_node_indices.contains(a_id);
+                            let b_internal = self.internal_node_indices.contains(b_id);
+                            b_internal
+                                .cmp(&a_internal)
+                                .then_with(|| {
+                                    self.node_total_weight(*b_id)
+                                        .cmp(&self.node_total_weight(*a_id))
+                                })
+                                .then_with(|| a_label.cmp(b_label))
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    });
+                    members
+                })
+                .unwrap_or_default()
+        } else {
+            self.graph_layout
+                .labels
+                .iter()
+                .enumerate()
+                .map(|(idx, label)| SidebarEntry::Member {
+                    id: idx,
+                    label: label.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if self.selected_cluster.is_none() && !overview_mode {
+            entries.sort_by(|a, b| {
+                sidebar_label(a)
+                    .to_lowercase()
+                    .cmp(&sidebar_label(b).to_lowercase())
+            });
+        }
+        if filter.is_empty() {
+            entries
+        } else if overview_mode {
+            entries
+                .into_iter()
+                .filter(|entry| match entry {
+                    SidebarEntry::Cluster { id, label } => {
+                        label.to_lowercase().contains(&filter)
+                            || self
+                                .architecture_map
+                                .as_ref()
+                                .and_then(|map| map.clusters.get(*id))
+                                .is_some_and(|cluster| {
+                                    cluster.members.iter().any(|member| {
+                                        self.graph_layout.labels[*member]
+                                            .to_lowercase()
+                                            .contains(&filter)
+                                    })
+                                })
+                    }
+                    SidebarEntry::Member { label, .. } => label.to_lowercase().contains(&filter),
+                })
+                .collect()
+        } else {
+            entries
+                .into_iter()
+                .filter(|entry| sidebar_label(entry).to_lowercase().contains(&filter))
+                .collect()
+        }
+    }
+
+    fn sidebar_title(&self, shown: usize) -> String {
+        if self.should_show_architecture_overview() {
+            let total = self
+                .architecture_map
+                .as_ref()
+                .map(|map| map.clusters.len())
+                .unwrap_or(0);
+            if shown < total {
+                format!(" Clusters ({}/{}) ", shown, total)
+            } else {
+                format!(" Clusters ({}) ", total)
+            }
+        } else if let Some(cluster_id) = self.selected_cluster {
+            let (name, total) = self
+                .architecture_map
+                .as_ref()
+                .and_then(|map| map.clusters.get(cluster_id))
+                .map(|cluster| (cluster.name.clone(), cluster.members.len()))
+                .unwrap_or_else(|| ("Cluster".to_string(), 0));
+            if shown < total {
+                format!(" Members: {} ({}/{}) ", name, shown, total)
+            } else {
+                format!(" Members: {} ({}) ", name, total)
+            }
+        } else {
+            let total = self.graph_layout.labels.len();
+            if shown < total {
+                format!(" Packages ({}/{}) ", shown, total)
+            } else {
+                format!(" Packages ({}) ", total)
+            }
+        }
+    }
+
+    fn selected_sidebar_member(&self) -> Option<usize> {
+        if self.selected_cluster.is_none() {
+            return self.selected_pkg_index.and_then(|idx| {
+                self.sidebar_entries()
+                    .get(idx)
+                    .and_then(|entry| match entry {
+                        SidebarEntry::Member { id, .. } => Some(*id),
+                        SidebarEntry::Cluster { .. } => None,
+                    })
+            });
+        }
+
+        self.selected_pkg_index
+            .and_then(|idx| {
+                self.sidebar_entries()
+                    .get(idx)
+                    .and_then(|entry| match entry {
+                        SidebarEntry::Member { id, .. } => Some(*id),
+                        SidebarEntry::Cluster { .. } => None,
+                    })
+            })
+            .or_else(|| {
+                self.selected_cluster.and_then(|cluster_id| {
+                    self.architecture_map
+                        .as_ref()
+                        .and_then(|map| map.clusters.get(cluster_id))
+                        .and_then(|cluster| cluster.members.first().copied())
+                })
+            })
+    }
+
+    fn enter_cluster_detail(&mut self, cluster_id: usize) {
+        let Some(map) = &self.architecture_map else {
+            return;
+        };
+        let Some(cluster) = map.clusters.get(cluster_id) else {
+            return;
+        };
+
+        self.selected_cluster = Some(cluster_id);
+        self.hovered_cluster = Some(cluster_id);
+        self.active_view = ActiveView::Dashboard;
+        self.selected_pkg_index = None;
+        self.pkg_scroll_offset = 0;
+        self.hovered_node = cluster.members.iter().copied().max_by(|a, b| {
+            let a_anchor = app_label_match(&self.graph_layout.labels[*a], &cluster.anchor_label);
+            let b_anchor = app_label_match(&self.graph_layout.labels[*b], &cluster.anchor_label);
+            a_anchor
+                .cmp(&b_anchor)
+                .then_with(|| self.node_total_weight(*a).cmp(&self.node_total_weight(*b)))
+        });
+        self.push_view(ViewContext::PackageDetail(cluster.name.clone()));
+        self.sync_sidebar_selection();
+        self.focus_current_graph_view();
+    }
+
     /// Set repo name for breadcrumb display
     pub fn set_repo_name(&mut self, name: String) {
         self.repo_name = name;
@@ -659,17 +1105,237 @@ impl App {
 
     pub fn set_scoring_config(&mut self, config: ScoringConfig) {
         self.scoring_config = config;
+        self.compute_insights();
+        self.sync_sidebar_selection();
+    }
+
+    pub fn set_clustering_config(&mut self, config: ClusteringConfig) {
+        self.clustering_config = config;
+        self.compute_insights();
+        self.sync_sidebar_selection();
+    }
+
+    pub fn set_skipped_snapshot_count(&mut self, count: usize) {
+        self.skipped_snapshot_count = count;
+    }
+
+    fn current_snapshot(&self) -> Option<&GraphSnapshot> {
+        self.snapshots_metadata
+            .get(self.timeline.current_index)
+            .and_then(|meta| self.snapshot_cache.peek(&meta.commit_hash))
+    }
+
+    fn previous_snapshot_graph(&self) -> Option<DiGraph<String, u32>> {
+        let prev_hash = self
+            .snapshots_metadata
+            .get(self.timeline.current_index + 1)
+            .map(|meta| meta.commit_hash.clone())?;
+
+        let snapshot = self.snapshot_cache.peek(&prev_hash).cloned().or_else(|| {
+            self.db.as_ref().and_then(|db| {
+                db.get_graph_snapshot(&self.repo_id, &prev_hash)
+                    .ok()
+                    .flatten()
+            })
+        })?;
+
+        let nodes: HashSet<String> = snapshot.nodes.into_iter().collect();
+        Some(graph_builder::build_graph(&nodes, &snapshot.edges))
+    }
+
+    fn current_metric_graph(&self) -> Option<DiGraph<String, u32>> {
+        let snapshot = self.current_snapshot()?;
+        let nodes: HashSet<String> = snapshot.nodes.iter().cloned().collect();
+        Some(graph_builder::build_graph(&nodes, &snapshot.edges))
+    }
+
+    fn resolve_snapshot_analysis(&self, snapshot: &GraphSnapshot) -> ResolvedSnapshotAnalysis {
+        if snapshot.requires_core_recompute() {
+            let nodes: HashSet<String> = snapshot.nodes.iter().cloned().collect();
+            let prev_graph = self.previous_snapshot_graph();
+            let artifacts = analysis::build_snapshot_artifacts(
+                &nodes,
+                &snapshot.edges,
+                prev_graph.as_ref(),
+                snapshot.timestamp,
+                &self.scoring_config,
+                analysis::SnapshotAnalysisDetail::Core,
+            );
+            let drift = artifacts.drift.clone();
+
+            return ResolvedSnapshotAnalysis {
+                drift: Some(drift.clone()),
+                blast_radius: snapshot.blast_radius.clone(),
+                instability_metrics: scoring::compute_instability_metrics(&artifacts.graph)
+                    .into_iter()
+                    .map(|metric| (metric.0, metric.1, metric.2, metric.3))
+                    .collect(),
+                diagnostics: scoring::generate_diagnostics(
+                    &artifacts.graph,
+                    &drift,
+                    &self.scoring_config,
+                ),
+                legacy_recomputed: true,
+            };
+        }
+
+        if snapshot.needs_runtime_insights() {
+            let nodes: HashSet<String> = snapshot.nodes.iter().cloned().collect();
+            let graph = graph_builder::build_graph(&nodes, &snapshot.edges);
+            let drift = snapshot.drift.clone();
+            let instability_metrics = scoring::compute_instability_metrics(&graph)
+                .into_iter()
+                .map(|metric| (metric.0, metric.1, metric.2, metric.3))
+                .collect();
+            let diagnostics = drift
+                .as_ref()
+                .map(|drift| scoring::generate_diagnostics(&graph, drift, &self.scoring_config))
+                .unwrap_or_default();
+
+            return ResolvedSnapshotAnalysis {
+                drift,
+                blast_radius: snapshot.blast_radius.clone(),
+                instability_metrics,
+                diagnostics,
+                legacy_recomputed: true,
+            };
+        }
+
+        ResolvedSnapshotAnalysis {
+            drift: snapshot.drift.clone(),
+            blast_radius: snapshot.blast_radius.clone(),
+            instability_metrics: snapshot
+                .instability_metrics
+                .iter()
+                .map(|metric| {
+                    (
+                        metric.module_name.clone(),
+                        metric.instability,
+                        metric.fan_in,
+                        metric.fan_out,
+                    )
+                })
+                .collect(),
+            diagnostics: snapshot.diagnostics.clone(),
+            legacy_recomputed: false,
+        }
+    }
+
+    fn ensure_current_blast_radius(&mut self) -> bool {
+        if self.current_blast_radius.is_some() {
+            return true;
+        }
+
+        let Some(snapshot) = self.current_snapshot().cloned() else {
+            return false;
+        };
+        let nodes: HashSet<String> = snapshot.nodes.iter().cloned().collect();
+        let graph = graph_builder::build_graph(&nodes, &snapshot.edges);
+        let blast_report = blast_radius::compute_blast_radius_report(
+            &graph,
+            self.scoring_config.thresholds.blast_max_critical_paths,
+        );
+
+        self.node_blast_scores = self
+            .graph_layout
+            .labels
+            .iter()
+            .map(|label| {
+                blast_report
+                    .impacts
+                    .iter()
+                    .find(|m| m.module_name == *label)
+                    .map(|m| m.blast_score)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        self.current_blast_radius = Some(blast_report.clone());
+        if let Some(cached) = self.snapshot_cache.get_mut(&snapshot.commit_hash) {
+            cached.blast_radius = Some(blast_report);
+        }
+        true
+    }
+
+    fn current_scan_metadata(&self) -> Option<&crate::models::ScanMetadata> {
+        self.current_snapshot().and_then(|snapshot| {
+            if snapshot.scan_metadata.external_min_importers > 0 {
+                Some(&snapshot.scan_metadata)
+            } else {
+                None
+            }
+        })
     }
 
     /// Get sorted and filtered package list for sidebar
     pub fn get_sorted_packages(&self) -> Vec<String> {
-        let mut sorted: Vec<String> = self.graph_layout.labels.clone();
-        sorted.sort_by_key(|a| a.to_lowercase());
-        if !self.filter_text.is_empty() {
-            let q = self.filter_text.to_lowercase();
-            sorted.retain(|s| s.to_lowercase().contains(&q));
+        self.sidebar_entries()
+            .into_iter()
+            .map(|entry| sidebar_label(&entry).to_string())
+            .collect()
+    }
+
+    fn context_advisory_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+
+        if let Some(node_id) = self.selected_sidebar_member()
+            && matches!(self.active_view, ActiveView::Inspect(_))
+        {
+            let label = self
+                .graph_layout
+                .labels
+                .get(node_id)
+                .cloned()
+                .unwrap_or_default();
+            let mut inbound = 0u32;
+            let mut outbound = 0u32;
+            for (edge_idx, &(from, to)) in self.graph_layout.edges.iter().enumerate() {
+                let weight = self
+                    .graph_layout
+                    .edge_weights
+                    .get(edge_idx)
+                    .copied()
+                    .unwrap_or(1);
+                if to == node_id {
+                    inbound += weight;
+                }
+                if from == node_id {
+                    outbound += weight;
+                }
+            }
+            lines.push(format!(
+                "Inspecting `{}` with {} incoming and {} outgoing dependency weight.",
+                label, inbound, outbound
+            ));
+            if let Some(cluster_id) = self.selected_cluster
+                && let Some(map) = &self.architecture_map
+                && let Some(cluster) = map.clusters.get(cluster_id)
+            {
+                lines.push(format!("Scoped inside cluster `{}`.", cluster.name));
+            }
+        } else if let Some(cluster_id) = self.selected_cluster
+            && let Some(map) = &self.architecture_map
+            && let Some(cluster) = map.clusters.get(cluster_id)
+        {
+            lines.push(format!(
+                "Cluster `{}` is a {} with {} members.",
+                cluster.name,
+                cluster_summary_type_label(cluster),
+                cluster.members.len()
+            ));
+            lines.push(format!(
+                "Incoming links: {}. Outgoing links: {}. Internal links: {}.",
+                cluster.inbound_weight, cluster.outbound_weight, cluster.internal_weight
+            ));
+            if cluster.inbound_weight == 0 && cluster.outbound_weight == 0 {
+                lines.push("This cluster is isolated from the rest of the map.".to_string());
+            }
+            let note = cluster_summary_note(cluster);
+            if !note.is_empty() {
+                lines.push(note.to_string());
+            }
         }
-        sorted
+
+        lines
     }
 
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -679,10 +1345,14 @@ impl App {
                 KeyCode::Esc => {
                     self.filter_active = false;
                     self.filter_text.clear();
+                    self.sync_sidebar_selection();
+                    self.focus_current_graph_view();
                 }
                 KeyCode::Enter => {
                     self.filter_active = false;
                     // Keep filter_text active (shown as badge)
+                    self.sync_sidebar_selection();
+                    self.focus_current_graph_view();
                 }
                 KeyCode::Backspace => {
                     self.filter_text.pop();
@@ -738,7 +1408,7 @@ impl App {
                 return;
             }
             KeyCode::Char('1') => {
-                if self.sidebar_visible {
+                if self.effective_sidebar_visible {
                     self.focused_panel = FocusedPanel::Packages;
                 }
                 return;
@@ -748,7 +1418,7 @@ impl App {
                 return;
             }
             KeyCode::Char('3') => {
-                if self.insights_visible {
+                if self.effective_insights_visible {
                     self.focused_panel = FocusedPanel::Insights;
                 }
                 return;
@@ -777,7 +1447,9 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.blast_overlay_active = !self.blast_overlay_active;
-                if !self.blast_overlay_active {
+                if self.blast_overlay_active {
+                    self.ensure_current_blast_radius();
+                } else {
                     self.cascade_highlight = None;
                 }
                 return;
@@ -793,6 +1465,8 @@ impl App {
                     self.cascade_highlight = None;
                 } else if !self.filter_text.is_empty() {
                     self.filter_text.clear();
+                    self.sync_sidebar_selection();
+                    self.focus_current_graph_view();
                 } else if self.nav_stack.len() > 1 {
                     self.pop_view();
                 } else if self.hotspots_state.selected().is_some() {
@@ -833,65 +1507,61 @@ impl App {
     }
 
     fn handle_packages_key(&mut self, code: KeyCode) {
-        let pkgs = self.get_sorted_packages();
+        let entries = self.sidebar_entries();
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if pkgs.is_empty() {
+                if entries.is_empty() {
                     return;
                 }
-                self.selected_pkg_index = Some(
-                    self.selected_pkg_index
-                        .map(|i| (i + 1).min(pkgs.len() - 1))
-                        .unwrap_or(0),
-                );
-                // Scroll to keep selection visible
-                if let Some(idx) = self.selected_pkg_index
-                    && idx >= self.pkg_scroll_offset + 20
-                {
-                    self.pkg_scroll_offset = idx.saturating_sub(19);
-                }
+                let next = self
+                    .selected_pkg_index
+                    .map(|i| (i + 1).min(entries.len() - 1))
+                    .unwrap_or(0);
+                self.selected_pkg_index = Some(next);
+                self.ensure_sidebar_index_visible(next, entries.len());
+                self.sync_sidebar_selection();
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if pkgs.is_empty() {
+                if entries.is_empty() {
                     return;
                 }
-                self.selected_pkg_index = Some(
-                    self.selected_pkg_index
-                        .map(|i| i.saturating_sub(1))
-                        .unwrap_or(0),
-                );
-                if let Some(idx) = self.selected_pkg_index
-                    && idx < self.pkg_scroll_offset
-                {
-                    self.pkg_scroll_offset = idx;
-                }
+                let next = self
+                    .selected_pkg_index
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0);
+                self.selected_pkg_index = Some(next);
+                self.ensure_sidebar_index_visible(next, entries.len());
+                self.sync_sidebar_selection();
             }
             KeyCode::Char('g') => {
                 self.selected_pkg_index = Some(0);
                 self.pkg_scroll_offset = 0;
+                self.sync_sidebar_selection();
             }
             KeyCode::Char('G') => {
-                if !pkgs.is_empty() {
-                    self.selected_pkg_index = Some(pkgs.len() - 1);
-                    self.pkg_scroll_offset = pkgs.len().saturating_sub(20);
+                if !entries.is_empty() {
+                    self.selected_pkg_index = Some(entries.len() - 1);
+                    self.ensure_sidebar_index_visible(entries.len() - 1, entries.len());
+                    self.sync_sidebar_selection();
                 }
             }
             KeyCode::Enter => {
                 if let Some(idx) = self.selected_pkg_index
-                    && let Some(name) = pkgs.get(idx)
+                    && let Some(entry) = entries.get(idx)
                 {
-                    let name = name.clone();
-                    if self.blast_overlay_active {
-                        // In blast mode: compute cascade for the selected package
-                        if let Some(layout_idx) =
-                            self.graph_layout.labels.iter().position(|l| *l == name)
-                        {
-                            self.hovered_node = Some(layout_idx);
-                            self.compute_cascade_for_node(layout_idx);
+                    match entry {
+                        SidebarEntry::Cluster { id, .. } => {
+                            self.enter_cluster_detail(*id);
                         }
-                    } else {
-                        self.active_view = ActiveView::Inspect(name.clone());
-                        self.push_view(ViewContext::ModuleInspect(name));
+                        SidebarEntry::Member { id, .. } => {
+                            if self.blast_overlay_active {
+                                self.ensure_current_blast_radius();
+                                self.hovered_node = Some(*id);
+                                self.compute_cascade_for_node(*id);
+                            } else {
+                                self.open_member_inspect(*id);
+                            }
+                        }
                     }
                 }
             }
@@ -909,10 +1579,56 @@ impl App {
 
     fn handle_graph_key(&mut self, code: KeyCode) {
         match code {
+            KeyCode::Char('j') | KeyCode::Down
+                if self.should_show_architecture_overview()
+                    || (self.selected_cluster.is_some()
+                        && !matches!(self.active_view, ActiveView::Inspect(_))) =>
+            {
+                let entries = self.sidebar_entries();
+                if entries.is_empty() {
+                    return;
+                }
+                let idx = self
+                    .selected_pkg_index
+                    .map(|i| (i + 1).min(entries.len() - 1))
+                    .unwrap_or(0);
+                self.set_selected_sidebar_index(idx);
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if self.should_show_architecture_overview()
+                    || (self.selected_cluster.is_some()
+                        && !matches!(self.active_view, ActiveView::Inspect(_))) =>
+            {
+                let entries = self.sidebar_entries();
+                if entries.is_empty() {
+                    return;
+                }
+                let idx = self
+                    .selected_pkg_index
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0);
+                if idx < entries.len() {
+                    self.set_selected_sidebar_index(idx);
+                }
+            }
             KeyCode::Enter => {
-                if let Some(idx) = self.hovered_node {
+                if self.should_show_architecture_overview() {
+                    if let Some(cluster_id) = self.hovered_cluster.or_else(|| {
+                        self.selected_pkg_index.and_then(|idx| {
+                            self.sidebar_entries()
+                                .get(idx)
+                                .and_then(|entry| match entry {
+                                    SidebarEntry::Cluster { id, .. } => Some(*id),
+                                    SidebarEntry::Member { .. } => None,
+                                })
+                        })
+                    }) {
+                        self.enter_cluster_detail(cluster_id);
+                    }
+                } else if let Some(idx) = self.hovered_node {
                     if self.blast_overlay_active {
                         // In blast mode: compute cascade highlight for this node
+                        self.ensure_current_blast_radius();
                         self.compute_cascade_for_node(idx);
                     } else {
                         // Normal: inspect hovered node
@@ -920,12 +1636,13 @@ impl App {
                             let name = label.clone();
                             self.active_view = ActiveView::Inspect(name.clone());
                             self.push_view(ViewContext::ModuleInspect(name));
+                            self.focus_current_graph_view();
                         }
                     }
                 }
             }
             KeyCode::Char('c') => {
-                self.graph_layout.center_layout();
+                self.focus_current_graph_view();
             }
             _ => {}
         }
@@ -933,26 +1650,11 @@ impl App {
 
     /// Computes the single-node blast radius cascade for TUI overlay.
     fn compute_cascade_for_node(&mut self, layout_idx: usize) {
-        // Build a temporary petgraph from current layout
-        let mut g: DiGraph<String, u32> = DiGraph::new();
-        let mut node_map = HashMap::new();
-        for label in &self.graph_layout.labels {
-            node_map.insert(label.clone(), g.add_node(label.clone()));
-        }
-        for (idx, &(from, to)) in self.graph_layout.edges.iter().enumerate() {
-            if from < self.graph_layout.labels.len() && to < self.graph_layout.labels.len() {
-                let from_n = &self.graph_layout.labels[from];
-                let to_n = &self.graph_layout.labels[to];
-                let weight = self
-                    .graph_layout
-                    .edge_weights
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(1);
-                g.add_edge(node_map[from_n], node_map[to_n], weight);
-            }
-        }
-
+        let Some(g) = self.current_metric_graph() else {
+            return;
+        };
+        let node_map: HashMap<String, petgraph::graph::NodeIndex> =
+            g.node_indices().map(|idx| (g[idx].clone(), idx)).collect();
         let label = &self.graph_layout.labels[layout_idx];
         if let Some(&ni) = node_map.get(label) {
             let blast_nodes = blast_radius::compute_single_node_blast(&g, ni);
@@ -977,6 +1679,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => match self.insight_tab {
                 InsightTab::Hotspots => self.select_next_hotspot(),
                 InsightTab::Blast => {
+                    self.ensure_current_blast_radius();
                     let max = self
                         .current_blast_radius
                         .as_ref()
@@ -993,26 +1696,20 @@ impl App {
                 }
                 _ => {}
             },
-            KeyCode::Left | KeyCode::Char('[') => {
+            KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h') => {
                 self.insight_tab = match self.insight_tab {
-                    InsightTab::Health => InsightTab::Blast,
-                    InsightTab::Hotspots => InsightTab::Health,
-                    InsightTab::Trends => InsightTab::Hotspots,
-                    InsightTab::Blast => InsightTab::Trends,
+                    InsightTab::Overview => InsightTab::Blast,
+                    InsightTab::Hotspots => InsightTab::Overview,
+                    InsightTab::Blast => InsightTab::Hotspots,
                 };
             }
-            KeyCode::Right | KeyCode::Char(']') => {
+            KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l') => {
                 self.insight_tab = match self.insight_tab {
-                    InsightTab::Health => InsightTab::Hotspots,
-                    InsightTab::Hotspots => InsightTab::Trends,
-                    InsightTab::Trends => InsightTab::Blast,
-                    InsightTab::Blast => InsightTab::Health,
+                    InsightTab::Overview => InsightTab::Hotspots,
+                    InsightTab::Hotspots => InsightTab::Blast,
+                    InsightTab::Blast => InsightTab::Overview,
                 };
             }
-            KeyCode::Char('1') => self.insight_tab = InsightTab::Health,
-            KeyCode::Char('2') => self.insight_tab = InsightTab::Hotspots,
-            KeyCode::Char('3') => self.insight_tab = InsightTab::Trends,
-            KeyCode::Char('4') => self.insight_tab = InsightTab::Blast,
             KeyCode::Enter => match self.insight_tab {
                 InsightTab::Hotspots => {
                     if let Some(i) = self.hotspots_state.selected()
@@ -1021,10 +1718,12 @@ impl App {
                         let name = pkg.0.clone();
                         self.active_view = ActiveView::Inspect(name.clone());
                         self.push_view(ViewContext::ModuleInspect(name));
+                        self.focus_current_graph_view();
                     }
                 }
                 InsightTab::Blast => {
                     // Enter on Blast tab: compute cascade for the impact at scroll position
+                    self.ensure_current_blast_radius();
                     if let Some(br) = &self.current_blast_radius
                         && let Some(impact) = br.impacts.get(self.blast_impact_scroll)
                     {
@@ -1149,38 +1848,58 @@ impl App {
         }
 
         // Click on a package in the sidebar
-        let in_pkg = self
-            .pkg_area
-            .contains(ratatui::layout::Position::new(col, row))
-            && self.pkg_area.width > 0;
+        let pkg_inner = Rect {
+            x: self.pkg_area.x + 1,
+            y: self.pkg_area.y + 1,
+            width: self.pkg_area.width.saturating_sub(2),
+            height: self.pkg_area.height.saturating_sub(2),
+        };
+        let in_pkg =
+            pkg_inner.contains(ratatui::layout::Position::new(col, row)) && pkg_inner.width > 0;
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && in_pkg {
             self.focused_panel = FocusedPanel::Packages;
-            // 1 row offset for border (title is drawn on the border)
-            let row_offset = row.saturating_sub(self.pkg_area.y + 1) as usize;
+            let entries = self.sidebar_entries();
+            let row_offset = row.saturating_sub(pkg_inner.y) as usize;
+            let visible_capacity = self.sidebar_visible_capacity(entries.len());
+            let list_height = visible_capacity.min(pkg_inner.height as usize);
+            if row_offset >= list_height {
+                return;
+            }
+
             let clicked_idx = self.pkg_scroll_offset + row_offset;
-            let pkgs = self.get_sorted_packages();
-            if clicked_idx < pkgs.len() {
+            if clicked_idx < entries.len() {
                 self.selected_pkg_index = Some(clicked_idx);
-                // Emulate Enter key
-                if let Some(name) = pkgs.get(clicked_idx) {
-                    let name = name.clone();
-                    if self.blast_overlay_active {
-                        if let Some(layout_idx) =
-                            self.graph_layout.labels.iter().position(|l| *l == name)
-                        {
-                            self.hovered_node = Some(layout_idx);
-                            self.compute_cascade_for_node(layout_idx);
+                let clicked_entry = entries.get(clicked_idx).cloned();
+                if matches!(clicked_entry, Some(SidebarEntry::Member { .. }))
+                    && matches!(self.active_view, ActiveView::Inspect(_))
+                    && matches!(self.current_view(), ViewContext::ModuleInspect(_))
+                {
+                    self.pop_view();
+                }
+                self.sync_sidebar_selection();
+                if let Some(entry) = clicked_entry {
+                    match entry {
+                        SidebarEntry::Cluster { id, .. } => {
+                            self.enter_cluster_detail(id);
                         }
-                    } else {
-                        self.active_view = ActiveView::Inspect(name.clone());
-                        self.push_view(ViewContext::ModuleInspect(name));
+                        SidebarEntry::Member { id, .. } => {
+                            self.hovered_node = Some(id);
+                            self.hovered_cluster = self.selected_cluster;
+                            if self.blast_overlay_active {
+                                self.compute_cascade_for_node(id);
+                            }
+                        }
                     }
                 }
             }
             return;
         }
 
-        let area = self.graph_area;
+        let area = if self.should_show_architecture_overview() {
+            overview_map_rect(self.graph_area)
+        } else {
+            self.graph_area
+        };
         let inner_x = area.x + 1;
         let inner_y = area.y + 1;
         let inner_w = area.width.saturating_sub(2);
@@ -1191,7 +1910,8 @@ impl App {
 
         let in_canvas =
             col >= inner_x && col < inner_x + inner_w && row >= inner_y && row < inner_y + inner_h;
-
+        let overview_canvas_w = inner_w as f64 * 2.0;
+        let overview_canvas_h = inner_h as f64 * 4.0;
         let tl = self.timeline_area;
         let tl_inner_x = tl.x + 1;
         let tl_inner_w = tl.width.saturating_sub(3);
@@ -1218,6 +1938,39 @@ impl App {
                 self.dragging_timeline = false;
             }
             MouseEventKind::Down(MouseButton::Left) if in_canvas => {
+                self.focused_panel = FocusedPanel::Graph;
+                if self.should_show_architecture_overview() {
+                    let (px, py) = self.terminal_to_canvas_space(
+                        col,
+                        row,
+                        inner_x,
+                        inner_y,
+                        inner_w,
+                        inner_h,
+                        overview_canvas_w,
+                        overview_canvas_h,
+                    );
+                    self.hovered_cluster = overview_hit_test_terminal(
+                        self,
+                        col,
+                        row,
+                        area,
+                        overview_canvas_w,
+                        overview_canvas_h,
+                    )
+                    .or_else(|| {
+                        overview_hit_test(self, px, py, overview_canvas_w, overview_canvas_h)
+                    });
+                    if let Some(cluster_id) = self.hovered_cluster {
+                        self.enter_cluster_detail(cluster_id);
+                    }
+                    return;
+                }
+                if self.selected_cluster.is_some()
+                    && !matches!(self.active_view, ActiveView::Inspect(_))
+                {
+                    return;
+                }
                 if let Some(old_idx) = self.dragging_node.take()
                     && old_idx < self.graph_layout.positions.len()
                 {
@@ -1253,6 +2006,11 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selected_cluster.is_some()
+                    && !matches!(self.active_view, ActiveView::Inspect(_))
+                {
+                    return;
+                }
                 if let Some(idx) = self.dragging_node
                     && idx < self.graph_layout.positions.len()
                 {
@@ -1277,6 +2035,13 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.selected_cluster.is_some()
+                    && !matches!(self.active_view, ActiveView::Inspect(_))
+                {
+                    self.dragging_pan = false;
+                    self.last_mouse_pos = None;
+                    return;
+                }
                 if let Some(idx) = self.dragging_node.take()
                     && idx < self.graph_layout.positions.len()
                 {
@@ -1291,6 +2056,33 @@ impl App {
                 // cascade source so mouse movement doesn't break the visual.
                 if self.cascade_highlight.is_some() {
                     // Do nothing — keep hovered_node pinned to cascade source
+                } else if self.should_show_architecture_overview() && in_canvas {
+                    let (px, py) = self.terminal_to_canvas_space(
+                        col,
+                        row,
+                        inner_x,
+                        inner_y,
+                        inner_w,
+                        inner_h,
+                        overview_canvas_w,
+                        overview_canvas_h,
+                    );
+                    self.hovered_cluster = overview_hit_test_terminal(
+                        self,
+                        col,
+                        row,
+                        area,
+                        overview_canvas_w,
+                        overview_canvas_h,
+                    )
+                    .or_else(|| {
+                        overview_hit_test(self, px, py, overview_canvas_w, overview_canvas_h)
+                    });
+                    self.hovered_node = None;
+                } else if self.selected_cluster.is_some()
+                    && !matches!(self.active_view, ActiveView::Inspect(_))
+                {
+                    self.hovered_node = self.selected_sidebar_member();
                 } else if in_canvas {
                     let (px, py) =
                         self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
@@ -1311,6 +2103,7 @@ impl App {
                     self.hovered_node = closest.map(|(idx, _)| idx);
                 } else {
                     self.hovered_node = None;
+                    self.hovered_cluster = None;
                 }
             }
             MouseEventKind::Down(MouseButton::Left)
@@ -1324,15 +2117,17 @@ impl App {
                 if row == tab_row {
                     // Click on tab bar — determine which tab by x position
                     let rel_x = col.saturating_sub(self.insights_area.x + 1);
-                    // Tabs: " Health "(8)+sep(1)+" Spots "(7)+sep(1)+" Trend "(7)+sep(1)+" Blast "(7)
-                    if rel_x < 9 {
-                        self.insight_tab = InsightTab::Health;
-                    } else if rel_x < 17 {
-                        self.insight_tab = InsightTab::Hotspots;
-                    } else if rel_x < 25 {
-                        self.insight_tab = InsightTab::Trends;
-                    } else {
-                        self.insight_tab = InsightTab::Blast;
+                    let mut cursor = 0u16;
+                    for (idx, (label, tab)) in insight_tab_specs(self).iter().enumerate() {
+                        let tab_width = format!(" {} ", label).chars().count() as u16;
+                        if rel_x < cursor + tab_width {
+                            self.insight_tab = *tab;
+                            break;
+                        }
+                        cursor += tab_width;
+                        if idx < 3 {
+                            cursor += 1;
+                        }
                     }
                 } else if self.insight_tab == InsightTab::Hotspots {
                     // Click on hotspots table row
@@ -1347,12 +2142,14 @@ impl App {
                             let name = pkg.0.clone();
                             self.active_view = ActiveView::Inspect(name.clone());
                             self.push_view(ViewContext::ModuleInspect(name));
+                            self.focus_current_graph_view();
                         }
                     }
                 } else if self.insight_tab == InsightTab::Blast {
                     // Click on blast impact row — trigger cascade for that module
                     // Summary(3) + Keystones(5) + TopImpact title(1) = offset 9
                     // Plus tab bar row(1) + border(1) = 11 from insights_area.y
+                    self.ensure_current_blast_radius();
                     let content_start = self.insights_area.y + 11;
                     if row >= content_start {
                         let has_above = self.blast_impact_scroll > 0;
@@ -1367,10 +2164,10 @@ impl App {
                             if let Some(idx) =
                                 self.graph_layout.labels.iter().position(|l| *l == module)
                             {
+                                self.blast_overlay_active = true;
+                                self.ensure_current_blast_radius();
                                 self.hovered_node = Some(idx);
-                                if self.blast_overlay_active {
-                                    self.compute_cascade_for_node(idx);
-                                }
+                                self.compute_cascade_for_node(idx);
                             }
                         }
                     }
@@ -1379,6 +2176,8 @@ impl App {
             MouseEventKind::ScrollUp => {
                 let pos = ratatui::layout::Position::new(col, row);
                 if self.pkg_area.contains(pos) {
+                    let entries_len = self.sidebar_entries().len();
+                    self.normalize_sidebar_scroll(entries_len);
                     self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(3);
                 } else if self.insights_area.contains(pos) {
                     // Scroll insights: navigate content or switch tabs
@@ -1389,24 +2188,52 @@ impl App {
                         }
                         _ => {
                             self.insight_tab = match self.insight_tab {
-                                InsightTab::Health => InsightTab::Blast,
-                                InsightTab::Trends => InsightTab::Hotspots,
+                                InsightTab::Overview => InsightTab::Blast,
                                 _ => unreachable!(),
                             };
                         }
                     }
                 } else if in_canvas {
+                    if self.selected_cluster.is_some()
+                        && !matches!(self.active_view, ActiveView::Inspect(_))
+                    {
+                        return;
+                    }
                     // Zoom in
                     let scale_factor = 1.1;
 
                     // Keep the physical point under the cursor in the same screen position
-                    let (px_before, py_before) =
-                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    let (px_before, py_before) = if self.should_show_architecture_overview() {
+                        self.terminal_to_canvas_space(
+                            col,
+                            row,
+                            inner_x,
+                            inner_y,
+                            inner_w,
+                            inner_h,
+                            overview_canvas_w,
+                            overview_canvas_h,
+                        )
+                    } else {
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h)
+                    };
 
                     self.graph_scale = (self.graph_scale * scale_factor).min(10.0);
 
-                    let (px_after, py_after) =
-                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    let (px_after, py_after) = if self.should_show_architecture_overview() {
+                        self.terminal_to_canvas_space(
+                            col,
+                            row,
+                            inner_x,
+                            inner_y,
+                            inner_w,
+                            inner_h,
+                            overview_canvas_w,
+                            overview_canvas_h,
+                        )
+                    } else {
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h)
+                    };
 
                     self.graph_pan_x -= px_after - px_before;
                     self.graph_pan_y -= py_after - py_before;
@@ -1415,15 +2242,21 @@ impl App {
             MouseEventKind::ScrollDown => {
                 let pos = ratatui::layout::Position::new(col, row);
                 if self.pkg_area.contains(pos) {
-                    self.pkg_scroll_offset = self
-                        .pkg_scroll_offset
-                        .saturating_add(3)
-                        .min(self.graph_layout.labels.len().saturating_sub(1));
+                    let entries_len = self.sidebar_entries().len();
+                    let visible_capacity = self.sidebar_visible_capacity(entries_len);
+                    if visible_capacity > 0 && entries_len > visible_capacity {
+                        let max_offset = entries_len.saturating_sub(visible_capacity);
+                        self.pkg_scroll_offset =
+                            self.pkg_scroll_offset.saturating_add(3).min(max_offset);
+                    } else {
+                        self.pkg_scroll_offset = 0;
+                    }
                 } else if self.insights_area.contains(pos) {
                     // Scroll insights: navigate content or switch tabs
                     match self.insight_tab {
                         InsightTab::Hotspots => self.select_next_hotspot(),
                         InsightTab::Blast => {
+                            self.ensure_current_blast_radius();
                             let max = self
                                 .current_blast_radius
                                 .as_ref()
@@ -1433,23 +2266,51 @@ impl App {
                         }
                         _ => {
                             self.insight_tab = match self.insight_tab {
-                                InsightTab::Health => InsightTab::Hotspots,
-                                InsightTab::Trends => InsightTab::Blast,
+                                InsightTab::Overview => InsightTab::Hotspots,
                                 _ => unreachable!(),
                             };
                         }
                     }
                 } else if in_canvas {
+                    if self.selected_cluster.is_some()
+                        && !matches!(self.active_view, ActiveView::Inspect(_))
+                    {
+                        return;
+                    }
                     // Zoom out
                     let scale_factor = 1.1;
 
-                    let (px_before, py_before) =
-                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    let (px_before, py_before) = if self.should_show_architecture_overview() {
+                        self.terminal_to_canvas_space(
+                            col,
+                            row,
+                            inner_x,
+                            inner_y,
+                            inner_w,
+                            inner_h,
+                            overview_canvas_w,
+                            overview_canvas_h,
+                        )
+                    } else {
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h)
+                    };
 
                     self.graph_scale = (self.graph_scale / scale_factor).max(0.1);
 
-                    let (px_after, py_after) =
-                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h);
+                    let (px_after, py_after) = if self.should_show_architecture_overview() {
+                        self.terminal_to_canvas_space(
+                            col,
+                            row,
+                            inner_x,
+                            inner_y,
+                            inner_w,
+                            inner_h,
+                            overview_canvas_w,
+                            overview_canvas_h,
+                        )
+                    } else {
+                        self.terminal_to_physics(col, row, inner_x, inner_y, inner_w, inner_h)
+                    };
 
                     self.graph_pan_x -= px_after - px_before;
                     self.graph_pan_y -= py_after - py_before;
@@ -1480,6 +2341,28 @@ impl App {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn terminal_to_canvas_space(
+        &self,
+        col: u16,
+        row: u16,
+        ix: u16,
+        iy: u16,
+        iw: u16,
+        ih: u16,
+        canvas_w: f64,
+        canvas_h: f64,
+    ) -> (f64, f64) {
+        let nx = ((col.saturating_sub(ix) as f64) + 0.5) / iw.max(1) as f64;
+        let ny = ((row.saturating_sub(iy) as f64) + 0.5) / ih.max(1) as f64;
+        let visible_w = canvas_w / self.graph_scale;
+        let visible_h = canvas_h / self.graph_scale;
+        (
+            self.graph_pan_x + nx.clamp(0.0, 1.0) * visible_w,
+            self.graph_pan_y + (1.0 - ny.clamp(0.0, 1.0)) * visible_h,
+        )
+    }
+
     pub fn tick_auto_play(&mut self) {
         if self.is_playing && self.last_auto_advance.elapsed() >= self.auto_play_interval {
             self.next_commit();
@@ -1491,6 +2374,13 @@ impl App {
     }
 
     pub fn tick_physics(&mut self) {
+        if self.should_show_architecture_overview()
+            || (self.selected_cluster.is_some()
+                && !matches!(self.active_view, ActiveView::Inspect(_)))
+        {
+            self.frame_count += 1;
+            return;
+        }
         if self.graph_layout.temperature >= 0.02 || self.dragging_node.is_some() {
             let n = self.graph_layout.positions.len();
             self.graph_layout.multi_step(adaptive_steps(n, 3, 1));
@@ -1513,6 +2403,52 @@ fn snapshot_to_layout_data(
         }
     }
     (labels, edges, weights)
+}
+
+fn snapshot_internal_nodes(snapshot: &GraphSnapshot, labels: &[String]) -> HashSet<usize> {
+    if !snapshot.node_metadata.is_empty() {
+        return labels
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, label)| {
+                snapshot.node_metadata.get(label).and_then(|metadata| {
+                    if matches!(metadata.kind, NodeKind::Internal) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+    }
+
+    let index_by_label = labels
+        .iter()
+        .enumerate()
+        .map(|(idx, label)| (label.as_str(), idx))
+        .collect::<HashMap<_, _>>();
+
+    let mut internal = HashSet::new();
+    for edge in &snapshot.edges {
+        if let Some(idx) = index_by_label.get(edge.from_module.as_str()) {
+            internal.insert(*idx);
+        }
+    }
+
+    for (idx, label) in labels.iter().enumerate() {
+        if label.contains('/')
+            || matches!(label.as_str(), "cli" | "ext" | "libs" | "runtime")
+            || label.starts_with("deno_")
+            || label.starts_with("cli_")
+            || label.starts_with("ext_")
+            || label.starts_with("runtime_")
+            || label.starts_with("libs_")
+        {
+            internal.insert(idx);
+        }
+    }
+
+    internal
 }
 
 /// Additional color constants for the redesign
@@ -1551,6 +2487,7 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
     // Auto-collapse panels based on terminal width
     let effective_sidebar = app.sidebar_visible && size.width >= 60;
     let effective_insights = app.insights_visible && size.width >= 100;
+    app.sync_visible_panels(effective_sidebar, effective_insights);
 
     // ── Main vertical layout: header + content + timeline + filter? + footer ──
     let has_filter_bar = app.filter_active;
@@ -1653,6 +2590,16 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
         app.needs_warmup = false;
     }
 
+    if app.should_show_architecture_overview() {
+        render_architecture_overview(frame, area, app, canvas_w, canvas_h);
+        return;
+    }
+
+    if app.selected_cluster.is_some() && !matches!(app.active_view, ActiveView::Inspect(_)) {
+        render_cluster_workspace(frame, area, app);
+        return;
+    }
+
     let search_active = !app.filter_text.is_empty();
     let inspect_active = matches!(app.active_view, ActiveView::Inspect(_));
     let is_filtered = search_active || inspect_active;
@@ -1702,6 +2649,12 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         (HashSet::new(), HashSet::new())
     };
+
+    if inspect_active {
+        app.apply_pending_graph_focus(canvas_w, canvas_h, inspect_center_idx);
+    } else if app.pending_graph_focus {
+        app.pending_graph_focus = false;
+    }
 
     let is_graph_focused = app.focused_panel == FocusedPanel::Graph;
     let graph_border = if is_graph_focused {
@@ -1832,7 +2785,7 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                                 cascade_distance_color(max_dist)
                             } else {
                                 // Not on cascade path: very dim
-                                Color::Rgb(45, 45, 60)
+                                graph_relation_color(GraphRelationSemantic::CascadeDimmed)
                             }
                         } else {
                             // Blast heatmap: edge color = average blast score of endpoints
@@ -1845,13 +2798,13 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                         if let Some(center) = inspect_center_idx {
                             if f == center {
                                 // Outbound: Peach — this module depends on target
-                                Color::Rgb(250, 179, 135)
+                                graph_relation_color(GraphRelationSemantic::Outbound)
                             } else if t == center {
                                 // Inbound: Teal — source depends on this module
-                                Color::Rgb(148, 226, 213)
+                                graph_relation_color(GraphRelationSemantic::Inbound)
                             } else {
                                 // Neighbor-to-neighbor: muted Sapphire
-                                Color::Rgb(88, 113, 150)
+                                graph_relation_color(GraphRelationSemantic::Related)
                             }
                         } else {
                             // Filter mode (search): use weight-based but brighter
@@ -1872,6 +2825,18 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         });
     frame.render_widget(canvas, area);
+    if area.height > 4 && area.width > 32 {
+        let legend_area = Rect {
+            x: area.x.saturating_add(2),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(graph_legend_line(app)).style(Style::default().bg(BG_SURFACE)),
+            legend_area,
+        );
+    }
 
     let buf = frame.buffer_mut();
     let label_max_len = if n_nodes > 80 { 12 } else { 14 };
@@ -1886,7 +2851,9 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 .is_some_and(|h| search_visible.contains(&h)));
 
     for (i, &(px, py)) in snapped.iter().enumerate() {
-        let is_m = is_filtered && search_matched.contains(&i);
+        let is_focus = inspect_center_idx == Some(i);
+        let is_search_match =
+            is_filtered && inspect_center_idx.is_none() && search_matched.contains(&i);
         let is_v = is_filtered && search_visible.contains(&i);
         let is_h = app.hovered_node == Some(i);
 
@@ -1919,42 +2886,44 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 if use_cascade {
                     let cascade = app.cascade_highlight.as_ref().unwrap();
                     if is_h {
-                        Color::Rgb(255, 232, 115) // bright yellow for source
+                        graph_relation_color(GraphRelationSemantic::CascadeSource)
                     } else if let Some((_, dist, _)) = cascade.iter().find(|(ci, _, _)| *ci == i) {
                         use crate::tui::graph_renderer::cascade_distance_color;
                         cascade_distance_color(*dist)
                     } else {
-                        Color::Rgb(49, 50, 68) // dim unaffected
+                        graph_relation_color(GraphRelationSemantic::CascadeDimmed)
                     }
                 } else if i < app.node_blast_scores.len() {
                     use crate::tui::graph_renderer::blast_color;
                     blast_color(app.node_blast_scores[i])
                 } else {
-                    NODE_PALETTE[i % NODE_PALETTE.len()]
+                    default_graph_node_color(app, i)
                 }
-            } else if is_m {
-                Color::Rgb(255, 232, 115) // bright yellow for center
             } else if is_h {
-                Color::White // white for hover
+                graph_relation_color(GraphRelationSemantic::Hover)
+            } else if is_focus {
+                graph_relation_color(GraphRelationSemantic::Focus)
+            } else if is_search_match {
+                graph_relation_color(GraphRelationSemantic::SearchMatch)
             } else if is_filtered && is_v {
                 // Differentiate inbound vs outbound neighbors
                 if let Some(center) = inspect_center_idx {
                     let is_inbound = layout.edges.iter().any(|&(f, t)| f == i && t == center);
                     let is_outbound = layout.edges.iter().any(|&(f, t)| f == center && t == i);
                     if is_inbound && is_outbound {
-                        Color::Rgb(203, 166, 247) // Bidirectional: Mauve
+                        graph_relation_color(GraphRelationSemantic::Bidirectional)
                     } else if is_inbound {
-                        Color::Rgb(148, 226, 213) // Teal
+                        graph_relation_color(GraphRelationSemantic::Inbound)
                     } else if is_outbound {
-                        Color::Rgb(250, 179, 135) // Peach
+                        graph_relation_color(GraphRelationSemantic::Outbound)
                     } else {
-                        Color::Rgb(116, 150, 200) // muted blue
+                        graph_relation_color(GraphRelationSemantic::Related)
                     }
                 } else {
-                    Color::Rgb(137, 220, 255) // filter mode: bright blue
+                    graph_relation_color(GraphRelationSemantic::Related)
                 }
             } else {
-                NODE_PALETTE[i % NODE_PALETTE.len()]
+                default_graph_node_color(app, i)
             };
 
             // Articulation points get diamond ◆, others get circle ●
@@ -1973,8 +2942,12 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     "●"
                 }
-            } else if is_m {
+            } else if is_focus {
                 "◆"
+            } else if is_h {
+                "◉"
+            } else if is_search_match {
+                "◎"
             } else {
                 "●"
             };
@@ -1984,13 +2957,9 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
 
             if show_l {
                 let label = &layout.labels[i];
-                let text = if is_h {
-                    label.as_str()
-                } else if label.len() > label_max_len {
-                    &label[..label_max_len]
-                } else {
-                    label.as_str()
-                };
+                let truncated_label =
+                    (!is_h).then(|| super::widgets::truncate_str(label, label_max_len));
+                let text = truncated_label.as_deref().unwrap_or(label.as_str());
                 let text_len = text.chars().count() as u16;
 
                 // Adaptive Label Placement:
@@ -2005,15 +2974,1739 @@ pub fn render_graph_canvas(frame: &mut Frame, area: Rect, app: &mut App) {
                 };
 
                 if can_render {
-                    let label_color = if is_m || (is_filtered && is_v) {
+                    let label_color = if is_focus || is_search_match || (is_filtered && is_v) {
                         color
+                    } else if is_h {
+                        Color::White
                     } else {
-                        FG_TEXT
+                        FG_OVERLAY
                     };
-                    buf.set_string(label_x, row, text, Style::default().fg(label_color));
+                    let label_style = if is_focus || is_h || is_search_match {
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(label_color)
+                    };
+                    buf.set_string(label_x, row, text, label_style);
                 }
             }
         }
+    }
+}
+
+fn sidebar_label(entry: &SidebarEntry) -> &str {
+    match entry {
+        SidebarEntry::Cluster { label, .. } | SidebarEntry::Member { label, .. } => label.as_str(),
+    }
+}
+
+fn app_label_match(label: &str, anchor: &str) -> bool {
+    label == anchor
+}
+
+fn architecture_positions(app: &App, width: f64, height: f64) -> Vec<(f64, f64)> {
+    app.architecture_map
+        .as_ref()
+        .map(|map| {
+            let mut sorted_ids = map
+                .clusters
+                .iter()
+                .map(|cluster| cluster.id)
+                .collect::<Vec<_>>();
+            sorted_ids.sort_by(|a, b| {
+                cluster_overview_rank(&map.clusters[*b])
+                    .cmp(&cluster_overview_rank(&map.clusters[*a]))
+                    .then_with(|| map.clusters[*a].name.cmp(&map.clusters[*b].name))
+            });
+
+            let center_x = width * 0.50;
+            let center_y = height * 0.52;
+            let radius_x = width * 0.24;
+            let radius_y = height * 0.28;
+            let count = sorted_ids.len().max(1) as f64;
+            let mut positions = vec![(center_x, center_y); map.clusters.len()];
+
+            for (idx, cluster_id) in sorted_ids.iter().enumerate() {
+                let angle =
+                    -std::f64::consts::FRAC_PI_2 + (idx as f64 / count) * std::f64::consts::TAU;
+                let cluster = &map.clusters[*cluster_id];
+                let mut x = center_x + radius_x * angle.cos();
+                let y = center_y + radius_y * angle.sin();
+
+                if cluster.is_dependency_sink() {
+                    x = width * 0.78;
+                } else if matches!(cluster.overview_role(), ClusterOverviewRole::SupportCluster) {
+                    x = (x + width * 0.62) / 2.0;
+                }
+
+                positions[*cluster_id] = (x, y);
+            }
+
+            let min_x = width * 0.10;
+            let max_x = width * 0.90;
+            let min_y = height * 0.14;
+            let max_y = height * 0.90;
+
+            for _ in 0..36 {
+                let mut forces = vec![(0.0, 0.0); map.clusters.len()];
+
+                for left in 0..map.clusters.len() {
+                    for right in left + 1..map.clusters.len() {
+                        let (lx, ly) = positions[left];
+                        let (rx, ry) = positions[right];
+                        let dx = lx - rx;
+                        let dy = ly - ry;
+                        let dist_sq = (dx * dx + dy * dy).max(64.0);
+                        let dist = dist_sq.sqrt();
+                        let force = 4_200.0 / dist_sq;
+                        let fx = (dx / dist) * force;
+                        let fy = (dy / dist) * force;
+                        forces[left].0 += fx;
+                        forces[left].1 += fy;
+                        forces[right].0 -= fx;
+                        forces[right].1 -= fy;
+                    }
+                }
+
+                for edge in &map.edges {
+                    let (from_x, from_y) = positions[edge.from];
+                    let (to_x, to_y) = positions[edge.to];
+                    let dx = to_x - from_x;
+                    let dy = to_y - from_y;
+                    let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let ideal = if is_dependency_sink_edge(map, edge) {
+                        width * 0.22
+                    } else {
+                        width * 0.14
+                    };
+                    let pull = ((dist - ideal) / ideal)
+                        * f64::from(edge.total_weight.max(1)).sqrt()
+                        * 0.045;
+                    let fx = (dx / dist) * pull;
+                    let fy = (dy / dist) * pull;
+                    forces[edge.from].0 += fx;
+                    forces[edge.from].1 += fy;
+                    forces[edge.to].0 -= fx;
+                    forces[edge.to].1 -= fy;
+                }
+
+                for cluster in &map.clusters {
+                    let idx = cluster.id;
+                    let (x, y) = positions[idx];
+                    let mut target_x = center_x;
+                    if cluster.is_dependency_sink() {
+                        target_x = width * 0.82;
+                    } else if matches!(cluster.overview_role(), ClusterOverviewRole::SupportCluster)
+                    {
+                        target_x = width * 0.58;
+                    }
+                    let gravity = if cluster.is_dependency_sink() {
+                        0.030
+                    } else {
+                        0.018
+                    };
+                    forces[idx].0 += (target_x - x) * gravity;
+                    forces[idx].1 += (center_y - y) * gravity;
+                }
+
+                for (idx, cluster) in map.clusters.iter().enumerate() {
+                    let x_step = 1.0 + (cluster.members.len() as f64).sqrt() * 0.08;
+                    let y_step = 1.0 + (cluster.members.len() as f64).sqrt() * 0.05;
+                    positions[idx].0 =
+                        (positions[idx].0 + forces[idx].0 * x_step).clamp(min_x, max_x);
+                    positions[idx].1 =
+                        (positions[idx].1 + forces[idx].1 * y_step).clamp(min_y, max_y);
+                }
+            }
+
+            positions
+        })
+        .unwrap_or_default()
+}
+
+fn cluster_overview_rank(cluster: &ClusterNode) -> (u8, u32, u32, usize, String) {
+    let role_rank = match cluster.overview_role() {
+        ClusterOverviewRole::PrimaryArchitecture => 2,
+        ClusterOverviewRole::SupportCluster => 1,
+        ClusterOverviewRole::ExternalSink => 0,
+    };
+    (
+        role_rank,
+        cluster.inbound_weight + cluster.outbound_weight + cluster.internal_weight,
+        cluster.internal_weight,
+        cluster.members.len(),
+        cluster.name.clone(),
+    )
+}
+
+fn preferred_overview_cluster(map: &ArchitectureMap) -> Option<&ClusterNode> {
+    map.clusters.iter().max_by(|a, b| {
+        cluster_overview_rank(a)
+            .cmp(&cluster_overview_rank(b))
+            .then_with(|| b.name.cmp(&a.name))
+    })
+}
+
+fn overview_anchor_reason(cluster: &ClusterNode) -> &'static str {
+    match cluster.overview_role() {
+        ClusterOverviewRole::PrimaryArchitecture => {
+            "chosen because it is the most connected internal cluster"
+        }
+        ClusterOverviewRole::SupportCluster => {
+            "chosen because it is the strongest support-side connector"
+        }
+        ClusterOverviewRole::ExternalSink => {
+            "chosen because it is the strongest third-party cluster"
+        }
+    }
+}
+
+fn is_dependency_sink_edge(map: &ArchitectureMap, edge: &ClusterEdge) -> bool {
+    map.clusters
+        .get(edge.from)
+        .is_some_and(ClusterNode::is_dependency_sink)
+        || map
+            .clusters
+            .get(edge.to)
+            .is_some_and(ClusterNode::is_dependency_sink)
+}
+
+fn bridge_overview_rank(map: &ArchitectureMap, edge: &ClusterEdge) -> (u8, u32, usize) {
+    let from_role = map.clusters[edge.from].overview_role();
+    let to_role = map.clusters[edge.to].overview_role();
+    let role_rank = if matches!(from_role, ClusterOverviewRole::PrimaryArchitecture)
+        && matches!(to_role, ClusterOverviewRole::PrimaryArchitecture)
+    {
+        2
+    } else if !matches!(from_role, ClusterOverviewRole::ExternalSink)
+        && !matches!(to_role, ClusterOverviewRole::ExternalSink)
+    {
+        1
+    } else {
+        0
+    };
+    (role_rank, edge.total_weight, edge.edge_count)
+}
+
+fn preferred_overview_bridge(map: &ArchitectureMap) -> Option<&ClusterEdge> {
+    map.edges.iter().max_by(|a, b| {
+        bridge_overview_rank(map, a)
+            .cmp(&bridge_overview_rank(map, b))
+            .then_with(|| {
+                map.clusters[b.from]
+                    .name
+                    .cmp(&map.clusters[a.from].name)
+                    .then_with(|| map.clusters[b.to].name.cmp(&map.clusters[a.to].name))
+            })
+    })
+}
+
+fn architecture_summary_lines(
+    app: &App,
+    map: &ArchitectureMap,
+    omitted_sink_edges: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if map.clusters.is_empty() {
+        lines.push("No clusters available for the current snapshot.".to_string());
+        return lines;
+    }
+
+    let overview_anchor = preferred_overview_cluster(map);
+    if let Some(cluster) = overview_anchor {
+        lines.push(format!(
+            "Overview anchor is `{}` ({} members, in:{} out:{}) - {}.",
+            cluster.name,
+            cluster.members.len(),
+            cluster.inbound_weight,
+            cluster.outbound_weight,
+            overview_anchor_reason(cluster)
+        ));
+    }
+
+    let raw_strongest_bridge = map
+        .edges
+        .iter()
+        .max_by_key(|edge| (edge.total_weight, edge.edge_count));
+    if let Some(edge) = preferred_overview_bridge(map).or(raw_strongest_bridge) {
+        lines.push(format!(
+            "Strongest link is `{}` -> `{}` (weight {}, {} links).",
+            map.clusters[edge.from].name,
+            map.clusters[edge.to].name,
+            edge.total_weight,
+            edge.edge_count
+        ));
+    } else {
+        lines.push("No inter-cluster links were detected.".to_string());
+    }
+
+    if let Some(edge) = raw_strongest_bridge
+        && is_dependency_sink_edge(map, edge)
+        && preferred_overview_bridge(map)
+            .is_some_and(|preferred| preferred.from != edge.from || preferred.to != edge.to)
+    {
+        lines.push(format!(
+            "Strongest third-party link is `{}` -> `{}` (weight {}, {} links).",
+            map.clusters[edge.from].name,
+            map.clusters[edge.to].name,
+            edge.total_weight,
+            edge.edge_count
+        ));
+    }
+
+    let deprioritized_sinks = map
+        .clusters
+        .iter()
+        .filter(|cluster| cluster.is_dependency_sink())
+        .count();
+    if deprioritized_sinks > 0 && deprioritized_sinks < map.clusters.len() {
+        lines.push(format!(
+            "{} external-heavy cluster(s) are deprioritized in overview.",
+            deprioritized_sinks
+        ));
+    }
+
+    if omitted_sink_edges > 0 {
+        lines.push(format!(
+            "+{} lower-signal third-party link(s) omitted from the map.",
+            omitted_sink_edges
+        ));
+    }
+
+    if let Some(scan_metadata) = app.current_scan_metadata() {
+        lines.push(format!(
+            "Third-party view keeps dependencies with {}+ importers; {} lower-signal dependencies are hidden.",
+            scan_metadata.external_min_importers,
+            scan_metadata.filtered_external_count
+        ));
+    }
+
+    let isolated = map
+        .clusters
+        .iter()
+        .filter(|cluster| cluster.inbound_weight == 0 && cluster.outbound_weight == 0)
+        .count();
+    if isolated > 0 {
+        lines.push(format!(
+            "{} cluster(s) are isolated or weakly connected.",
+            isolated
+        ));
+    }
+
+    lines
+}
+
+fn cluster_kind_label(cluster: &ClusterNode) -> &'static str {
+    match cluster.kind {
+        super::architecture_map::ClusterKind::Workspace => "workspace",
+        super::architecture_map::ClusterKind::Deps => "third-party",
+        super::architecture_map::ClusterKind::Entry => "entrypoint",
+        super::architecture_map::ClusterKind::External => "external",
+        super::architecture_map::ClusterKind::Infra => "support",
+        super::architecture_map::ClusterKind::Domain => "domain",
+        super::architecture_map::ClusterKind::Group => "unclassified",
+    }
+}
+
+fn cluster_summary_note(cluster: &ClusterNode) -> &'static str {
+    if cluster.is_dependency_sink() {
+        "Shared third-party packages grouped for the architecture view."
+    } else {
+        ""
+    }
+}
+
+fn cluster_summary_type_label(cluster: &ClusterNode) -> &'static str {
+    if cluster.is_dependency_sink() {
+        "third-party cluster"
+    } else {
+        cluster_kind_label(cluster)
+    }
+}
+
+fn panel_title(title: impl Into<String>) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", title.into()),
+        Style::default()
+            .fg(ACCENT_LAVENDER)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn legend_chip(label: &'static str, color: Color) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("●", Style::default().fg(color)),
+        Span::styled(format!(" {label}"), Style::default().fg(FG_OVERLAY)),
+    ]
+}
+
+fn ui_color_mode(app: &App) -> ClusterColorMode {
+    app.clustering_config.effective_color_mode()
+}
+
+fn edge_weight_legend_line() -> Line<'static> {
+    let mut spans = vec![Span::styled("Edges ", Style::default().fg(FG_TEXT))];
+    for (idx, (label, color)) in [
+        ("light", weighted_edge_color(1)),
+        ("normal", weighted_edge_color(4)),
+        ("heavy", weighted_edge_color(8)),
+        ("critical", weighted_edge_color(16)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn inspect_relation_legend_line() -> Line<'static> {
+    let mut spans = vec![Span::styled("Nodes ", Style::default().fg(FG_TEXT))];
+    for (idx, (label, color)) in [
+        (
+            "◆ focus",
+            graph_relation_color(GraphRelationSemantic::Focus),
+        ),
+        ("in", graph_relation_color(GraphRelationSemantic::Inbound)),
+        ("out", graph_relation_color(GraphRelationSemantic::Outbound)),
+        (
+            "both",
+            graph_relation_color(GraphRelationSemantic::Bidirectional),
+        ),
+        (
+            "◉ hover",
+            graph_relation_color(GraphRelationSemantic::Hover),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn search_relation_legend_line() -> Line<'static> {
+    let mut spans = vec![Span::styled("Search ", Style::default().fg(FG_TEXT))];
+    for (idx, (label, color)) in [
+        (
+            "◎ match",
+            graph_relation_color(GraphRelationSemantic::SearchMatch),
+        ),
+        (
+            "related",
+            graph_relation_color(GraphRelationSemantic::Related),
+        ),
+        (
+            "◉ hover",
+            graph_relation_color(GraphRelationSemantic::Hover),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn blast_legend_line() -> Line<'static> {
+    let mut spans = vec![Span::styled("Blast ", Style::default().fg(FG_TEXT))];
+    for (idx, (label, color)) in [
+        ("low", crate::tui::graph_renderer::blast_color(0.08)),
+        ("mid", crate::tui::graph_renderer::blast_color(0.40)),
+        ("high", crate::tui::graph_renderer::blast_color(0.72)),
+        (
+            "source",
+            graph_relation_color(GraphRelationSemantic::CascadeSource),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn overview_legend_line(app: &App) -> Line<'static> {
+    let mut spans = vec![Span::styled("Map ", Style::default().fg(FG_TEXT))];
+    let items = if matches!(ui_color_mode(app), ClusterColorMode::Semantic) {
+        vec![
+            ("anchor", cluster_map_color(ClusterMapSemantic::Central)),
+            (
+                "third-party",
+                cluster_map_color(ClusterMapSemantic::ThirdParty),
+            ),
+            ("entry", cluster_map_color(ClusterMapSemantic::Entrypoint)),
+            ("support", cluster_map_color(ClusterMapSemantic::Support)),
+            ("hover", cluster_map_color(ClusterMapSemantic::Hovered)),
+        ]
+    } else {
+        vec![
+            ("anchor", cluster_map_color(ClusterMapSemantic::Central)),
+            (
+                "third-party",
+                cluster_map_color(ClusterMapSemantic::ThirdParty),
+            ),
+            ("other", cluster_map_color(ClusterMapSemantic::Neutral)),
+            ("hover", cluster_map_color(ClusterMapSemantic::Hovered)),
+        ]
+    };
+    for (idx, (label, color)) in items.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn overview_legend_line_for_help() -> Line<'static> {
+    let mut spans = vec![Span::styled("Map ", Style::default().fg(FG_TEXT))];
+    for (idx, (label, color)) in [
+        ("anchor", cluster_map_color(ClusterMapSemantic::Central)),
+        (
+            "third-party",
+            cluster_map_color(ClusterMapSemantic::ThirdParty),
+        ),
+        (
+            "entry/support",
+            cluster_map_color(ClusterMapSemantic::Entrypoint),
+        ),
+        ("other", cluster_map_color(ClusterMapSemantic::Neutral)),
+        ("hover", cluster_map_color(ClusterMapSemantic::Hovered)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.extend(legend_chip(label, color));
+    }
+    Line::from(spans)
+}
+
+fn graph_legend_line(app: &App) -> Line<'static> {
+    if app.blast_overlay_active {
+        blast_legend_line()
+    } else if matches!(app.active_view, ActiveView::Inspect(_)) {
+        inspect_relation_legend_line()
+    } else if !app.filter_text.is_empty() {
+        search_relation_legend_line()
+    } else {
+        let mut spans = edge_weight_legend_line().spans;
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("nodes", Style::default().fg(FG_TEXT)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            if matches!(ui_color_mode(app), ClusterColorMode::Semantic) {
+                "family hues"
+            } else {
+                "neutral"
+            },
+            Style::default().fg(
+                if matches!(ui_color_mode(app), ClusterColorMode::Semantic) {
+                    crate::tui::graph_renderer::palette_node_color(0)
+                } else {
+                    graph_relation_color(GraphRelationSemantic::Neutral)
+                },
+            ),
+        ));
+        Line::from(spans)
+    }
+}
+
+fn default_graph_node_color(app: &App, index: usize) -> Color {
+    match ui_color_mode(app) {
+        ClusterColorMode::Semantic => crate::tui::graph_renderer::palette_node_color(index),
+        ClusterColorMode::Minimal => graph_relation_color(GraphRelationSemantic::Neutral),
+    }
+}
+
+fn overview_cluster_display_color(
+    app: &App,
+    cluster: &ClusterNode,
+    is_hovered: bool,
+    is_central: bool,
+) -> Color {
+    if is_hovered {
+        return cluster_map_color(ClusterMapSemantic::Hovered);
+    }
+    if is_central {
+        return cluster_map_color(ClusterMapSemantic::Central);
+    }
+
+    match ui_color_mode(app) {
+        ClusterColorMode::Semantic => {
+            if cluster.is_dependency_sink() {
+                cluster_map_color(ClusterMapSemantic::ThirdParty)
+            } else if matches!(cluster.kind, super::architecture_map::ClusterKind::Entry) {
+                cluster_map_color(ClusterMapSemantic::Entrypoint)
+            } else if matches!(cluster.kind, super::architecture_map::ClusterKind::Infra) {
+                cluster_map_color(ClusterMapSemantic::Support)
+            } else {
+                cluster_map_color(ClusterMapSemantic::Neutral)
+            }
+        }
+        ClusterColorMode::Minimal => {
+            if cluster.is_dependency_sink() {
+                cluster_map_color(ClusterMapSemantic::ThirdParty)
+            } else {
+                cluster_map_color(ClusterMapSemantic::Neutral)
+            }
+        }
+    }
+}
+
+fn subsection_title(title: impl Into<String>) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", title.into()),
+        Style::default().fg(FG_TEXT).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn cluster_semantic_hint(cluster: &ClusterNode) -> Option<&'static str> {
+    match cluster.kind {
+        super::architecture_map::ClusterKind::Workspace => Some("workspace"),
+        super::architecture_map::ClusterKind::Deps => Some("third-party"),
+        super::architecture_map::ClusterKind::Entry => Some("entrypoint"),
+        super::architecture_map::ClusterKind::External => Some("external"),
+        super::architecture_map::ClusterKind::Infra => Some("support"),
+        super::architecture_map::ClusterKind::Domain
+        | super::architecture_map::ClusterKind::Group => None,
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct OverviewEdgeSelection {
+    indices: Vec<usize>,
+    omitted_sink_edges: usize,
+    primary_bridge: Option<usize>,
+    external_bridge: Option<usize>,
+}
+
+fn edge_index_for(map: &ArchitectureMap, from: usize, to: usize) -> Option<usize> {
+    map.edges
+        .iter()
+        .position(|edge| edge.from == from && edge.to == to)
+}
+
+fn overview_edge_selection(map: &ArchitectureMap) -> OverviewEdgeSelection {
+    let mut outgoing_by_cluster = HashMap::<usize, Vec<(usize, u32, usize)>>::new();
+    for (idx, edge) in map.edges.iter().enumerate() {
+        outgoing_by_cluster.entry(edge.from).or_default().push((
+            idx,
+            edge.total_weight,
+            edge.edge_count,
+        ));
+    }
+
+    let mut chosen = HashSet::new();
+    for (cluster_id, edges) in outgoing_by_cluster.iter_mut() {
+        edges.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let per_cluster_limit = match map
+            .clusters
+            .get(*cluster_id)
+            .map(ClusterNode::overview_role)
+        {
+            Some(ClusterOverviewRole::PrimaryArchitecture) => 2,
+            Some(ClusterOverviewRole::SupportCluster) => 1,
+            _ => 1,
+        };
+        for (idx, _, _) in edges.iter().take(per_cluster_limit) {
+            chosen.insert(*idx);
+        }
+    }
+
+    let primary_bridge =
+        preferred_overview_bridge(map).and_then(|edge| edge_index_for(map, edge.from, edge.to));
+    if let Some(idx) = primary_bridge {
+        chosen.insert(idx);
+    }
+
+    let raw_strongest_bridge = map
+        .edges
+        .iter()
+        .max_by_key(|edge| (edge.total_weight, edge.edge_count));
+    let external_bridge = raw_strongest_bridge
+        .filter(|edge| is_dependency_sink_edge(map, edge))
+        .and_then(|edge| edge_index_for(map, edge.from, edge.to));
+    if let Some(idx) = external_bridge {
+        chosen.insert(idx);
+    }
+
+    let mut ranked = chosen.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|a, b| {
+        let left = &map.edges[*a];
+        let right = &map.edges[*b];
+        bridge_overview_rank(map, right)
+            .cmp(&bridge_overview_rank(map, left))
+            .then_with(|| right.total_weight.cmp(&left.total_weight))
+            .then_with(|| right.edge_count.cmp(&left.edge_count))
+            .then_with(|| a.cmp(b))
+    });
+
+    const OVERVIEW_EDGE_LIMIT: usize = 10;
+    let omitted_sink_edges = ranked
+        .iter()
+        .skip(OVERVIEW_EDGE_LIMIT)
+        .filter(|idx| is_dependency_sink_edge(map, &map.edges[**idx]))
+        .count();
+    ranked.truncate(OVERVIEW_EDGE_LIMIT);
+    OverviewEdgeSelection {
+        indices: ranked,
+        omitted_sink_edges,
+        primary_bridge,
+        external_bridge,
+    }
+}
+
+fn overview_hit_test(app: &App, px: f64, py: f64, width: f64, height: f64) -> Option<usize> {
+    let Some(map) = &app.architecture_map else {
+        return None;
+    };
+    let positions = architecture_positions(app, width, height);
+    let mut closest = None;
+    let mut best_dist = f64::MAX;
+    for cluster in &map.clusters {
+        let Some(&(cx, cy)) = positions.get(cluster.id) else {
+            continue;
+        };
+        let radius = overview_cluster_hit_radius(cluster);
+        let dist = ((cx - px).powi(2) + (cy - py).powi(2)).sqrt();
+        if dist <= radius && dist < best_dist {
+            best_dist = dist;
+            closest = Some(cluster.id);
+        }
+    }
+    closest
+}
+
+fn overview_hit_test_terminal(
+    app: &App,
+    col: u16,
+    row: u16,
+    map_area: Rect,
+    width: f64,
+    height: f64,
+) -> Option<usize> {
+    let Some(map) = &app.architecture_map else {
+        return None;
+    };
+
+    let positions = architecture_positions(app, width, height);
+    let mut closest = None;
+    let mut best_score = (u16::MAX, f64::MAX);
+
+    for cluster in &map.clusters {
+        let Some(&(px, py)) = positions.get(cluster.id) else {
+            continue;
+        };
+        let screen_x = (px - app.graph_pan_x) * app.graph_scale;
+        let screen_y = (py - app.graph_pan_y) * app.graph_scale;
+        if screen_x < 0.0 || screen_y < 0.0 || screen_x > width || screen_y > height {
+            continue;
+        }
+
+        let anchor_col = map_area.x + 1 + (screen_x / 2.0) as u16;
+        let anchor_row = map_area.y + 1 + ((height - screen_y) / 4.0) as u16;
+
+        let label = format!("{} ({})", cluster.name, cluster.members.len());
+        let text = super::widgets::truncate_str(&label, 24);
+        let label_len = text.chars().count() as u16;
+        let label_x = if anchor_col > map_area.x + (map_area.width * 3 / 4) {
+            anchor_col.saturating_sub(label_len + 1)
+        } else {
+            anchor_col + 2
+        };
+
+        let on_anchor =
+            row == anchor_row && col >= anchor_col.saturating_sub(1) && col <= anchor_col + 1;
+        let on_label = row == anchor_row
+            && label_x > map_area.x
+            && label_x + label_len < map_area.x + map_area.width - 1
+            && col >= label_x
+            && col < label_x + label_len;
+
+        if on_anchor || on_label {
+            let dx = (col as i32 - anchor_col as i32).unsigned_abs() as u16;
+            let dy = (row as i32 - anchor_row as i32).unsigned_abs() as u16;
+            let score = (dx + dy, dx as f64);
+            if score < best_score {
+                best_score = score;
+                closest = Some(cluster.id);
+            }
+        }
+    }
+
+    closest
+}
+
+fn overview_cluster_hit_radius(cluster: &ClusterNode) -> f64 {
+    let member_factor = (cluster.members.len() as f64).sqrt() * 0.9;
+    let role_bonus = match cluster.overview_role() {
+        ClusterOverviewRole::PrimaryArchitecture => 0.0,
+        ClusterOverviewRole::SupportCluster => 0.8,
+        ClusterOverviewRole::ExternalSink => 1.2,
+    };
+    (7.0 + member_factor + role_bonus).clamp(7.5, 16.0)
+}
+
+fn overview_summary_rect(area: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(8)])
+        .split(area)[0]
+}
+
+fn overview_map_rect(area: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(8)])
+        .split(area)[1]
+}
+
+fn render_architecture_overview(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    _canvas_w: f64,
+    _canvas_h: f64,
+) {
+    let Some(map) = app.architecture_map.as_ref() else {
+        return;
+    };
+
+    let summary_area = overview_summary_rect(area);
+    let map_area = overview_map_rect(area);
+    let map_canvas_w = (map_area.width.saturating_sub(2) as f64) * 2.0;
+    let map_canvas_h = (map_area.height.saturating_sub(2) as f64) * 4.0;
+
+    let hovered = app
+        .hovered_cluster
+        .and_then(|cluster_id| map.clusters.get(cluster_id))
+        .map(|cluster| {
+            let kind =
+                cluster_semantic_hint(cluster).unwrap_or_else(|| cluster_kind_label(cluster));
+            format!(
+                "  [hint: {} | {} members | in:{} out:{}]",
+                kind,
+                cluster.members.len(),
+                cluster.inbound_weight,
+                cluster.outbound_weight
+            )
+        })
+        .unwrap_or_default();
+
+    let is_focused = app.focused_panel == FocusedPanel::Graph;
+    let border_color = if is_focused {
+        BORDER_FOCUSED
+    } else {
+        BORDER_UNFOCUSED
+    };
+
+    let summary_block = Block::default()
+        .title(Span::styled(
+            format!(
+                " Map | Architecture [{} clusters, {} links]{} ",
+                map.clusters.len(),
+                map.edges.len(),
+                hovered
+            ),
+            if is_focused {
+                Style::default()
+                    .fg(BORDER_FOCUSED)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(FG_OVERLAY)
+            },
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(BG_SURFACE));
+    let summary_inner = summary_block.inner(summary_area);
+    frame.render_widget(summary_block, summary_area);
+
+    let edge_selection = overview_edge_selection(map);
+    let summary_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(summary_inner);
+    let summary_lines = architecture_summary_lines(app, map, edge_selection.omitted_sink_edges)
+        .into_iter()
+        .take(summary_chunks[0].height as usize)
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(FG_TEXT))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(summary_lines).wrap(Wrap { trim: true }),
+        summary_chunks[0],
+    );
+    if summary_chunks[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(overview_legend_line(app)).style(Style::default().bg(BG_SURFACE)),
+            summary_chunks[1],
+        );
+    }
+
+    let positions = architecture_positions(app, map_canvas_w, map_canvas_h);
+    let visible_w = map_canvas_w.max(1.0) / app.graph_scale;
+    let visible_h = map_canvas_h.max(1.0) / app.graph_scale;
+    let pan_x = app.graph_pan_x;
+    let pan_y = app.graph_pan_y;
+    let edge_indices = edge_selection.indices;
+    let primary_bridge_idx = edge_selection.primary_bridge;
+    let external_bridge_idx = edge_selection.external_bridge;
+    let central_cluster_id = preferred_overview_cluster(map).map(|cluster| cluster.id);
+    let positions_for_canvas = positions.clone();
+
+    let map_block = Block::default()
+        .title(Span::styled(
+            " Cluster map ",
+            if is_focused {
+                Style::default()
+                    .fg(BORDER_FOCUSED)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(FG_OVERLAY)
+            },
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(BG_SURFACE));
+
+    let canvas = Canvas::default()
+        .block(map_block)
+        .marker(ratatui::symbols::Marker::Braille)
+        .x_bounds([pan_x, pan_x + visible_w])
+        .y_bounds([pan_y, pan_y + visible_h])
+        .paint(move |ctx| {
+            for edge_idx in &edge_indices {
+                let edge = &map.edges[*edge_idx];
+                let Some(&(x1, y1)) = positions_for_canvas.get(edge.from) else {
+                    continue;
+                };
+                let Some(&(x2, y2)) = positions_for_canvas.get(edge.to) else {
+                    continue;
+                };
+                let edge_color = if Some(*edge_idx) == primary_bridge_idx {
+                    overview_edge_color(OverviewEdgeSemantic::PrimaryBridge)
+                } else if Some(*edge_idx) == external_bridge_idx {
+                    overview_edge_color(OverviewEdgeSemantic::ExternalBridge)
+                } else if is_dependency_sink_edge(map, edge) {
+                    overview_edge_color(OverviewEdgeSemantic::ExternalSink)
+                } else {
+                    weighted_edge_color(edge.total_weight.max(edge.edge_count as u32))
+                };
+                ctx.draw(&ratatui::widgets::canvas::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: edge_color,
+                });
+            }
+        });
+    frame.render_widget(canvas, map_area);
+
+    let buf = frame.buffer_mut();
+    for cluster in &map.clusters {
+        let Some(&(px, py)) = positions.get(cluster.id) else {
+            continue;
+        };
+        let screen_x = (px - app.graph_pan_x) * app.graph_scale;
+        let screen_y = (py - app.graph_pan_y) * app.graph_scale;
+        if screen_x < 0.0 || screen_y < 0.0 || screen_x > map_canvas_w || screen_y > map_canvas_h {
+            continue;
+        }
+        let col = map_area.x + 1 + (screen_x / 2.0) as u16;
+        let row = map_area.y + 1 + ((map_canvas_h - screen_y) / 4.0) as u16;
+        if col >= map_area.x + map_area.width - 1 || row >= map_area.y + map_area.height - 1 {
+            continue;
+        }
+
+        let is_hovered = app.hovered_cluster == Some(cluster.id);
+        let is_central = central_cluster_id == Some(cluster.id);
+        let color = overview_cluster_display_color(app, cluster, is_hovered, is_central);
+
+        buf[(col, row)]
+            .set_symbol(if is_hovered {
+                "@"
+            } else if is_central {
+                "*"
+            } else {
+                "o"
+            })
+            .set_fg(color);
+
+        let label = format!("{} ({})", cluster.name, cluster.members.len());
+        let text = super::widgets::truncate_str(&label, 24);
+        let label_len = text.chars().count() as u16;
+        let label_x = if col > map_area.x + (map_area.width * 3 / 4) {
+            col.saturating_sub(label_len + 1)
+        } else {
+            col + 2
+        };
+        if label_x > map_area.x && label_x + label_len < map_area.x + map_area.width - 1 {
+            buf.set_string(
+                label_x,
+                row,
+                text,
+                Style::default()
+                    .fg(if is_hovered { Color::White } else { color })
+                    .add_modifier(if is_hovered || is_central {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            );
+        }
+    }
+}
+
+fn render_cluster_workspace(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(cluster_id) = app.selected_cluster else {
+        return;
+    };
+    let Some(map) = app.architecture_map.as_ref() else {
+        return;
+    };
+    let Some(cluster) = map.clusters.get(cluster_id) else {
+        return;
+    };
+
+    let is_focused = app.focused_panel == FocusedPanel::Graph;
+    let border_color = if is_focused {
+        BORDER_FOCUSED
+    } else {
+        BORDER_UNFOCUSED
+    };
+    let block = Block::default()
+        .title(Span::styled(
+            format!(
+                " {}: {} [{} members] ",
+                if cluster.is_dependency_sink() {
+                    "Third-party cluster"
+                } else {
+                    "Cluster details"
+                },
+                cluster.name,
+                cluster.members.len(),
+            ),
+            if is_focused {
+                Style::default()
+                    .fg(BORDER_FOCUSED)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(FG_OVERLAY)
+            },
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(BG_SURFACE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 12 || inner.height < 6 {
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(4)])
+        .split(inner);
+    let body_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length((sections[1].height * 2 / 5).max(11)),
+            Constraint::Min(10),
+        ])
+        .split(sections[1]);
+
+    let header = Line::from(vec![
+        Span::styled(
+            " Enter ",
+            Style::default()
+                .fg(BG_BASE)
+                .bg(Color::Rgb(166, 227, 161))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            if cluster.is_dependency_sink() {
+                "Inspect selected dependency"
+            } else {
+                "Inspect selected member"
+            },
+            Style::default().fg(FG_TEXT),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header), sections[0]);
+
+    render_cluster_summary(frame, body_chunks[0], app, cluster_id);
+    render_cluster_focus_preview(frame, body_chunks[1], app, cluster_id);
+}
+
+fn render_cluster_summary(frame: &mut Frame, area: Rect, app: &App, cluster_id: usize) {
+    let Some(map) = app.architecture_map.as_ref() else {
+        return;
+    };
+    let Some(cluster) = map.clusters.get(cluster_id) else {
+        return;
+    };
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Length(1),
+            Constraint::Percentage(38),
+            Constraint::Length(1),
+            Constraint::Percentage(28),
+        ])
+        .split(area);
+    render_vertical_separator(frame, cols[1], 1);
+    render_vertical_separator(frame, cols[3], 1);
+    let summary_col = cols[0];
+    let members_col = cols[2];
+    let bridges_col = cols[4];
+
+    let member_stats = cluster
+        .members
+        .iter()
+        .map(|member| {
+            let label = &app.graph_layout.labels[*member];
+            let mut incoming = 0u32;
+            let mut outgoing = 0u32;
+            for (edge_idx, &(from, to)) in app.graph_layout.edges.iter().enumerate() {
+                let weight = app
+                    .graph_layout
+                    .edge_weights
+                    .get(edge_idx)
+                    .copied()
+                    .unwrap_or(1);
+                if from == *member {
+                    outgoing += weight;
+                }
+                if to == *member {
+                    incoming += weight;
+                }
+            }
+            (label.clone(), incoming + outgoing, incoming, outgoing)
+        })
+        .collect::<Vec<_>>();
+
+    let mut ranked_members = member_stats;
+    ranked_members.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut inbound = map
+        .edges
+        .iter()
+        .filter(|edge| edge.to == cluster_id)
+        .map(|edge| {
+            (
+                map.clusters[edge.from].name.clone(),
+                edge.total_weight,
+                edge.edge_count,
+            )
+        })
+        .collect::<Vec<_>>();
+    inbound.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut outbound = map
+        .edges
+        .iter()
+        .filter(|edge| edge.from == cluster_id)
+        .map(|edge| {
+            (
+                map.clusters[edge.to].name.clone(),
+                edge.total_weight,
+                edge.edge_count,
+            )
+        })
+        .collect::<Vec<_>>();
+    outbound.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let member_limit = usize::from(members_col.height.saturating_sub(2)).clamp(6, 18);
+    let bridge_limit = usize::from(bridges_col.height.saturating_sub(5) / 2).clamp(3, 10);
+
+    let internal_count = cluster.internal_member_count;
+    let external_count = cluster.external_member_count;
+    let summary_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" Type: {}", cluster_summary_type_label(cluster)),
+            Style::default().fg(ACCENT_BLUE),
+        )),
+        Line::from(Span::styled(
+            format!(" Members: {}", cluster.members.len()),
+            Style::default().fg(FG_TEXT),
+        )),
+        Line::from(Span::styled(
+            format!(
+                " Members: {} internal, {} third-party",
+                internal_count, external_count
+            ),
+            Style::default().fg(FG_OVERLAY),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" Internal links: {}", cluster.internal_weight),
+            Style::default().fg(ACCENT_LAVENDER),
+        )),
+        Line::from(Span::styled(
+            format!(" Incoming links: {}", cluster.inbound_weight),
+            Style::default().fg(Color::Rgb(148, 226, 213)),
+        )),
+        Line::from(Span::styled(
+            format!(" Outgoing links: {}", cluster.outbound_weight),
+            Style::default().fg(Color::Rgb(250, 179, 135)),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            cluster_summary_note(cluster),
+            Style::default().fg(FG_OVERLAY),
+        )),
+    ];
+    render_padded_section_paragraph(
+        frame,
+        summary_col,
+        panel_title("Cluster details"),
+        summary_lines,
+    );
+
+    let mut member_lines = ranked_members
+        .iter()
+        .take(member_limit)
+        .map(|(label, total, incoming, outgoing)| {
+            if cluster.is_dependency_sink() {
+                let detail = if *incoming > 0 && *incoming != *total {
+                    format!("  in:{}", incoming)
+                } else {
+                    String::new()
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>3} ", total),
+                        Style::default()
+                            .fg(ACCENT_MAUVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        super::widgets::truncate_str(label, 20),
+                        Style::default().fg(FG_TEXT),
+                    ),
+                    Span::styled(detail, Style::default().fg(FG_OVERLAY)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>3} ", total),
+                        Style::default()
+                            .fg(ACCENT_MAUVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        super::widgets::truncate_str(label, 18),
+                        Style::default().fg(FG_TEXT),
+                    ),
+                    Span::styled(
+                        format!("  in:{} out:{}", incoming, outgoing),
+                        Style::default().fg(FG_OVERLAY),
+                    ),
+                ])
+            }
+        })
+        .collect::<Vec<_>>();
+    member_lines.insert(0, Line::from(""));
+    render_padded_section_paragraph(
+        frame,
+        members_col,
+        panel_title(if cluster.is_dependency_sink() {
+            "Top dependencies"
+        } else {
+            "Key members"
+        }),
+        member_lines,
+    );
+
+    let mut bridge_lines = Vec::new();
+    if inbound.is_empty() {
+        bridge_lines.push(Line::from(Span::styled(
+            if cluster.is_dependency_sink() {
+                "  No importing clusters"
+            } else {
+                "  No incoming links"
+            },
+            Style::default().fg(FG_OVERLAY),
+        )));
+    } else {
+        bridge_lines.extend(
+            inbound
+                .iter()
+                .take(bridge_limit)
+                .map(|(name, weight, count)| {
+                    Line::from(format!(
+                        "  {}  {} weight, {} links",
+                        super::widgets::truncate_str(name, 18),
+                        weight,
+                        count
+                    ))
+                }),
+        );
+    }
+    if !outbound.is_empty() {
+        bridge_lines.push(Line::from(""));
+        bridge_lines.push(Line::from(Span::styled(
+            "Outgoing",
+            Style::default()
+                .fg(Color::Rgb(250, 179, 135))
+                .add_modifier(Modifier::BOLD),
+        )));
+        bridge_lines.extend(
+            outbound
+                .iter()
+                .take(bridge_limit)
+                .map(|(name, weight, count)| {
+                    Line::from(format!(
+                        "  {}  {} weight, {} links",
+                        super::widgets::truncate_str(name, 18),
+                        weight,
+                        count
+                    ))
+                }),
+        );
+    }
+    bridge_lines.insert(0, Line::from(""));
+    render_padded_section_paragraph(
+        frame,
+        bridges_col,
+        panel_title(if cluster.is_dependency_sink() {
+            "Importing clusters"
+        } else {
+            "Cluster links"
+        }),
+        bridge_lines,
+    );
+}
+
+fn render_relation_group_block(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    rows: &[(String, (u32, usize))],
+    accent: Color,
+    empty_message: &str,
+) {
+    let block = Block::default().title(subsection_title(title));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height <= 1 {
+        return;
+    }
+
+    let content = Rect {
+        x: inner.x.saturating_add(1),
+        y: inner.y.saturating_add(1),
+        width: inner.width.saturating_sub(1),
+        height: inner.height.saturating_sub(1),
+    };
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("  {}", empty_message),
+                Style::default().fg(FG_OVERLAY),
+            ))),
+            content,
+        );
+        return;
+    }
+
+    let rows_per_column = content.height.max(1) as usize;
+    let max_columns = if content.width >= 42 { 2 } else { 1 };
+    let total_capacity = rows_per_column.saturating_mul(max_columns);
+    let needs_more = rows.len() > total_capacity;
+    let visible_capacity = if needs_more {
+        total_capacity.saturating_sub(1).max(1)
+    } else {
+        total_capacity
+    };
+    let visible_rows = rows.iter().take(visible_capacity).collect::<Vec<_>>();
+    let hidden_count = rows.len().saturating_sub(visible_rows.len());
+    let column_count = visible_rows.len().div_ceil(rows_per_column).max(1);
+    let column_width = (content.width / column_count as u16).max(1);
+    let buf = frame.buffer_mut();
+
+    for (idx, (label, (weight, count))) in visible_rows.iter().enumerate() {
+        let column = idx / rows_per_column;
+        let row = idx % rows_per_column;
+        let x = content.x + (column as u16 * column_width);
+        let y = content.y + row as u16;
+        if y >= content.y + content.height || x >= content.x + content.width {
+            continue;
+        }
+
+        let available = content
+            .width
+            .saturating_sub((column as u16 * column_width) + 1)
+            .min(column_width)
+            .max(8) as usize;
+        let prefix = format!("{:>3} ", weight);
+        let suffix = if *count > 1 {
+            format!("  x{}", count)
+        } else {
+            String::new()
+        };
+        let label_width = available.saturating_sub(prefix.len() + suffix.len());
+        let clipped = super::widgets::truncate_str(label, label_width.max(4));
+        let line = format!("{}{}{}", prefix, clipped, suffix);
+        let display = super::widgets::truncate_str(&line, available);
+        buf.set_string(
+            x,
+            y,
+            display,
+            Style::default().fg(if column == 0 { accent } else { FG_TEXT }),
+        );
+    }
+
+    if hidden_count > 0 {
+        let idx = visible_rows.len();
+        let column = idx / rows_per_column;
+        let row = idx % rows_per_column;
+        let x = content.x + (column as u16 * column_width);
+        let y = content.y + row as u16;
+        if y < content.y + content.height && x < content.x + content.width {
+            let message = format!("+{} more", hidden_count);
+            let available = content
+                .width
+                .saturating_sub((column as u16 * column_width) + 1)
+                .min(column_width)
+                .max(8) as usize;
+            buf.set_string(
+                x,
+                y,
+                super::widgets::truncate_str(&message, available),
+                Style::default().fg(FG_OVERLAY),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelationLensData {
+    member_id: usize,
+    member_label: String,
+    inbound_rows: Vec<(String, (u32, usize))>,
+    outbound_rows: Vec<(String, (u32, usize))>,
+    inbound_total: u32,
+    outbound_total: u32,
+    internal_relations: usize,
+    role_label: &'static str,
+}
+
+fn selected_role_label(app: &App, node_id: usize) -> &'static str {
+    if app.internal_node_indices.contains(&node_id) {
+        "internal member"
+    } else {
+        "external dependency"
+    }
+}
+
+fn build_selected_relation_lens(
+    app: &App,
+    map: &ArchitectureMap,
+    cluster: &ClusterNode,
+    member_id: usize,
+) -> RelationLensData {
+    let cluster_set = cluster.members.iter().copied().collect::<HashSet<_>>();
+    let detailed_external_members = cluster.is_dependency_sink();
+    let mut inbound = HashMap::<String, (u32, usize)>::new();
+    let mut outbound = HashMap::<String, (u32, usize)>::new();
+
+    for (edge_idx, &(from, to)) in app.graph_layout.edges.iter().enumerate() {
+        let weight = app
+            .graph_layout
+            .edge_weights
+            .get(edge_idx)
+            .copied()
+            .unwrap_or(1);
+        if to == member_id {
+            let source = if cluster_set.contains(&from) || detailed_external_members {
+                app.graph_layout.labels[from].clone()
+            } else {
+                map.clusters[map.cluster_of_node[from]].name.clone()
+            };
+            let entry = inbound.entry(source).or_insert((0, 0));
+            entry.0 += weight;
+            entry.1 += 1;
+        }
+        if from == member_id {
+            let target = if cluster_set.contains(&to) || detailed_external_members {
+                app.graph_layout.labels[to].clone()
+            } else {
+                map.clusters[map.cluster_of_node[to]].name.clone()
+            };
+            let entry = outbound.entry(target).or_insert((0, 0));
+            entry.0 += weight;
+            entry.1 += 1;
+        }
+    }
+
+    let mut inbound_rows = inbound.into_iter().collect::<Vec<_>>();
+    inbound_rows.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+    let mut outbound_rows = outbound.into_iter().collect::<Vec<_>>();
+    outbound_rows.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+    let inbound_total = inbound_rows.iter().map(|(_, (weight, _))| *weight).sum();
+    let outbound_total = outbound_rows.iter().map(|(_, (weight, _))| *weight).sum();
+    let internal_relations = app
+        .graph_layout
+        .edges
+        .iter()
+        .filter(|&&(from, to)| {
+            (from == member_id || to == member_id)
+                && cluster_set.contains(&from)
+                && cluster_set.contains(&to)
+        })
+        .count();
+
+    RelationLensData {
+        member_id,
+        member_label: app.graph_layout.labels[member_id].clone(),
+        inbound_rows,
+        outbound_rows,
+        inbound_total,
+        outbound_total,
+        internal_relations,
+        role_label: selected_role_label(app, member_id),
+    }
+}
+
+fn render_cluster_focus_preview(frame: &mut Frame, area: Rect, app: &App, cluster_id: usize) {
+    if area.width < 24 || area.height < 8 {
+        return;
+    }
+
+    let Some(map) = app.architecture_map.as_ref() else {
+        return;
+    };
+    let Some(cluster) = map.clusters.get(cluster_id) else {
+        return;
+    };
+    let Some(focus_id) = app
+        .selected_sidebar_member()
+        .or_else(|| cluster.members.first().copied())
+    else {
+        return;
+    };
+    let lens = build_selected_relation_lens(app, map, cluster, focus_id);
+
+    let is_focused = app.focused_panel == FocusedPanel::Graph;
+    let border_color = if is_focused {
+        BORDER_FOCUSED
+    } else {
+        BORDER_UNFOCUSED
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(BG_SURFACE));
+    let block = block.title(panel_title(format!(
+        "{} [{} inbound{}]",
+        if cluster.is_dependency_sink() {
+            "Dependency Lens"
+        } else {
+            "Member Lens"
+        },
+        lens.inbound_rows.len(),
+        if lens.outbound_rows.is_empty() {
+            String::new()
+        } else {
+            format!(", {} outbound", lens.outbound_rows.len())
+        }
+    )));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 20 || inner.height < 6 {
+        return;
+    }
+
+    let is_dependency_sink = cluster.is_dependency_sink();
+    let has_outbound = !lens.outbound_rows.is_empty();
+    let section_constraints = if has_outbound {
+        vec![
+            Constraint::Percentage(58),
+            Constraint::Length(1),
+            Constraint::Percentage(18),
+            Constraint::Length(1),
+            Constraint::Percentage(24),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(58),
+            Constraint::Length(1),
+            Constraint::Percentage(42),
+        ]
+    };
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(section_constraints)
+        .split(inner);
+    if has_outbound {
+        render_vertical_separator(frame, sections[1], 1);
+        render_vertical_separator(frame, sections[3], 1);
+    } else {
+        render_vertical_separator(frame, sections[1], 1);
+    }
+    let inbound_col = sections[0];
+    let center_col = sections[2];
+    let outbound_col = if has_outbound {
+        Some(sections[4])
+    } else {
+        None
+    };
+    let inbound_title = if is_dependency_sink {
+        format!("Direct importers [{}]", lens.inbound_rows.len())
+    } else {
+        format!("Incoming links [{}]", lens.inbound_rows.len())
+    };
+
+    render_relation_group_block(
+        frame,
+        inbound_col,
+        &inbound_title,
+        &lens.inbound_rows,
+        Color::Rgb(148, 226, 213),
+        "No incoming links",
+    );
+    if let Some(outbound_col) = outbound_col {
+        let outbound_title = format!("Outgoing links [{}]", lens.outbound_rows.len());
+        render_relation_group_block(
+            frame,
+            outbound_col,
+            &outbound_title,
+            &lens.outbound_rows,
+            Color::Rgb(250, 179, 135),
+            "No outgoing links",
+        );
+    }
+
+    let center_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            super::widgets::truncate_str(
+                &lens.member_label,
+                center_col.width.saturating_sub(4) as usize,
+            ),
+            Style::default()
+                .fg(Color::Rgb(255, 232, 115))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Cluster: {}", cluster.name),
+            Style::default().fg(FG_OVERLAY),
+        )),
+        Line::from(Span::styled(
+            format!("Role: {}", lens.role_label),
+            Style::default().fg(FG_OVERLAY),
+        )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Incoming weight: {}", lens.inbound_total),
+            Style::default().fg(Color::Rgb(148, 226, 213)),
+        )),
+        if has_outbound {
+            Line::from(Span::styled(
+                format!("Outgoing weight: {}", lens.outbound_total),
+                Style::default().fg(Color::Rgb(250, 179, 135)),
+            ))
+        } else {
+            Line::from("")
+        },
+        Line::from(Span::styled(
+            if is_dependency_sink {
+                format!("One-hop importers: {}", lens.inbound_rows.len())
+            } else {
+                format!("Internal relations: {}", lens.internal_relations)
+            },
+            Style::default().fg(if is_dependency_sink {
+                ACCENT_BLUE
+            } else {
+                ACCENT_LAVENDER
+            }),
+        )),
+    ];
+    render_padded_section_paragraph(
+        frame,
+        center_col,
+        subsection_title(if is_dependency_sink {
+            "Dependency details"
+        } else {
+            "Member details"
+        }),
+        center_lines,
+    );
+}
+
+fn render_padded_section_paragraph(
+    frame: &mut Frame,
+    area: Rect,
+    title: Span<'static>,
+    lines: Vec<Line<'static>>,
+) {
+    let block = Block::default().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let content = Rect {
+        x: inner.x.saturating_add(1),
+        y: inner.y,
+        width: inner.width.saturating_sub(1),
+        height: inner.height,
+    };
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), content);
+}
+
+fn render_vertical_separator(frame: &mut Frame, area: Rect, inset: u16) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let buf = frame.buffer_mut();
+    let start_y = area.y.saturating_add(inset);
+    let end_y = area.y + area.height.saturating_sub(inset);
+    for y in start_y..end_y {
+        buf[(area.x, y)]
+            .set_symbol("|")
+            .set_style(Style::default().fg(Color::Rgb(88, 91, 124)));
     }
 }
 
@@ -2100,15 +4793,9 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
         BORDER_UNFOCUSED
     };
 
-    let pkgs = app.get_sorted_packages();
-    let total = app.graph_layout.labels.len();
-    let shown = pkgs.len();
-
-    let title_str = if shown < total {
-        format!(" Packages ({}/{}) ", shown, total)
-    } else {
-        format!(" Packages ({}) ", total)
-    };
+    let entries = app.sidebar_entries();
+    let shown = entries.len();
+    let title_str = app.sidebar_title(shown);
 
     let block = Block::default()
         .title(Span::styled(
@@ -2128,28 +4815,26 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if pkgs.is_empty() {
+    if entries.is_empty() {
         let empty = Paragraph::new("  (empty)").style(Style::default().fg(FG_OVERLAY));
         frame.render_widget(empty, inner);
         return;
     }
 
     let max_visible = inner.height as usize;
-    let effective_offset = app.pkg_scroll_offset.min(pkgs.len().saturating_sub(1));
-    let list_height = if pkgs.len() > max_visible {
-        max_visible.saturating_sub(1)
-    } else {
-        max_visible
-    };
+    let list_height = app.sidebar_visible_capacity(entries.len()).min(max_visible);
+    let max_offset = entries.len().saturating_sub(list_height.max(1));
+    let effective_offset = app.pkg_scroll_offset.min(max_offset);
 
     let filter_lower = app.filter_text.to_lowercase();
     let mut lines: Vec<Line> = Vec::new();
 
-    for (rel_i, label) in pkgs.iter().enumerate().skip(effective_offset) {
+    for (rel_i, entry) in entries.iter().enumerate().skip(effective_offset) {
         if lines.len() >= list_height {
             break;
         }
 
+        let label = sidebar_label(entry);
         let short = super::widgets::truncate_str(label, inner.width.saturating_sub(5) as usize);
 
         let is_selected = app.selected_pkg_index == Some(rel_i);
@@ -2158,22 +4843,24 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
 
         let (fg, bg) = if is_selected && is_focused {
             (Color::White, BG_SURFACE1)
+        } else if is_selected {
+            (FG_TEXT, BG_SURFACE1)
         } else if is_filter_match {
             (ACCENT_LAVENDER, BG_SURFACE)
         } else {
             (FG_TEXT, BG_SURFACE)
         };
 
-        let modifier = if (is_selected && is_focused) || is_filter_match {
+        let modifier = if is_selected || is_filter_match {
             Modifier::BOLD
         } else {
             Modifier::empty()
         };
 
-        let prefix = if is_selected && is_focused {
-            " ❯ "
-        } else {
-            "   "
+        let prefix = if is_selected { " ❯ " } else { "   " };
+        let marker = match entry {
+            SidebarEntry::Cluster { .. } => "> ",
+            SidebarEntry::Member { .. } => "- ",
         };
 
         lines.push(Line::from(vec![
@@ -2185,15 +4872,21 @@ fn render_package_list_v2(frame: &mut Frame, area: Rect, app: &App) {
                     FG_OVERLAY
                 }),
             ),
+            Span::styled(marker, Style::default().fg(FG_OVERLAY).bg(bg)),
             Span::styled(short, Style::default().fg(fg).bg(bg).add_modifier(modifier)),
         ]));
     }
 
     // Scroll indicator
-    if pkgs.len() > max_visible {
-        let visible_end = (effective_offset + list_height).min(pkgs.len());
+    if entries.len() > list_height {
+        let visible_end = (effective_offset + list_height).min(entries.len());
         lines.push(Line::from(Span::styled(
-            format!(" [{}-{}/{}]", effective_offset + 1, visible_end, pkgs.len()),
+            format!(
+                " [{}-{}/{}]",
+                effective_offset + 1,
+                visible_end,
+                entries.len()
+            ),
             Style::default().fg(FG_OVERLAY),
         )));
     }
@@ -2227,12 +4920,7 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
         inner.height.saturating_sub(1),
     );
 
-    let tabs = [
-        ("Health", InsightTab::Health),
-        ("Spots", InsightTab::Hotspots),
-        ("Trend", InsightTab::Trends),
-        ("Blast", InsightTab::Blast),
-    ];
+    let tabs = insight_tab_specs(app);
 
     let mut tab_spans = Vec::new();
     for (i, (label, tab)) in tabs.iter().enumerate() {
@@ -2260,20 +4948,28 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // ── Render active tab content ──
     match app.insight_tab {
-        InsightTab::Health => {
-            render_insight_panel(
-                frame,
-                content_area,
-                &app.current_drift,
-                &app.advisory_lines,
-                &app.scoring_config.weights,
-            );
+        InsightTab::Overview => {
+            if matches!(app.active_view, ActiveView::Inspect(_)) {
+                super::insight_panel::render_module_inspector(frame, content_area, app);
+            } else {
+                let contextual_lines = app.context_advisory_lines();
+                let trend_data =
+                    build_trend_data(&app.snapshots_metadata, app.timeline.current_index);
+                render_insight_panel(
+                    frame,
+                    content_area,
+                    &app.current_drift,
+                    &contextual_lines,
+                    &app.advisory_lines,
+                    &app.scoring_config.weights,
+                    &trend_data,
+                    app.timeline.current_index,
+                    app.timeline.len(),
+                );
+            }
         }
         InsightTab::Hotspots => {
             render_hotspots_tab(frame, content_area, app);
-        }
-        InsightTab::Trends => {
-            render_trends_tab(frame, content_area, app);
         }
         InsightTab::Blast => {
             super::insight_panel::render_blast_radius_panel(
@@ -2284,6 +4980,20 @@ fn render_insights_tabbed(frame: &mut Frame, area: Rect, app: &mut App) {
             );
         }
     }
+}
+
+fn insight_tab_specs(app: &App) -> Vec<(&'static str, InsightTab)> {
+    let first_label = if matches!(app.active_view, ActiveView::Inspect(_)) {
+        "Module"
+    } else {
+        "Overview"
+    };
+
+    vec![
+        (first_label, InsightTab::Overview),
+        ("Hotspots", InsightTab::Hotspots),
+        ("Blast", InsightTab::Blast),
+    ]
 }
 
 /// Renders the hotspots tab content
@@ -2395,7 +5105,7 @@ fn render_hotspots_tab(frame: &mut Frame, area: Rect, app: &mut App) {
     .header(header)
     .block(
         Block::default().title(Span::styled(
-            format!(" HOTSPOTS (s:sort by {}) ", sort_label),
+            format!(" HOTSPOTS (repo, s:sort by {}) ", sort_label),
             Style::default()
                 .fg(ACCENT_LAVENDER)
                 .add_modifier(Modifier::BOLD),
@@ -2410,165 +5120,20 @@ fn render_hotspots_tab(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(t, area, &mut app.hotspots_state);
 }
 
-/// Renders the trends tab content
-fn render_trends_tab(frame: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::Sparkline;
-
-    let trend_data = build_trend_data(&app.snapshots_metadata, app.timeline.current_index);
-    let health_data: Vec<u64> = trend_data
-        .iter()
-        .map(|d| 100u64.saturating_sub(*d))
-        .collect();
-
-    let drift_val = app.current_drift.as_ref().map(|d| d.total).unwrap_or(0);
-    let health_val = 100u8.saturating_sub(drift_val);
-    let health_color = drift_color(drift_val);
-
-    // Adaptive: if very little height, just show the sparkline
-    if area.height < 6 {
-        let sparkline = Sparkline::default()
-            .block(
-                Block::default().title(Span::styled(
-                    format!(" HEALTH {}% ", health_val),
-                    Style::default()
-                        .fg(health_color)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            )
-            .data(&health_data)
-            .max(100)
-            .style(Style::default().fg(health_color));
-        frame.render_widget(sparkline, area);
-        return;
-    }
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Current value header
-            Constraint::Length(8), // Health sparkline (fixed height, optimal for TUI)
-            Constraint::Length(3), // Summary stats
-            Constraint::Min(0),    // Pad remaining space to prevent stretching
-        ])
-        .split(area);
-
-    // ── Current Health Value ──
-    let health_line = Line::from(vec![
-        Span::styled(" HEALTH ", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            format!("{}%", health_val),
-            Style::default()
-                .fg(health_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  DEBT {}", drift_val),
-            Style::default().fg(FG_OVERLAY),
-        ),
-    ]);
-
-    // Trend direction indicator
-    let trend_dir = if trend_data.len() >= 2 {
-        let prev = trend_data[trend_data.len().saturating_sub(2)];
-        let curr = trend_data[trend_data.len() - 1];
-        if curr < prev {
-            ("  improving", COLOR_HEALTHY)
-        } else if curr > prev {
-            ("  degrading", COLOR_DANGER)
-        } else {
-            ("  stable", ACCENT_BLUE)
-        }
-    } else {
-        ("", FG_OVERLAY)
-    };
-    let dir_line = Line::from(vec![
-        Span::styled(
-            format!(" Last {} commits", trend_data.len()),
-            Style::default().fg(FG_OVERLAY),
-        ),
-        Span::styled(trend_dir.0, Style::default().fg(trend_dir.1)),
-    ]);
-
-    frame.render_widget(Paragraph::new(vec![health_line, dir_line]), chunks[0]);
-
-    // ── Health Sparkline ──
-    let sparkline = Sparkline::default()
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
-        )
-        .data(&health_data)
-        .max(100)
-        .style(Style::default().fg(health_color));
-    frame.render_widget(sparkline, chunks[1]);
-
-    // ── Summary Stats ──
-    let (min_h, max_h, avg_h) = if !health_data.is_empty() {
-        let min = *health_data.iter().min().unwrap_or(&0);
-        let max = *health_data.iter().max().unwrap_or(&100);
-        let sum: u64 = health_data.iter().sum();
-        let avg = sum / health_data.len() as u64;
-        (min, max, avg)
-    } else {
-        (0, 100, 50)
-    };
-
-    let stats_line1 = Line::from(vec![
-        Span::styled(" Min:", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            format!("{:>3}%", min_h),
-            Style::default().fg(drift_color(100 - min_h as u8)),
-        ),
-        Span::styled("  Avg:", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            format!("{:>3}%", avg_h),
-            Style::default().fg(drift_color(100 - avg_h as u8)),
-        ),
-        Span::styled("  Max:", Style::default().fg(FG_OVERLAY)),
-        Span::styled(
-            format!("{:>3}%", max_h),
-            Style::default().fg(drift_color(100 - max_h as u8)),
-        ),
-    ]);
-
-    let stats_line2 = Line::from(vec![Span::styled(
-        format!(
-            " {}/{} commits",
-            app.timeline.current_index + 1,
-            app.timeline.len()
-        ),
-        Style::default().fg(FG_OVERLAY),
-    )]);
-
-    frame.render_widget(
-        Paragraph::new(vec![stats_line1, stats_line2]).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::Rgb(50, 50, 70))),
-        ),
-        chunks[2],
-    );
-}
-
 /// Build trend data from snapshot metadata
 fn build_trend_data(snapshots: &[SnapshotMetadata], current_index: usize) -> Vec<u64> {
     if snapshots.is_empty() {
         return vec![];
     }
-    let end = current_index.min(snapshots.len() - 1);
-    let start = end.saturating_sub(49);
+    let start = current_index.min(snapshots.len() - 1);
+    let end = (start + 49).min(snapshots.len() - 1);
     let slice = &snapshots[start..=end];
 
     let mut data: Vec<u64> = slice
         .iter()
         .map(|s| s.drift.as_ref().map(|d| d.total as u64).unwrap_or(50))
         .collect();
-
-    if data.len() > 1
-        && snapshots.first().map(|s| s.timestamp).unwrap_or(0)
-            > snapshots.last().map(|s| s.timestamp).unwrap_or(0)
-    {
+    if data.len() > 1 {
         data.reverse();
     }
     data
@@ -2576,8 +5141,21 @@ fn build_trend_data(snapshots: &[SnapshotMetadata], current_index: usize) -> Vec
 
 /// Renders the filter bar
 fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let total = app.graph_layout.labels.len();
-    let matched = app.get_sorted_packages().len();
+    let total = if app.should_show_architecture_overview() {
+        app.architecture_map
+            .as_ref()
+            .map(|map| map.clusters.len())
+            .unwrap_or(0)
+    } else if let Some(cluster_id) = app.selected_cluster {
+        app.architecture_map
+            .as_ref()
+            .and_then(|map| map.clusters.get(cluster_id))
+            .map(|cluster| cluster.members.len())
+            .unwrap_or(0)
+    } else {
+        app.graph_layout.labels.len()
+    };
+    let matched = app.sidebar_entries().len();
 
     let line = Line::from(vec![
         Span::styled(
@@ -2606,16 +5184,58 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    // Row 1: Contextual keybinding hints
+    let selected_item_noun = app
+        .selected_cluster
+        .and_then(|cluster_id| {
+            app.architecture_map
+                .as_ref()
+                .and_then(|map| map.clusters.get(cluster_id))
+        })
+        .map(|cluster| {
+            if cluster.is_dependency_sink() {
+                "dependency"
+            } else {
+                "member"
+            }
+        })
+        .unwrap_or("member");
+
     let hints = match app.focused_panel {
         FocusedPanel::Packages => {
-            "j/k:Navigate  enter:Inspect  s:Sort  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
+            if app.should_show_architecture_overview() {
+                "j/k:Navigate  Enter:Open cluster  <-/->:Timeline  /:Filter  ?:Help  q:Quit"
+                    .to_string()
+            } else if app.selected_cluster.is_some() {
+                format!(
+                    "j/k:Navigate  Enter:Inspect {}  <-/->:Timeline  /:Filter  ?:Help  q:Quit",
+                    selected_item_noun
+                )
+            } else {
+                "j/k:Navigate  Enter:Inspect  s:Sort  <-/->:Timeline  /:Filter  ?:Help  q:Quit"
+                    .to_string()
+            }
         }
         FocusedPanel::Graph => {
-            "r:Reheat  c:Center  x:Blast  enter:Inspect  ←/→:Timeline  /:Filter  ?:Help  q:Quit"
+            if app.selected_cluster.is_some() && !matches!(app.active_view, ActiveView::Inspect(_))
+            {
+                format!(
+                    "j/k:Navigate  Enter:Inspect selected {}  Esc:Back  <-/->:Timeline  /:Filter",
+                    selected_item_noun
+                )
+            } else if app.should_show_architecture_overview() {
+                "Enter:Open cluster  c:Reset  x:Blast  <-/->:Timeline  /:Filter  ?:Help  q:Quit"
+                    .to_string()
+            } else {
+                "r:Reheat  c:Center  x:Blast  Enter:Inspect  <-/->:Timeline  /:Filter  ?:Help  q:Quit"
+                    .to_string()
+            }
         }
-        FocusedPanel::Insights => "j/k:Navigate  ←/→:Tab  enter:Inspect  s:Sort  ?:Help  q:Quit",
-        FocusedPanel::Timeline => "j/k:±1  h/l:±10  g/G:Start/End  Space:Play  +/-:Speed  ?:Help",
+        FocusedPanel::Insights => {
+            "j/k:Navigate  h/l:Tab  <-/->:Tab  Enter:Inspect  s:Sort  ?:Help  q:Quit".to_string()
+        }
+        FocusedPanel::Timeline => {
+            "j/k:+/-1  h/l:+/-10  g/G:Start/End  Space:Play  +/-:Speed  ?:Help".to_string()
+        }
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -2626,9 +5246,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         rows[0],
     );
 
-    // Row 2: Status info
     let view_label = match app.current_view() {
+        ViewContext::Overview if app.should_show_architecture_overview() => "MAP".to_string(),
         ViewContext::Overview => "OVERVIEW".to_string(),
+        ViewContext::PackageDetail(n) if app.selected_cluster.is_some() => {
+            format!("CLUSTER: {}", n)
+        }
         ViewContext::PackageDetail(n) => format!("PKG: {}", n),
         ViewContext::ModuleInspect(n) => format!("INSPECT: {}", n),
     };
@@ -2652,6 +5275,17 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         FocusedPanel::Insights => "INSIGHTS",
         FocusedPanel::Timeline => "TIMELINE",
     };
+    let graph_summary = app
+        .architecture_map
+        .as_ref()
+        .map(|map| {
+            format!(
+                "{} modules / {} clusters",
+                app.graph_layout.labels.len(),
+                map.clusters.len()
+            )
+        })
+        .unwrap_or_else(|| format!("{} nodes", app.graph_layout.labels.len()));
 
     let mut status = Line::from(vec![
         Span::styled(
@@ -2660,14 +5294,14 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(ACCENT_MAUVE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
         Span::styled(
             format!("{}/{}", app.timeline.current_index + 1, app.timeline.len()),
             Style::default().fg(ACCENT_LAVENDER),
         ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
         Span::styled(
-            if app.is_playing { "▶" } else { "⏸" },
+            if app.is_playing { "PLAY" } else { "PAUSE" },
             Style::default().fg(if app.is_playing {
                 COLOR_HEALTHY
             } else {
@@ -2681,29 +5315,36 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Style::default().fg(FG_OVERLAY),
         ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
         Span::styled(
             format!("Score: {}%", health),
             Style::default()
                 .fg(health_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
-        Span::styled(
-            format!("{} nodes", app.graph_layout.labels.len()),
-            Style::default().fg(FG_OVERLAY),
-        ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(graph_summary, Style::default().fg(FG_OVERLAY)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
         Span::styled(
             format!("[{}]", panel_name),
             Style::default().fg(ACCENT_BLUE),
         ),
-        Span::styled(" │ ", Style::default().fg(BORDER_UNFOCUSED)),
+        Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)),
         Span::styled(
-            "tab:Panel  b:Sidebar  i:Detail",
+            "Tab:Panel  b:Sidebar  i:Detail",
             Style::default().fg(FG_OVERLAY),
         ),
     ]);
+
+    if app.skipped_snapshot_count > 0 {
+        status
+            .spans
+            .push(Span::styled(" | ", Style::default().fg(BORDER_UNFOCUSED)));
+        status.spans.push(Span::styled(
+            format!("{} snapshots unavailable", app.skipped_snapshot_count),
+            Style::default().fg(COLOR_DANGER),
+        ));
+    }
 
     if app.blast_overlay_active {
         status.spans.push(Span::styled(
@@ -2720,16 +5361,14 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         rows[1],
     );
 }
-
 /// Renders the help overlay
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    // Clear everything behind the overlay so graph nodes don't bleed through
     frame.render_widget(Clear, area);
     let overlay = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 35)));
     frame.render_widget(overlay, area);
 
-    let w = 62.min(area.width.saturating_sub(4));
-    let h = 30.min(area.height.saturating_sub(4));
+    let w = 70.min(area.width.saturating_sub(4));
+    let h = 34.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let help_area = Rect::new(x, y, w, h);
@@ -2750,160 +5389,145 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 
     let help_text = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " NAVIGATION",
-                Style::default()
-                    .fg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "            GRAPH",
-                Style::default()
-                    .fg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" tab    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Next panel      ", Style::default().fg(FG_TEXT)),
-            Span::styled(" r    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Reheat", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" S-tab  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Prev panel      ", Style::default().fg(FG_TEXT)),
-            Span::styled(" c    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Center", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" 1-4   ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Jump to panel   ", Style::default().fg(FG_TEXT)),
-            Span::styled(" enter ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Inspect node", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" enter  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Drill in        ", Style::default().fg(FG_TEXT)),
-            Span::styled(" x    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Blast overlay", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" esc    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Go back         ", Style::default().fg(FG_TEXT)),
-            Span::styled(
-                " TIMELINE",
-                Style::default()
-                    .fg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" /      ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Filter          ", Style::default().fg(FG_TEXT)),
-            Span::styled(" j/k  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("±1 commit", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" ?      ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("This help       ", Style::default().fg(FG_TEXT)),
-            Span::styled(" h/l  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("±10 commits", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled("                        ", Style::default()),
-            Span::styled(" g/G  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Start/End", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                " APP",
-                Style::default()
-                    .fg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("                    ", Style::default()),
-            Span::styled(" Space ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Play/Pause", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" q      ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Quit            ", Style::default().fg(FG_TEXT)),
-            Span::styled(" +/-  ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Speed ±", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" ctrl+c ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Force quit", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![Span::styled(
-            "                        LAYOUT",
-            Style::default()
-                .fg(ACCENT_LAVENDER)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled(
-                " INSIGHTS",
-                Style::default()
-                    .fg(ACCENT_LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("               ", Style::default()),
-            Span::styled(" b    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Toggle sidebar", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" j/k    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Navigate        ", Style::default().fg(FG_TEXT)),
-            Span::styled(" i    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Toggle detail", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" h/l    ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Switch tab", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" s      ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Sort hotspots", Style::default().fg(FG_TEXT)),
-        ]),
-        Line::from(""),
         Line::from(Span::styled(
-            " EDGE COLORS",
+            " GLOBAL",
             Style::default()
                 .fg(ACCENT_LAVENDER)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from("  Tab / Shift+Tab   Next / previous panel"),
+        Line::from("  1-4               Jump to Packages / Graph / Insights / Timeline"),
+        Line::from("  /                 Focus filter input"),
+        Line::from("  ?                 Open this help"),
+        Line::from("  Esc               Back / clear / quit"),
+        Line::from("  q / Ctrl+C        Quit"),
+        Line::from("  Space / p         Play / pause timeline"),
+        Line::from("  b / i             Toggle sidebar / insights"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " PACKAGES",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  j/k or Up/Down    Move selection"),
+        Line::from("  g / G             First / last item"),
+        Line::from("  Enter             Open cluster or inspect member"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " GRAPH",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Overview          j/k move cluster, Enter opens cluster"),
+        Line::from("  Cluster details   j/k moves selection, Enter opens inspect"),
+        Line::from("  Cluster details   Esc returns to the architecture map"),
+        Line::from("  Inspect           Enter opens raw node inspect"),
+        Line::from("  c                 Reset / center current graph view"),
+        Line::from("  r                 Reheat raw force layout"),
+        Line::from("  x                 Toggle blast overlay"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " INSIGHTS",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  j/k or Up/Down    Move within active insight tab"),
+        Line::from("  h/l or Left/Right Switch insight tab"),
+        Line::from("  s                 Sort hotspots"),
+        Line::from("  Enter             Inspect selected hotspot / blast item"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " TIMELINE",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Left/Right        Previous / next commit from most panels"),
+        Line::from("  j/k               Previous / next commit when timeline focused"),
+        Line::from("  h/l               Jump -10 / +10 commits"),
+        Line::from("  g / G             First / last commit"),
+        Line::from("  + / -             Change autoplay speed"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " GRAPH COLORS",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Default graph     Edge color = import weight"),
+        edge_weight_legend_line(),
+        Line::from("  Inspect state     ◆ focus   ◉ hover"),
         Line::from(vec![
+            Span::raw("  Inspect mode      "),
             Span::styled(
-                " \u{2500}\u{2500}",
-                Style::default().fg(Color::Rgb(69, 71, 90)),
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Inbound)),
             ),
-            Span::styled(" w:1       ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(" incoming  ", Style::default().fg(FG_OVERLAY)),
             Span::styled(
-                " \u{2500}\u{2500}",
-                Style::default().fg(Color::Rgb(88, 91, 112)),
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Outbound)),
             ),
-            Span::styled(" w:2-3     ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(" outgoing  ", Style::default().fg(FG_OVERLAY)),
             Span::styled(
-                " \u{2500}\u{2500}",
-                Style::default().fg(Color::Rgb(116, 199, 236)),
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Bidirectional)),
             ),
-            Span::styled(" w:4-7", Style::default().fg(FG_OVERLAY)),
+            Span::styled(" both ways  ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Focus)),
+            ),
+            Span::styled(" focus", Style::default().fg(FG_OVERLAY)),
         ]),
         Line::from(vec![
+            Span::raw("  Search mode       "),
             Span::styled(
-                " \u{2500}\u{2500}",
-                Style::default().fg(Color::Rgb(250, 179, 135)),
+                "◎",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::SearchMatch)),
             ),
-            Span::styled(" w:8-15    ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(" match  ", Style::default().fg(FG_OVERLAY)),
             Span::styled(
-                " \u{2500}\u{2500}",
-                Style::default().fg(Color::Rgb(243, 139, 168)),
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Related)),
             ),
-            Span::styled(" w:16+     ", Style::default().fg(FG_OVERLAY)),
-            Span::styled("(w=imports)", Style::default().fg(FG_OVERLAY)),
+            Span::styled(" related  ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                "◉",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::Hover)),
+            ),
+            Span::styled(" hover", Style::default().fg(FG_OVERLAY)),
         ]),
+        Line::from(vec![
+            Span::raw("  Blast mode        "),
+            Span::styled(
+                "●",
+                Style::default().fg(crate::tui::graph_renderer::blast_color(0.08)),
+            ),
+            Span::styled(" low  ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                "●",
+                Style::default().fg(crate::tui::graph_renderer::blast_color(0.72)),
+            ),
+            Span::styled(" high  ", Style::default().fg(FG_OVERLAY)),
+            Span::styled(
+                "●",
+                Style::default().fg(graph_relation_color(GraphRelationSemantic::CascadeSource)),
+            ),
+            Span::styled(" source", Style::default().fg(FG_OVERLAY)),
+        ]),
+        Line::from("  Default nodes use family hues in semantic mode, neutral in minimal mode."),
+        Line::from(""),
+        Line::from(Span::styled(
+            " MAP COLORS",
+            Style::default()
+                .fg(ACCENT_LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        overview_legend_line_for_help(),
         Line::from(""),
         Line::from(Span::styled(
             "        Press ? or Esc to close",
@@ -2911,7 +5535,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
     ];
 
-    frame.render_widget(Paragraph::new(help_text), inner);
+    frame.render_widget(Paragraph::new(help_text).wrap(Wrap { trim: true }), inner);
 }
 
 pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
@@ -2920,19 +5544,32 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
     use ratatui::backend::CrosstermBackend;
+    use std::io;
+
+    struct TerminalCleanupGuard;
+
+    impl Drop for TerminalCleanupGuard {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+            let mut stdout = io::stdout();
+            let _ = stdout.execute(crossterm::event::DisableMouseCapture);
+            let _ = stdout.execute(LeaveAlternateScreen);
+        }
+    }
 
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     std::io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+    let _cleanup = TerminalCleanupGuard;
     let mut terminal = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?;
 
     loop {
         if let Some(hash) = app.loading_hash.take()
             && let Some(db) = &app.db
-            && let Ok(Some(snapshot)) = db.get_graph_snapshot(&hash)
+            && let Ok(Some(snapshot)) = db.get_graph_snapshot(&app.repo_id, &hash)
         {
-            app.snapshot_cache.insert(hash.clone(), snapshot.clone());
+            app.snapshot_cache.put(hash.clone(), snapshot.clone());
             app.apply_snapshot(&snapshot);
         }
 
@@ -2960,8 +5597,305 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    std::io::stdout().execute(crossterm::event::DisableMouseCapture)?;
-    std::io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_cluster(
+        id: usize,
+        name: &str,
+        kind: super::super::architecture_map::ClusterKind,
+        internal_member_count: usize,
+        external_member_count: usize,
+        inbound_weight: u32,
+        outbound_weight: u32,
+        internal_weight: u32,
+    ) -> ClusterNode {
+        ClusterNode {
+            id,
+            name: name.to_string(),
+            kind,
+            members: (0..internal_member_count + external_member_count).collect(),
+            internal_member_count,
+            external_member_count,
+            anchor_label: format!("{name}/anchor"),
+            layer: 0,
+            x_ratio: 0.5,
+            y_ratio: 0.5,
+            inbound_weight,
+            outbound_weight,
+            internal_weight,
+        }
+    }
+
+    fn make_map(clusters: Vec<ClusterNode>, edges: Vec<ClusterEdge>) -> ArchitectureMap {
+        ArchitectureMap {
+            cluster_of_node: Vec::new(),
+            max_layer: 1,
+            should_default_to_overview: true,
+            clusters,
+            edges,
+        }
+    }
+
+    #[test]
+    fn overview_prefers_internal_cluster_over_dependency_sink() {
+        let map = make_map(
+            vec![
+                make_cluster(
+                    0,
+                    "deps",
+                    super::super::architecture_map::ClusterKind::Deps,
+                    0,
+                    80,
+                    6_000,
+                    0,
+                    0,
+                ),
+                make_cluster(
+                    1,
+                    "ext",
+                    super::super::architecture_map::ClusterKind::Group,
+                    30,
+                    0,
+                    1_000,
+                    900,
+                    120,
+                ),
+            ],
+            vec![ClusterEdge {
+                from: 1,
+                to: 0,
+                total_weight: 1_000,
+                edge_count: 80,
+            }],
+        );
+
+        let cluster = preferred_overview_cluster(&map).expect("overview cluster");
+        assert_eq!(cluster.name, "ext");
+    }
+
+    #[test]
+    fn overview_prefers_internal_bridge_over_dependency_sink_bridge() {
+        let map = make_map(
+            vec![
+                make_cluster(
+                    0,
+                    "core",
+                    super::super::architecture_map::ClusterKind::Group,
+                    20,
+                    0,
+                    300,
+                    280,
+                    200,
+                ),
+                make_cluster(
+                    1,
+                    "runtime",
+                    super::super::architecture_map::ClusterKind::Infra,
+                    16,
+                    0,
+                    220,
+                    240,
+                    180,
+                ),
+                make_cluster(
+                    2,
+                    "deps",
+                    super::super::architecture_map::ClusterKind::Deps,
+                    0,
+                    60,
+                    2_500,
+                    0,
+                    0,
+                ),
+            ],
+            vec![
+                ClusterEdge {
+                    from: 0,
+                    to: 2,
+                    total_weight: 2_500,
+                    edge_count: 160,
+                },
+                ClusterEdge {
+                    from: 0,
+                    to: 1,
+                    total_weight: 320,
+                    edge_count: 24,
+                },
+            ],
+        );
+
+        let bridge = preferred_overview_bridge(&map).expect("overview bridge");
+        assert_eq!((bridge.from, bridge.to), (0, 1));
+    }
+
+    #[test]
+    fn overview_hit_radius_stays_tight_for_small_clusters() {
+        let cluster = make_cluster(
+            0,
+            "cli",
+            super::super::architecture_map::ClusterKind::Entry,
+            4,
+            0,
+            24,
+            18,
+            12,
+        );
+        let radius = overview_cluster_hit_radius(&cluster);
+        assert!(
+            radius <= 10.0,
+            "small clusters should not get oversized hover areas"
+        );
+    }
+
+    #[test]
+    fn overview_terminal_hit_detects_label_area() {
+        let map = make_map(
+            vec![make_cluster(
+                0,
+                "cli",
+                super::super::architecture_map::ClusterKind::Entry,
+                13,
+                0,
+                80,
+                120,
+                32,
+            )],
+            vec![],
+        );
+        let mut app = App::new(None, "repo".to_string(), vec![], None);
+        app.architecture_map = Some(map);
+        app.graph_scale = 1.0;
+        app.graph_pan_x = 0.0;
+        app.graph_pan_y = 0.0;
+        let map_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let width = (map_area.width.saturating_sub(2) as f64) * 2.0;
+        let height = (map_area.height.saturating_sub(2) as f64) * 4.0;
+        let positions = architecture_positions(&app, width, height);
+        let (px, py) = positions[0];
+        let anchor_col = map_area.x + 1 + (px / 2.0) as u16;
+        let anchor_row = map_area.y + 1 + ((height - py) / 4.0) as u16;
+        let label_x = anchor_col + 2;
+        let hit =
+            overview_hit_test_terminal(&app, label_x + 1, anchor_row, map_area, width, height);
+        assert_eq!(
+            hit,
+            Some(0),
+            "hover should stay active over the rendered label"
+        );
+    }
+
+    #[test]
+    fn overview_map_rect_excludes_summary_header() {
+        let area = Rect {
+            x: 4,
+            y: 2,
+            width: 100,
+            height: 30,
+        };
+        let map_rect = overview_map_rect(area);
+        assert_eq!(map_rect.y, area.y + 6);
+        assert_eq!(map_rect.height, area.height.saturating_sub(6));
+    }
+
+    #[test]
+    fn default_graph_node_color_respects_color_mode() {
+        let mut app = App::new(None, "repo".to_string(), vec![], None);
+        assert_eq!(
+            default_graph_node_color(&app, 0),
+            graph_relation_color(GraphRelationSemantic::Neutral)
+        );
+
+        app.clustering_config.presentation = Some(crate::config::ClusteringPresentationConfig {
+            color_mode: crate::config::ClusterColorMode::Semantic,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            default_graph_node_color(&app, 0),
+            crate::tui::graph_renderer::palette_node_color(0)
+        );
+    }
+
+    #[test]
+    fn build_trend_data_uses_scan_order_not_timestamps() {
+        let snapshots = vec![
+            SnapshotMetadata {
+                commit_hash: "latest".to_string(),
+                scan_order: 4,
+                timestamp: 10,
+                drift: Some(DriftScore {
+                    total: 40,
+                    fan_in_delta: 0,
+                    fan_out_delta: 0,
+                    new_cycles: 0,
+                    boundary_violations: 0,
+                    layering_violations: 0,
+                    cognitive_complexity: 0.0,
+                    timestamp: 10,
+                    cycle_debt: 0.0,
+                    layering_debt: 0.0,
+                    hub_debt: 0.0,
+                    coupling_debt: 0.0,
+                    cognitive_debt: 0.0,
+                    instability_debt: 0.0,
+                }),
+            },
+            SnapshotMetadata {
+                commit_hash: "mid".to_string(),
+                scan_order: 3,
+                timestamp: 20,
+                drift: Some(DriftScore {
+                    total: 30,
+                    fan_in_delta: 0,
+                    fan_out_delta: 0,
+                    new_cycles: 0,
+                    boundary_violations: 0,
+                    layering_violations: 0,
+                    cognitive_complexity: 0.0,
+                    timestamp: 20,
+                    cycle_debt: 0.0,
+                    layering_debt: 0.0,
+                    hub_debt: 0.0,
+                    coupling_debt: 0.0,
+                    cognitive_debt: 0.0,
+                    instability_debt: 0.0,
+                }),
+            },
+            SnapshotMetadata {
+                commit_hash: "older".to_string(),
+                scan_order: 2,
+                timestamp: 30,
+                drift: Some(DriftScore {
+                    total: 20,
+                    fan_in_delta: 0,
+                    fan_out_delta: 0,
+                    new_cycles: 0,
+                    boundary_violations: 0,
+                    layering_violations: 0,
+                    cognitive_complexity: 0.0,
+                    timestamp: 30,
+                    cycle_debt: 0.0,
+                    layering_debt: 0.0,
+                    hub_debt: 0.0,
+                    coupling_debt: 0.0,
+                    cognitive_debt: 0.0,
+                    instability_debt: 0.0,
+                }),
+            },
+        ];
+
+        assert_eq!(build_trend_data(&snapshots, 0), vec![20, 30, 40]);
+        assert_eq!(build_trend_data(&snapshots, 1), vec![20, 30]);
+    }
 }

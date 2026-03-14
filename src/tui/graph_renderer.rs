@@ -22,6 +22,37 @@
 use rand::Rng;
 use ratatui::style::Color;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphRelationSemantic {
+    Neutral,
+    Focus,
+    Hover,
+    Inbound,
+    Outbound,
+    Bidirectional,
+    Related,
+    SearchMatch,
+    CascadeSource,
+    CascadeDimmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterMapSemantic {
+    Hovered,
+    Central,
+    ThirdParty,
+    Entrypoint,
+    Support,
+    Neutral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverviewEdgeSemantic {
+    PrimaryBridge,
+    ExternalBridge,
+    ExternalSink,
+}
+
 /// 2D position and velocity for Verlet integration.
 ///
 /// `prev_x/prev_y` encode velocity implicitly:
@@ -616,6 +647,45 @@ pub fn weighted_edge_color(weight: u32) -> Color {
     }
 }
 
+pub fn graph_relation_color(role: GraphRelationSemantic) -> Color {
+    match role {
+        GraphRelationSemantic::Neutral => Color::Rgb(166, 173, 200),
+        GraphRelationSemantic::Focus | GraphRelationSemantic::CascadeSource => {
+            Color::Rgb(255, 232, 115)
+        }
+        GraphRelationSemantic::Hover => Color::White,
+        GraphRelationSemantic::Inbound => Color::Rgb(148, 226, 213),
+        GraphRelationSemantic::Outbound => Color::Rgb(250, 179, 135),
+        GraphRelationSemantic::Bidirectional => Color::Rgb(203, 166, 247),
+        GraphRelationSemantic::Related => Color::Rgb(116, 150, 200),
+        GraphRelationSemantic::SearchMatch => Color::Rgb(137, 220, 255),
+        GraphRelationSemantic::CascadeDimmed => Color::Rgb(49, 50, 68),
+    }
+}
+
+pub fn cluster_map_color(role: ClusterMapSemantic) -> Color {
+    match role {
+        ClusterMapSemantic::Hovered => graph_relation_color(GraphRelationSemantic::Focus),
+        ClusterMapSemantic::Central => Color::Rgb(166, 227, 161),
+        ClusterMapSemantic::ThirdParty => Color::Rgb(125, 173, 189),
+        ClusterMapSemantic::Entrypoint => Color::Rgb(250, 179, 135),
+        ClusterMapSemantic::Support => ACCENT_LAVENDER,
+        ClusterMapSemantic::Neutral => FG_TEXT,
+    }
+}
+
+pub fn overview_edge_color(role: OverviewEdgeSemantic) -> Color {
+    match role {
+        OverviewEdgeSemantic::PrimaryBridge => Color::Rgb(166, 227, 161),
+        OverviewEdgeSemantic::ExternalBridge => Color::Rgb(245, 169, 127),
+        OverviewEdgeSemantic::ExternalSink => Color::Rgb(108, 112, 136),
+    }
+}
+
+pub fn palette_node_color(index: usize) -> Color {
+    NODE_PALETTE[index % NODE_PALETTE.len()]
+}
+
 /// Returns a node color based on blast radius score (0.0–1.0).
 ///
 /// Cool-to-hot gradient matching the Catppuccin theme:
@@ -766,6 +836,34 @@ mod tests {
         assert_eq!(drift_color(61), Color::Rgb(250, 179, 135));
         assert_eq!(drift_color(81), Color::Rgb(243, 139, 168));
         assert_eq!(drift_color(100), Color::Rgb(243, 139, 168));
+    }
+
+    #[test]
+    fn test_graph_relation_semantics_are_distinct() {
+        assert_eq!(
+            graph_relation_color(GraphRelationSemantic::Hover),
+            Color::White
+        );
+        assert_ne!(
+            graph_relation_color(GraphRelationSemantic::Neutral),
+            graph_relation_color(GraphRelationSemantic::Focus)
+        );
+        assert_ne!(
+            graph_relation_color(GraphRelationSemantic::SearchMatch),
+            graph_relation_color(GraphRelationSemantic::Related)
+        );
+    }
+
+    #[test]
+    fn test_cluster_and_edge_semantics_are_stable() {
+        assert_ne!(
+            cluster_map_color(ClusterMapSemantic::ThirdParty),
+            cluster_map_color(ClusterMapSemantic::Central)
+        );
+        assert_ne!(
+            overview_edge_color(OverviewEdgeSemantic::PrimaryBridge),
+            overview_edge_color(OverviewEdgeSemantic::ExternalSink)
+        );
     }
 
     #[test]

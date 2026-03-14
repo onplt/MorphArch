@@ -24,10 +24,23 @@
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::config::{Exemptions, ScoringConfig, Thresholds};
 use crate::models::DriftScore;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DriftTimings {
+    pub cycle: Duration,
+    pub layering: Duration,
+    pub boundary_rules: Duration,
+    pub hub: Duration,
+    pub coupling: Duration,
+    pub cognitive: Duration,
+    pub instability: Duration,
+    pub fan_deltas: Duration,
+}
 
 /// Legacy boundary violation rules — retained only for backward compatibility
 /// with the `analyze` CLI command when no `morpharch.toml` boundaries are configured.
@@ -151,6 +164,46 @@ fn compute_layering_debt(graph: &DiGraph<String, u32>) -> (f64, usize) {
     // Asymptotic scaling: 100 * (1 - e^(-3 * ratio))
     let debt = 100.0 * (1.0 - (-3.0 * violation_ratio).exp());
     (debt, violations)
+}
+
+fn compute_boundary_rule_violations(graph: &DiGraph<String, u32>, config: &ScoringConfig) -> usize {
+    if config.boundaries.is_empty() {
+        return 0;
+    }
+
+    let mut source_rule_cache: HashMap<NodeIndex, Vec<usize>> = HashMap::new();
+    for node_idx in graph.node_indices() {
+        let from = &graph[node_idx];
+        let matching_rules: Vec<usize> = config
+            .boundaries
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_idx, rule)| rule.matches_from(from).then_some(rule_idx))
+            .collect();
+        if !matching_rules.is_empty() {
+            source_rule_cache.insert(node_idx, matching_rules);
+        }
+    }
+
+    let mut target_rule_cache: HashMap<(usize, NodeIndex), bool> = HashMap::new();
+    let mut violations = 0usize;
+    for edge_idx in graph.edge_indices() {
+        let Some((src, tgt)) = graph.edge_endpoints(edge_idx) else {
+            continue;
+        };
+        let Some(rule_indices) = source_rule_cache.get(&src) else {
+            continue;
+        };
+        let to = &graph[tgt];
+        if rule_indices.iter().any(|&rule_idx| {
+            *target_rule_cache
+                .entry((rule_idx, tgt))
+                .or_insert_with(|| config.boundaries[rule_idx].matches_to(to))
+        }) {
+            violations += 1;
+        }
+    }
+    violations
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -560,6 +613,7 @@ pub fn calculate_drift(
             fan_out_delta: 0,
             new_cycles: 0,
             boundary_violations: 0,
+            layering_violations: 0,
             cognitive_complexity: 0.0,
             timestamp,
             cycle_debt: 0.0,
@@ -573,7 +627,15 @@ pub fn calculate_drift(
 
     // ── Compute all 6 components ──
     let (cycle_score, scc_count) = compute_cycle_debt(graph);
-    let (layering_score, back_edges) = compute_layering_debt(graph);
+    let (structural_layering_score, layering_violations) = compute_layering_debt(graph);
+    let boundary_violations = compute_boundary_rule_violations(graph, config);
+    let boundary_rule_score = if graph.edge_count() == 0 || boundary_violations == 0 {
+        0.0
+    } else {
+        let ratio = boundary_violations as f64 / graph.edge_count() as f64;
+        100.0 * (1.0 - (-3.0 * ratio).exp())
+    };
+    let layering_score = structural_layering_score.max(boundary_rule_score);
     let hub_score = compute_hub_debt(graph, &config.thresholds, &config.exemptions);
     let coupling_score = compute_coupling_debt(graph);
     let cognitive_score = compute_cognitive_debt(graph);
@@ -600,6 +662,8 @@ pub fn calculate_drift(
         total_debt,
         cycle_score,
         layering_score,
+        structural_layering_score,
+        boundary_rule_score,
         hub_score,
         coupling_score,
         cognitive_score,
@@ -612,7 +676,8 @@ pub fn calculate_drift(
         fan_in_delta,
         fan_out_delta,
         new_cycles: scc_count,
-        boundary_violations: back_edges,
+        boundary_violations,
+        layering_violations,
         cognitive_complexity: cog_complexity,
         timestamp,
         cycle_debt: (cycle_score * 10.0).round() / 10.0,
@@ -622,6 +687,123 @@ pub fn calculate_drift(
         cognitive_debt: (cognitive_score * 10.0).round() / 10.0,
         instability_debt: (instability_score * 10.0).round() / 10.0,
     }
+}
+
+pub fn calculate_drift_profiled(
+    graph: &DiGraph<String, u32>,
+    prev_graph: Option<&DiGraph<String, u32>>,
+    timestamp: i64,
+    config: &ScoringConfig,
+) -> (DriftScore, DriftTimings) {
+    let mut timings = DriftTimings::default();
+    let n = graph.node_count();
+
+    if n == 0 {
+        return (
+            DriftScore {
+                total: 0,
+                fan_in_delta: 0,
+                fan_out_delta: 0,
+                new_cycles: 0,
+                boundary_violations: 0,
+                layering_violations: 0,
+                cognitive_complexity: 0.0,
+                timestamp,
+                cycle_debt: 0.0,
+                layering_debt: 0.0,
+                hub_debt: 0.0,
+                coupling_debt: 0.0,
+                cognitive_debt: 0.0,
+                instability_debt: 0.0,
+            },
+            timings,
+        );
+    }
+
+    let cycle_start = Instant::now();
+    let (cycle_score, scc_count) = compute_cycle_debt(graph);
+    timings.cycle += cycle_start.elapsed();
+
+    let layering_start = Instant::now();
+    let (structural_layering_score, layering_violations) = compute_layering_debt(graph);
+    timings.layering += layering_start.elapsed();
+
+    let boundary_start = Instant::now();
+    let boundary_violations = compute_boundary_rule_violations(graph, config);
+    timings.boundary_rules += boundary_start.elapsed();
+
+    let boundary_rule_score = if graph.edge_count() == 0 || boundary_violations == 0 {
+        0.0
+    } else {
+        let ratio = boundary_violations as f64 / graph.edge_count() as f64;
+        100.0 * (1.0 - (-3.0 * ratio).exp())
+    };
+    let layering_score = structural_layering_score.max(boundary_rule_score);
+
+    let hub_start = Instant::now();
+    let hub_score = compute_hub_debt(graph, &config.thresholds, &config.exemptions);
+    timings.hub += hub_start.elapsed();
+
+    let coupling_start = Instant::now();
+    let coupling_score = compute_coupling_debt(graph);
+    timings.coupling += coupling_start.elapsed();
+
+    let cognitive_start = Instant::now();
+    let cognitive_score = compute_cognitive_debt(graph);
+    timings.cognitive += cognitive_start.elapsed();
+
+    let instability_start = Instant::now();
+    let instability_score = compute_instability_debt(graph, &config.thresholds, &config.exemptions);
+    timings.instability += instability_start.elapsed();
+
+    let w = config.weights.normalized();
+    let total_debt = (w.cycle * cycle_score
+        + w.layering * layering_score
+        + w.hub * hub_score
+        + w.coupling * coupling_score
+        + w.cognitive * cognitive_score
+        + w.instability * instability_score)
+        .round()
+        .min(100.0) as u8;
+
+    let fan_delta_start = Instant::now();
+    let (fan_in_delta, fan_out_delta) = compute_fan_deltas(graph, prev_graph);
+    timings.fan_deltas += fan_delta_start.elapsed();
+
+    let cog_complexity = (cognitive_score * 10.0).round() / 10.0;
+
+    debug!(
+        total_debt,
+        cycle_score,
+        layering_score,
+        structural_layering_score,
+        boundary_rule_score,
+        hub_score,
+        coupling_score,
+        cognitive_score,
+        instability_score,
+        "Architectural Health assessment complete"
+    );
+
+    (
+        DriftScore {
+            total: total_debt,
+            fan_in_delta,
+            fan_out_delta,
+            new_cycles: scc_count,
+            boundary_violations,
+            layering_violations,
+            cognitive_complexity: cog_complexity,
+            timestamp,
+            cycle_debt: (cycle_score * 10.0).round() / 10.0,
+            layering_debt: (layering_score * 10.0).round() / 10.0,
+            hub_debt: (hub_score * 10.0).round() / 10.0,
+            coupling_debt: (coupling_score * 10.0).round() / 10.0,
+            cognitive_debt: (cognitive_score * 10.0).round() / 10.0,
+            instability_debt: (instability_score * 10.0).round() / 10.0,
+        },
+        timings,
+    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -699,8 +881,8 @@ pub fn generate_diagnostics(
     }
 
     // ── Layering diagnostics ──
-    if drift.layering_debt > 10.0 && drift.boundary_violations > 0 {
-        let count = drift.boundary_violations;
+    if drift.layering_debt > 10.0 && drift.layering_violations > 0 {
+        let count = drift.layering_violations;
         if count == 1 {
             lines.push(
                 "1 extra cross-cutting edge inside a cycle. \
@@ -712,6 +894,20 @@ pub fn generate_diagnostics(
                 "{} extra edges inside dependency cycles make the \
                  structure harder to follow. Simplify internal wiring.",
                 count
+            ));
+        }
+    }
+
+    if drift.boundary_violations > 0 {
+        if drift.boundary_violations == 1 {
+            lines.push(
+                "1 configured package boundary is being crossed. Tighten module ownership."
+                    .to_string(),
+            );
+        } else {
+            lines.push(format!(
+                "{} configured package boundaries are being crossed. Review the violating edges.",
+                drift.boundary_violations
             ));
         }
     }
@@ -885,7 +1081,7 @@ pub fn generate_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ScoringConfig;
+    use crate::config::{ProjectConfig, ScoringConfig};
 
     fn default_config() -> ScoringConfig {
         ScoringConfig::default()
@@ -1115,9 +1311,31 @@ mod tests {
             score.layering_debt
         );
         assert!(
-            score.boundary_violations > 0,
-            "Back-edges should be counted as boundary violations"
+            score.layering_violations > 0,
+            "Back-edges should be counted as layering violations"
         );
+    }
+
+    #[test]
+    fn test_boundary_rule_violations_raise_layering_debt() {
+        let mut g = DiGraph::new();
+        let packages_core = g.add_node("packages/core".to_string());
+        let apps_web = g.add_node("apps/web".to_string());
+        g.add_edge(packages_core, apps_web, 1);
+
+        let config: ProjectConfig = toml::from_str(
+            r#"
+[[scoring.boundaries]]
+from = "packages/**"
+deny = ["apps/**"]
+"#,
+        )
+        .unwrap();
+
+        let score = calculate_drift(&g, None, 0, &config.scoring);
+        assert_eq!(score.layering_violations, 0);
+        assert_eq!(score.boundary_violations, 1);
+        assert!(score.layering_debt > 0.0);
     }
 
     // ── Test 10: Leaf packages with I=1.0 → 0 instability debt ──
@@ -1330,6 +1548,7 @@ mod tests {
             fan_out_delta: 0,
             new_cycles: 0,
             boundary_violations: 0,
+            layering_violations: 0,
             cognitive_complexity: 0.0,
             timestamp: 0,
             cognitive_debt: 0.0,
