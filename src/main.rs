@@ -9,6 +9,7 @@ use morpharch::cli::{Cli, Commands};
 use morpharch::commands;
 use morpharch::config::{MorphArchConfig, ProjectConfig};
 use morpharch::db::Database;
+use morpharch::git_scanner;
 use morpharch::utils;
 
 fn main() {
@@ -40,20 +41,31 @@ fn run(cli: Cli) -> Result<()> {
     // Dispatch to subcommand
     match cli.command {
         Commands::Scan { path, max_commits } => {
-            let project_config = ProjectConfig::load(&path)?;
+            let repo_root = git_scanner::resolve_repo_root(&path)?;
+            let repo_id = git_scanner::repo_id_for_path(&path)?;
+            let project_config = ProjectConfig::load(&repo_root)?;
             let limit = if max_commits == 0 {
                 usize::MAX
             } else {
                 max_commits
             };
-            execute_scan(&path, &db, limit, &project_config)?;
+            execute_scan(
+                &repo_root,
+                &repo_id,
+                &config.cache_dir,
+                &db,
+                limit,
+                &project_config,
+            )?;
         }
         Commands::Watch {
             path,
             max_commits,
             max_snapshots,
         } => {
-            let project_config = ProjectConfig::load(&path)?;
+            let repo_root = git_scanner::resolve_repo_root(&path)?;
+            let repo_id = git_scanner::repo_id_for_path(&path)?;
+            let project_config = ProjectConfig::load(&repo_root)?;
             let limit = if max_commits == 0 {
                 usize::MAX
             } else {
@@ -62,22 +74,34 @@ fn run(cli: Cli) -> Result<()> {
             // Scan + launch animated TUI
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::watch::run_watch(
-                &path,
+                &repo_root,
+                &repo_id,
+                &config.cache_dir,
                 db,
                 limit,
                 max_snapshots,
                 &project_config,
             ))?;
         }
-        Commands::ListGraphs => {
-            execute_list_graphs(&db)?;
+        Commands::ListGraphs { path } => {
+            let repo_id = git_scanner::repo_id_for_path(&path)?;
+            execute_list_graphs(&db, &repo_id)?;
         }
         Commands::Analyze { commit, path } => {
-            let project_config = ProjectConfig::load(&path)?;
-            commands::analyze::run_analyze(&path, commit.as_deref(), &db, &project_config)?;
+            let repo_root = git_scanner::resolve_repo_root(&path)?;
+            let repo_id = git_scanner::repo_id_for_path(&path)?;
+            let project_config = ProjectConfig::load(&repo_root)?;
+            commands::analyze::run_analyze(
+                &repo_root,
+                &repo_id,
+                commit.as_deref(),
+                &db,
+                &project_config,
+            )?;
         }
-        Commands::ListDrift => {
-            execute_list_drift(&db)?;
+        Commands::ListDrift { path } => {
+            let repo_id = git_scanner::repo_id_for_path(&path)?;
+            execute_list_drift(&db, &repo_id)?;
         }
     }
 
@@ -91,6 +115,8 @@ fn run(cli: Cli) -> Result<()> {
 /// all three steps.
 fn execute_scan(
     path: &std::path::Path,
+    repo_id: &str,
+    cache_dir: &std::path::Path,
     db: &Database,
     max_commits: usize,
     project_config: &ProjectConfig,
@@ -102,14 +128,15 @@ fn execute_scan(
     let start = Instant::now();
 
     // commit scanning + dependency graph + drift scoring
-    let result = commands::scan::run_scan(path, db, max_commits, project_config)?;
+    let result =
+        commands::scan::run_scan(path, repo_id, cache_dir, db, max_commits, project_config)?;
 
     // Calculate elapsed time
     let elapsed = start.elapsed();
 
     // Total record counts in database
-    let total_commits = db.commit_count()?;
-    let total_graphs = db.graph_snapshot_count()?;
+    let total_commits = db.commit_count(repo_id)?;
+    let total_graphs = db.graph_snapshot_count(repo_id)?;
 
     // Result summary
     println!(
@@ -138,15 +165,15 @@ fn execute_scan(
 /// - Node count
 /// - Edge count
 /// - Date (Unix timestamp → readable format)
-fn execute_list_graphs(db: &Database) -> Result<()> {
-    let total = db.graph_snapshot_count()?;
+fn execute_list_graphs(db: &Database, repo_id: &str) -> Result<()> {
+    let total = db.graph_snapshot_count(repo_id)?;
 
     if total == 0 {
         println!("No graph snapshots yet. Run 'morpharch scan <path>' first.");
         return Ok(());
     }
 
-    let graphs = db.list_recent_graphs(10)?;
+    let graphs = db.list_recent_graphs(repo_id, 10)?;
 
     println!("Recent graph snapshots ({total} total):");
     println!();
@@ -191,8 +218,8 @@ fn execute_list_graphs(db: &Database) -> Result<()> {
 ///
 /// Each row: commit hash, message, node count, edge count,
 /// drift score, and delta compared to the previous commit.
-fn execute_list_drift(db: &Database) -> Result<()> {
-    let trend = db.list_drift_trend(20)?;
+fn execute_list_drift(db: &Database, repo_id: &str) -> Result<()> {
+    let trend = db.list_drift_trend(repo_id, 20)?;
 
     if trend.is_empty() {
         println!("No drift data yet. Run 'morpharch scan <path>' first.");

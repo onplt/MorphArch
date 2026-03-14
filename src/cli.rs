@@ -11,7 +11,7 @@
 //   morpharch --help             → Help message
 //
 // Each subcommand takes an optional path; defaults to "." (current directory).
-// list-graphs, list-drift, and analyze do not take a path — they read from DB.
+// All DB-backed commands are repo-scoped and resolve the active repository root.
 // =============================================================================
 
 use clap::{Parser, Subcommand};
@@ -89,7 +89,11 @@ pub enum Commands {
     ///
     /// Shows the last 10 graph snapshots from the database in table format
     /// with commit info.
-    ListGraphs,
+    ListGraphs {
+        /// Path to the Git repository whose cached graphs should be listed
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
 
     /// Show detailed drift report for a specific commit
     ///
@@ -110,5 +114,9 @@ pub enum Commands {
     ///
     /// Displays drift scores, node/edge counts, and delta changes
     /// compared to the previous commit for the last 20 commits.
-    ListDrift,
+    ListDrift {
+        /// Path to the Git repository whose drift trend should be listed
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
 }

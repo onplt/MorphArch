@@ -10,6 +10,7 @@
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::models::{
@@ -99,25 +100,18 @@ fn compute_blast_radius(
         return Vec::new();
     }
 
-    let mut impacts = Vec::with_capacity(n);
-
-    for source in graph.node_indices() {
-        let (downstream_count, weighted_reach) = bfs_blast(graph, source);
-
-        let blast_score = if n > 1 {
-            (weighted_reach / (n - 1) as f64).min(1.0)
-        } else {
-            0.0
-        };
-
-        impacts.push(ModuleImpact {
-            module_name: graph[source].clone(),
-            blast_score,
-            downstream_count,
-            weighted_reach,
-            is_articulation_point: articulation_set.contains(&source),
-        });
-    }
+    let node_indices: Vec<NodeIndex> = graph.node_indices().collect();
+    let mut impacts: Vec<ModuleImpact> = if node_indices.len() < 64 {
+        node_indices
+            .iter()
+            .map(|&source| module_impact_for_source(graph, source, n, articulation_set))
+            .collect()
+    } else {
+        node_indices
+            .par_iter()
+            .map(|&source| module_impact_for_source(graph, source, n, articulation_set))
+            .collect()
+    };
 
     impacts.sort_by(|a, b| {
         b.blast_score
@@ -125,6 +119,29 @@ fn compute_blast_radius(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     impacts
+}
+
+fn module_impact_for_source(
+    graph: &DiGraph<String, u32>,
+    source: NodeIndex,
+    node_count: usize,
+    articulation_set: &HashSet<NodeIndex>,
+) -> ModuleImpact {
+    let (downstream_count, weighted_reach) = bfs_blast(graph, source);
+
+    let blast_score = if node_count > 1 {
+        (weighted_reach / (node_count - 1) as f64).min(1.0)
+    } else {
+        0.0
+    };
+
+    ModuleImpact {
+        module_name: graph[source].clone(),
+        blast_score,
+        downstream_count,
+        weighted_reach,
+        is_articulation_point: articulation_set.contains(&source),
+    }
 }
 
 /// BFS from `source` following incoming edges (reverse direction).

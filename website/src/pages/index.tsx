@@ -1,413 +1,362 @@
 import type {ReactNode} from 'react';
-import React, {useEffect} from 'react';
-import clsx from 'clsx';
 import Link from '@docusaurus/Link';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
-import HomepageFeatures from '@site/src/components/HomepageFeatures';
 import Heading from '@theme/Heading';
 
 import styles from './index.module.css';
 
-// Intersection Observer Hook for Scroll Animations
-function useScrollReveal() {
-  useEffect(() => {
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('visible');
-        }
-      });
-    }, { threshold: 0.1 });
+type Capability = {
+  title: string;
+  body: string;
+};
 
-    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
-    return () => observer.disconnect();
-  }, []);
-}
+type Audience = {
+  title: string;
+  body: string;
+};
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
+type FAQ = {
+  question: string;
+  answer: string;
+};
 
-function TerminalMockup() {
-  return (
-    <div className="terminal-window">
-      <div className="terminal-header">
-        <div className="dot red"></div>
-        <div className="dot yellow"></div>
-        <div className="dot green"></div>
-        <div style={{ marginLeft: '10px', fontSize: '12px', color: '#565f89' }}>morpharch demo</div>
-      </div>
-      <img 
-        src={useBaseUrl('/img/demo.gif')} 
-        alt="MorphArch TUI Demo" 
-        style={{ width: '100%', display: 'block' }} 
-      />
-    </div>
-  );
-}
+const capabilities: Capability[] = [
+  {
+    title: 'Scan Git history',
+    body:
+      'Walk first-parent history, store per-commit snapshots locally, and reuse cache state on repeated scans.',
+  },
+  {
+    title: 'Build a dependency model',
+    body:
+      'Extract dependency edges from Rust, TypeScript, JavaScript, Python, and Go with safe fast paths and AST fallback.',
+  },
+  {
+    title: 'Review structure, drift, and impact',
+    body:
+      'Open the map for grouped structure, inspect hotspots and score drivers, then check blast radius for risky modules.',
+  },
+  {
+    title: 'Tune it per repository',
+    body:
+      'Use morpharch.toml to define ignore rules, package depth, boundaries, clustering, aliases, and presentation overrides.',
+  },
+];
 
-function Compatibility() {
-  return (
-    <section className="compatibility-section reveal">
-      <div className="container">
-        <div className="comp-grid">
-          <span style={{ color: '#565f89', fontWeight: 'bold' }}>WORKS WITH:</span>
-          <div className="comp-item">Nx</div>
-          <div className="comp-item">Turborepo</div>
-          <div className="comp-item">pnpm</div>
-          <div className="comp-item">Cargo</div>
-          <div className="comp-item">Lerna</div>
-        </div>
-      </div>
-    </section>
-  );
-}
+const workflows: Capability[] = [
+  {
+    title: 'Map',
+    body:
+      'Start with grouped clusters and links so large repositories are readable before you look at individual nodes.',
+  },
+  {
+    title: 'Cluster details',
+    body:
+      'Open one subsystem to inspect members, dependency pressure, and the most important incoming or outgoing links.',
+  },
+  {
+    title: 'Inspect',
+    body:
+      'Focus one member when you need graph-level debugging instead of keeping the full raw graph on screen all the time.',
+  },
+];
 
-function VisualComparison() {
-  return (
-    <section style={{ padding: '8rem 0', background: '#16161e' }}>
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>Transform Your Architecture</h2>
-          <p style={{ color: '#9aa5ce' }}>Turn chaotic dependency graphs into structured, maintainable systems.</p>
-        </div>
-        <div className="comparison-container reveal">
-          <div className="comparison-card">
-            <img src="/img/arch-before.svg" alt="Spaghetti Architecture" className="comparison-image" />
-            <p style={{ marginTop: '1rem', color: '#f7768e', fontWeight: 'bold' }}>Chaotic & Cyclic</p>
-          </div>
-          <div className="comparison-arrow">→</div>
-          <div className="comparison-card">
-            <img src="/img/arch-after.svg" alt="Clean Architecture" className="comparison-image" />
-            <p style={{ marginTop: '1rem', color: '#9ece6a', fontWeight: 'bold' }}>Organized & Layered</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
+const audiences: Audience[] = [
+  {
+    title: 'Architects',
+    body:
+      'Review boundaries, coupling, and structural pressure without manually reading a full dependency graph.',
+  },
+  {
+    title: 'Tech leads',
+    body:
+      'Track drift over time, review what changed between commits, and identify parts of the repo that are becoming harder to change.',
+  },
+  {
+    title: 'Developers',
+    body:
+      'Answer practical questions such as who depends on a module, what it pulls in, and what changes are likely to ripple outward.',
+  },
+];
 
-function BuiltForScale() {
-  return (
-    <section style={{ padding: '8rem 0', background: '#1a1b26' }}>
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>Architected for Performance</h2>
-          <p style={{ color: '#9aa5ce', maxWidth: '700px', margin: '0 auto' }}>
-            MorphArch is written in 100% pure Rust. It handles the largest monorepos without breaking a sweat.
-          </p>
-        </div>
-        <div className="perf-grid reveal">
-          <div className="perf-card">
-            <span className="perf-value">&lt; 10s</span>
-            <span className="perf-label">Scan 1000 Commits</span>
-          </div>
-          <div className="perf-card">
-            <span className="perf-value">50k</span>
-            <span className="perf-label">File LRU Cache</span>
-          </div>
-          <div className="perf-card">
-            <span className="perf-value">∞</span>
-            <span className="perf-label">Parallel AST Parsing</span>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
+const faqs: FAQ[] = [
+  {
+    question: 'What kind of repositories is MorphArch for?',
+    answer:
+      'It is most useful for large codebases where dependency structure and architectural drift are hard to inspect manually. It works well with monorepos, but it is also useful on smaller multi-package repositories.',
+  },
+  {
+    question: 'Does it require a complex setup?',
+    answer:
+      'No. You can point it at a repository and start with defaults. Add morpharch.toml only when you want repo-specific control over ignore rules, scan heuristics, scoring, or clustering.',
+  },
+  {
+    question: 'What languages are supported for dependency extraction?',
+    answer:
+      'Out of the box it supports Rust, TypeScript, JavaScript, Python, and Go.',
+  },
+];
 
-function Roadmap() {
-  const items = [
-    { status: 'In Progress', title: 'Web-Based Dashboard', desc: 'A rich browser interface for historical drift analysis.' },
-    { status: 'Planned', title: 'Slack & Discord Alerts', desc: 'Get notified when architecture health drops in a PR.' },
-    { status: 'Planned', title: 'Language Server (LSP)', desc: 'Real-time boundary violation warnings in your IDE.' },
-  ];
+function Hero({title}: {title: string}) {
+  const demoSrc = useBaseUrl('/img/demo.gif');
 
-  return (
-    <section style={{ padding: '8rem 0', background: '#16161e' }}>
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>Future Vision</h2>
-          <p style={{ color: '#9aa5ce' }}>Where MorphArch is headed next.</p>
-        </div>
-        <div className="roadmap-grid">
-          {items.map((item, idx) => (
-            <div key={idx} className="roadmap-item reveal" style={{ transitionDelay: `${idx * 0.1}s` }}>
-              <span className={clsx('roadmap-status', item.status === 'Planned' ? 'status-planned' : 'status-progress')}>
-                {item.status}
-              </span>
-              <div>
-                <Heading as="h4" style={{ margin: 0, color: '#c0caf5' }}>{item.title}</Heading>
-                <p style={{ margin: 0, color: '#565f89', fontSize: '0.9rem' }}>{item.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function Personas() {
-  const personas = [
-    {
-      icon: '🏗️',
-      title: 'Architects',
-      desc: 'Define and enforce boundary rules. Ensure the codebase follows the intended dependency flow.'
-    },
-    {
-      icon: '🚀',
-      title: 'Team Leads',
-      desc: 'Monitor architectural health trends. Prevent spaghetti code before it slows down the team.'
-    },
-    {
-      icon: '🛠️',
-      title: 'Developers',
-      desc: 'Understand complex package relationships instantly without leaving the terminal.'
-    }
-  ];
-
-  return (
-    <section className="persona-section">
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>Who is MorphArch for?</h2>
-        </div>
-        <div className="row">
-          {personas.map((p, idx) => (
-            <div key={idx} className="col col--4 reveal" style={{ transitionDelay: `${idx * 0.1}s` }}>
-              <div className="persona-card">
-                <span className="persona-icon">{p.icon}</span>
-                <Heading as="h3" style={{ color: '#7aa2f7' }}>{p.title}</Heading>
-                <p style={{ color: '#a9b1d6', fontSize: '0.95rem' }}>{p.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function Contribute() {
-  return (
-    <section className="contribute-section reveal">
-      <div className="container">
-        <h2>Open Source to the Core</h2>
-        <p style={{ color: '#9aa5ce', maxWidth: '600px', margin: '0 auto' }}>
-          MorphArch is built by and for the community. Whether it's adding a new language grammar or fixing a bug, your help is welcome.
-        </p>
-        <a href="https://github.com/onplt/morpharch" className="github-card">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.744.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.44-1.304.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-          </svg>
-          <span>Star us on GitHub</span>
-        </a>
-      </div>
-    </section>
-  );
-}
-
-function HowItWorks() {
-  const steps = [
-    {
-      title: 'Scan',
-      desc: 'MorphArch walks your Git history and detects workspace boundaries (Nx, Turbo, Cargo) automatically.',
-    },
-    {
-      title: 'Parse',
-      desc: 'Using Tree-sitter, it performs deep AST analysis to extract real dependency edges from your source code.',
-    },
-    {
-      title: 'Visualize',
-      desc: 'See your architecture evolve in real-time through an interactive, physics-based terminal UI.',
-    },
-  ];
-
-  return (
-    <section style={{ padding: '6rem 0', background: '#1a1b26' }}>
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>How it Works</h2>
-          <p style={{ color: '#9aa5ce' }}>Analyze architectural drift in three simple steps.</p>
-        </div>
-        <div className="row">
-          {steps.map((step, idx) => (
-            <div key={idx} className="col col--4 reveal" style={{ marginBottom: '2rem', transitionDelay: `${idx * 0.2}s` }}>
-              <div className="step-card">
-                <div className="step-number">{idx + 1}</div>
-                <Heading as="h3" style={{ color: '#bb9af7', marginTop: '1rem' }}>{step.title}</Heading>
-                <p style={{ color: '#a9b1d6', fontSize: '0.95rem' }}>{step.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function FAQ() {
-  const faqs = [
-    {
-      q: "Is it fast enough for large monorepos?",
-      a: "Yes. MorphArch uses subtree-cached walks and a 50K-entry LRU blob cache. Subsequent scans are up to 20x faster."
-    },
-    {
-      q: "Does it support my programming language?",
-      a: "Out of the box, we support Rust, TypeScript, JavaScript, Python, and Go via high-precision AST parsing."
-    },
-    {
-      q: "How secure is MorphArch?",
-      a: "Completely. It runs entirely on your machine. No code is ever uploaded to any server. Data is stored in a local SQLite file."
-    }
-  ];
-
-  return (
-    <section className="faq-section">
-      <div className="container">
-        <div className="section-title reveal">
-          <h2>Frequently Asked Questions</h2>
-        </div>
-        <div className="row">
-          {faqs.map((faq, idx) => (
-            <div key={idx} className="col col--4 reveal" style={{ transitionDelay: `${idx * 0.1}s` }}>
-              <div className="faq-item">
-                <h3>{faq.q}</h3>
-                <p>{faq.a}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function BottomCTA() {
-  return (
-    <section className="bottom-cta reveal">
-      <div className="container">
-        <h2>Ready to secure your architecture?</h2>
-        <p style={{ color: '#9aa5ce', marginBottom: '2rem', fontSize: '1.2rem' }}>
-          Stop the drift today. Install MorphArch and take control of your codebase.
-        </p>
-        <div className="install-command-wrapper" style={{ justifyContent: 'center' }}>
-          <div className="install-command" style={{ margin: 0 }}>
-            <code>$ cargo install morpharch</code>
-          </div>
-        </div>
-        <div style={{ marginTop: '2rem' }}>
-          <Link
-            className="button button--primary button--lg"
-            to="/docs/intro"
-            style={{ borderRadius: '8px', padding: '15px 40px', fontWeight: 'bold' }}>
-            Get Started for Free
-          </Link>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function HomepageHeader() {
-  const {siteConfig} = useDocusaurusContext();
-  
   const handleCopy = () => {
     navigator.clipboard.writeText('cargo install morpharch');
-    const btn = document.querySelector('.copy-button');
-    if (btn) {
-      const originalText = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = originalText, 2000);
-    }
   };
 
   return (
-    <header className={clsx('hero hero--primary', styles.heroBanner)}>
+    <section className={styles.hero}>
       <div className="container">
-        <div className="hero-content">
-          <div className="hero-text reveal">
-            <div className="badges">
-              <a href="https://crates.io/crates/morpharch" target="_blank" rel="noopener noreferrer">
-                <img src="https://img.shields.io/crates/v/morpharch?color=7aa2f7&style=flat-square" alt="Crates.io" />
-              </a>
-              <a href="https://github.com/onplt/morpharch" target="_blank" rel="noopener noreferrer" style={{ marginLeft: '10px' }}>
-                <img src="https://img.shields.io/github/stars/onplt/morpharch?color=bb9af7&style=flat-square" alt="GitHub Stars" />
-              </a>
-            </div>
-            <Heading as="h1" className="hero__title">
-              {siteConfig.title}
+        <div className={styles.heroGrid}>
+          <div className={styles.heroCopy}>
+            <div className={styles.eyebrow}>Open source terminal architecture analysis</div>
+            <Heading as="h1" className={styles.heroTitle}>
+              {title}
             </Heading>
-            <p className="hero__subtitle">
-              Understand your monorepo's architectural evolution with AST-powered dependency analysis and an animated TUI.
+            <p className={styles.heroSubtitle}>
+              Scan Git history, build a dependency model, and inspect repository
+              structure, drift, and hotspots from a terminal UI that stays usable
+              on large codebases.
             </p>
 
-            <div className="install-command-wrapper">
-              <div className="install-command" style={{ margin: 0 }}>
-                <code>$ cargo install morpharch</code>
-              </div>
-              <button className="copy-button" onClick={handleCopy}>Copy</button>
-            </div>
-
-            <div className={styles.buttons} style={{ marginBottom: '3rem' }}>
+            <div className={styles.heroActions}>
+              <Link className="button button--primary button--lg" to="/docs/intro">
+                Read the docs
+              </Link>
               <Link
-                className="button button--primary button--lg"
-                to="/docs/intro"
-                style={{ borderRadius: '8px', padding: '12px 32px', fontWeight: 'bold', boxShadow: '0 4px 15px rgba(122, 162, 247, 0.3)' }}>
-                Start Analyzing 🚀
+                className="button button--secondary button--lg"
+                to="https://github.com/onplt/morpharch">
+                View on GitHub
               </Link>
             </div>
 
-            <div className="ecosystem-section">
-              <div className="ecosystem-logos">
-                <span>SUPPORTED:</span>
-                <span className="ecosystem-badge" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <img src="https://simpleicons.org/icons/rust.svg" style={{ width: '16px', filter: 'invert(1) brightness(2)' }} /> Rust
-                </span>
-                <span className="ecosystem-badge" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <img src="https://simpleicons.org/icons/typescript.svg" style={{ width: '16px' }} /> TypeScript
-                </span>
-                <span className="ecosystem-badge" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <img src="https://simpleicons.org/icons/python.svg" style={{ width: '16px' }} /> Python
-                </span>
-                <span className="ecosystem-badge" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <img src="https://simpleicons.org/icons/go.svg" style={{ width: '16px' }} /> Go
-                </span>
-              </div>
+            <div className={styles.installRow}>
+              <code className={styles.installCode}>cargo install morpharch</code>
+              <button className={styles.copyButton} onClick={handleCopy} type="button">
+                Copy
+              </button>
+            </div>
+
+            <div className={styles.metaRow}>
+              <span className={styles.metaBadge}>First-parent history</span>
+              <span className={styles.metaBadge}>Repo-scoped cache</span>
+              <span className={styles.metaBadge}>Rust · TS · JS · Python · Go</span>
             </div>
           </div>
-          
-          <div className="reveal" style={{ transitionDelay: '0.3s' }}>
-            <TerminalMockup />
+
+          <div className={styles.heroVisual}>
+            <div className={styles.demoFrame}>
+              <div className={styles.demoHeader}>
+                <span className={styles.dotRed} />
+                <span className={styles.dotYellow} />
+                <span className={styles.dotGreen} />
+                <span className={styles.demoTitle}>MorphArch TUI</span>
+              </div>
+              <img className={styles.demoImage} src={demoSrc} alt="MorphArch terminal UI demo" />
+            </div>
           </div>
         </div>
       </div>
-    </header>
+    </section>
+  );
+}
+
+function CompatibilityBar() {
+  return (
+    <section className={styles.compatibility}>
+      <div className="container">
+        <div className={styles.compatibilityRow}>
+          <span className={styles.compatibilityLabel}>Works with</span>
+          <span>Nx</span>
+          <span>Turborepo</span>
+          <span>pnpm</span>
+          <span>Cargo</span>
+          <span>Lerna</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CapabilitySection() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <div className={styles.sectionIntro}>
+          <Heading as="h2">What MorphArch helps you do</Heading>
+          <p>
+            MorphArch is designed for repeated local analysis. It is not just a
+            graph renderer and it is not only a static score report.
+          </p>
+        </div>
+        <div className={styles.cardGrid}>
+          {capabilities.map(item => (
+            <article key={item.title} className={styles.card}>
+              <Heading as="h3">{item.title}</Heading>
+              <p>{item.body}</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function WorkflowSection() {
+  return (
+    <section className={styles.sectionAlt}>
+      <div className="container">
+        <div className={styles.twoColumn}>
+          <div>
+            <div className={styles.sectionIntroLeft}>
+              <Heading as="h2">See structure before raw graph detail</Heading>
+              <p>
+                Large repositories are easier to review when you start at the
+                cluster level. MorphArch keeps the raw graph available, but only
+                when you actually need it.
+              </p>
+            </div>
+            <div className={styles.workflowList}>
+              {workflows.map((item, index) => (
+                <div key={item.title} className={styles.workflowItem}>
+                  <div className={styles.workflowNumber}>{index + 1}</div>
+                  <div>
+                    <Heading as="h3">{item.title}</Heading>
+                    <p>{item.body}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <aside className={styles.asidePanel}>
+            <Heading as="h3">Built for repository review</Heading>
+            <ul className={styles.checkList}>
+              <li>Grouped map view instead of full raw graph by default</li>
+              <li>Trend, hotspots, and blast radius in the same workflow</li>
+              <li>Deterministic first-parent replay across history</li>
+              <li>Configurable clustering, boundaries, and scan heuristics</li>
+            </ul>
+          </aside>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AudienceSection() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <div className={styles.sectionIntro}>
+          <Heading as="h2">Who it is for</Heading>
+          <p>
+            MorphArch is useful anywhere repository structure matters to daily
+            engineering work.
+          </p>
+        </div>
+        <div className={styles.cardGrid}>
+          {audiences.map(item => (
+            <article key={item.title} className={styles.card}>
+              <Heading as="h3">{item.title}</Heading>
+              <p>{item.body}</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OpenSourceSection() {
+  return (
+    <section className={styles.sectionAlt}>
+      <div className="container">
+        <div className={styles.openSourcePanel}>
+          <div>
+            <Heading as="h2">Built in the open</Heading>
+            <p>
+              MorphArch is an open source project. Contributions around language
+              support, clustering behavior, scan correctness, TUI polish, and
+              documentation are welcome.
+            </p>
+          </div>
+          <div className={styles.openSourceActions}>
+            <Link className="button button--secondary button--lg" to="/docs/intro">
+              Explore the docs
+            </Link>
+            <Link
+              className="button button--primary button--lg"
+              to="https://github.com/onplt/morpharch">
+              GitHub repository
+            </Link>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FAQSection() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <div className={styles.sectionIntro}>
+          <Heading as="h2">Frequently asked questions</Heading>
+        </div>
+        <div className={styles.faqGrid}>
+          {faqs.map(item => (
+            <article key={item.question} className={styles.faqCard}>
+              <Heading as="h3">{item.question}</Heading>
+              <p>{item.answer}</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FinalCTA() {
+  return (
+    <section className={styles.finalCta}>
+      <div className="container">
+        <div className={styles.finalCtaInner}>
+          <Heading as="h2">Start with one scan</Heading>
+          <p>
+            Install MorphArch, scan a repository, and review structure and drift
+            from the terminal.
+          </p>
+          <div className={styles.finalActions}>
+            <code className={styles.installCode}>cargo install morpharch</code>
+            <Link className="button button--primary button--lg" to="/docs/quick-start">
+              Quick start
+            </Link>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
 export default function Home(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
-  useScrollReveal();
 
   return (
     <Layout
-      title={`${siteConfig.title} | Visualizing Architecture Evolution`}
-      description="Monorepo architecture drift visualizer with animated TUI and health scoring.">
-      <HomepageHeader />
-      <main>
-        <Compatibility />
-        <div className="reveal">
-          <HomepageFeatures />
-        </div>
-        <VisualComparison />
-        <BuiltForScale />
-        <HowItWorks />
-        <Roadmap />
-        <Personas />
-        <Contribute />
-        <FAQ />
-        <BottomCTA />
+      title={`${siteConfig.title} | Repository structure and drift analysis`}
+      description="MorphArch scans Git history, builds dependency graphs, and helps you inspect repository structure, drift, and hotspots from the terminal.">
+      <main className={styles.page}>
+        <Hero title={siteConfig.title} />
+        <CompatibilityBar />
+        <CapabilitySection />
+        <WorkflowSection />
+        <AudienceSection />
+        <OpenSourceSection />
+        <FAQSection />
+        <FinalCTA />
       </main>
     </Layout>
   );

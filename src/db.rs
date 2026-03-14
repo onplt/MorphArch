@@ -1,40 +1,52 @@
 //! SQLite persistence layer for MorphArch.
-//!
-//! Manages two tables:
-//!
-//! - **`commits`** — Git commit metadata (hash, author, message, timestamp, tree ID)
-//! - **`graph_snapshots`** — JSON-serialized dependency graphs with optional drift scores
-//!
-//! The database is compiled with the `bundled` SQLite feature, so no system
-//! SQLite library is required. WAL mode is enabled for concurrent read performance.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
-use std::path::Path;
-use tracing::{debug, info};
+use rusqlite::{Connection, OptionalExtension};
+use tracing::{debug, info, warn};
 
-use crate::models::{CommitInfo, DriftScore, GraphSnapshot};
+use crate::models::{
+    CommitInfo, DependencyEdge, DriftScore, EdgeOrigin, GraphCheckpoint, GraphDelta, GraphSnapshot,
+    HeavySnapshotArtifacts, NodeKind, NodeMetadata, RepoScanState, ScanMetadata, SnapshotFrame,
+    SnapshotMetadata,
+};
 
-/// MorphArch database wrapper.
-///
-/// Holds the SQLite connection and provides all database operations.
-/// Migration runs automatically on creation.
 pub struct Database {
-    /// Active SQLite connection
     conn: Connection,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct SnapshotLoadResult {
+    pub snapshots: Vec<GraphSnapshot>,
+    pub skipped_corrupt: usize,
+}
+
+fn serialize_blob<T: serde::Serialize>(value: &T, label: &str) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(value, bincode::config::standard())
+        .with_context(|| format!("Failed to serialize {label}"))
+}
+
+fn deserialize_blob<T: serde::de::DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T> {
+    let (value, _): (T, usize) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .with_context(|| format!("Failed to deserialize {label}"))?;
+    Ok(value)
+}
+
+fn map_anyhow(err: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Blob,
+        Box::new(std::io::Error::other(err.to_string())),
+    )
+}
+
 impl Database {
-    /// Opens (or creates) the database at the specified file path.
-    ///
-    /// After opening the connection:
-    ///   - WAL mode is enabled (for concurrent reads)
-    ///   - Required tables are created (CREATE IF NOT EXISTS)
-    ///   - migration (drift_json column) is applied
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
-
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -47,7 +59,6 @@ impl Database {
         Ok(db)
     }
 
-    /// Creates an in-memory database (for tests).
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to create in-memory database")?;
@@ -56,157 +67,263 @@ impl Database {
         Ok(db)
     }
 
-    /// Creates or updates the database schema (idempotent).
-    ///
-    /// drift_json column added to graph_snapshots table.
-    /// ALTER TABLE IF NOT EXISTS is not supported, so column existence is checked.
     fn migrate(&self) -> Result<()> {
+        self.invalidate_legacy_table_if_needed(
+            "commits",
+            &[
+                "repo_id",
+                "hash",
+                "author_name",
+                "author_email",
+                "message",
+                "timestamp",
+                "tree_id",
+            ],
+        )?;
+        self.invalidate_legacy_table_if_needed(
+            "snapshot_frames",
+            &[
+                "repo_id",
+                "commit_hash",
+                "scan_order",
+                "timestamp",
+                "node_count",
+                "edge_count",
+                "drift_bin",
+                "scan_metadata_bin",
+                "delta_bin",
+                "analysis_version",
+                "config_fingerprint",
+                "has_full_artifacts",
+            ],
+        )?;
+        self.invalidate_legacy_table_if_needed(
+            "graph_checkpoints",
+            &[
+                "repo_id",
+                "commit_hash",
+                "scan_order",
+                "state_bin",
+                "full_artifacts_bin",
+            ],
+        )?;
+        self.invalidate_legacy_table_if_needed(
+            "repo_scan_state",
+            &["repo_id", "commit_hash", "state_bin"],
+        )?;
+        if self.table_exists("graph_snapshots")? {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS graph_snapshots;")
+                .context("Failed to drop legacy graph_snapshots table")?;
+        }
+
         self.conn
             .execute_batch(
                 "
-            -- Commit metadata table
-            CREATE TABLE IF NOT EXISTS commits (
-                hash         TEXT PRIMARY KEY,
-                author_name  TEXT NOT NULL,
-                author_email TEXT NOT NULL,
-                message      TEXT NOT NULL,
-                timestamp    INTEGER NOT NULL,
-                tree_id      TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_commits_timestamp
-                ON commits(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_commits_author
-                ON commits(author_email);
+                CREATE TABLE IF NOT EXISTS repositories (
+                    repo_id   TEXT PRIMARY KEY,
+                    repo_root TEXT NOT NULL UNIQUE
+                );
 
-            -- Dependency graph snapshot table
-            -- snapshot_json: Full JSON serialization of GraphSnapshot struct
-            -- node_count/edge_count: Denormalized fields for fast queries
-            CREATE TABLE IF NOT EXISTS graph_snapshots (
-                commit_hash   TEXT PRIMARY KEY,
-                snapshot_json TEXT NOT NULL,
-                node_count    INTEGER NOT NULL DEFAULT 0,
-                edge_count    INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_graph_snapshots_counts
-                ON graph_snapshots(node_count, edge_count);
-            ",
+                CREATE TABLE IF NOT EXISTS commits (
+                    repo_id      TEXT NOT NULL,
+                    hash         TEXT NOT NULL,
+                    author_name  TEXT NOT NULL,
+                    author_email TEXT NOT NULL,
+                    message      TEXT NOT NULL,
+                    timestamp    INTEGER NOT NULL,
+                    tree_id      TEXT NOT NULL,
+                    PRIMARY KEY (repo_id, hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_commits_repo_timestamp
+                    ON commits(repo_id, timestamp);
+
+                CREATE TABLE IF NOT EXISTS snapshot_frames (
+                    repo_id             TEXT NOT NULL,
+                    commit_hash         TEXT NOT NULL,
+                    scan_order          INTEGER NOT NULL,
+                    timestamp           INTEGER NOT NULL,
+                    node_count          INTEGER NOT NULL DEFAULT 0,
+                    edge_count          INTEGER NOT NULL DEFAULT 0,
+                    drift_bin           BLOB DEFAULT NULL,
+                    scan_metadata_bin   BLOB NOT NULL,
+                    delta_bin           BLOB NOT NULL,
+                    analysis_version    INTEGER NOT NULL,
+                    config_fingerprint  TEXT NOT NULL,
+                    has_full_artifacts  INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (repo_id, commit_hash),
+                    UNIQUE (repo_id, scan_order)
+                );
+                CREATE INDEX IF NOT EXISTS idx_snapshot_frames_repo_scan_order
+                    ON snapshot_frames(repo_id, scan_order DESC);
+
+                CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                    repo_id             TEXT NOT NULL,
+                    commit_hash         TEXT NOT NULL,
+                    scan_order          INTEGER NOT NULL,
+                    state_bin           BLOB NOT NULL,
+                    full_artifacts_bin  BLOB DEFAULT NULL,
+                    PRIMARY KEY (repo_id, scan_order),
+                    UNIQUE (repo_id, commit_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_graph_checkpoints_repo_scan_order
+                    ON graph_checkpoints(repo_id, scan_order DESC);
+
+                CREATE TABLE IF NOT EXISTS repo_scan_state (
+                    repo_id      TEXT PRIMARY KEY,
+                    commit_hash  TEXT NOT NULL,
+                    state_bin    BLOB NOT NULL
+                );
+                ",
             )
             .context("Database migration failed")?;
-
-        // Add drift_json column (idempotent)
-        // SQLite doesn't have "ADD COLUMN IF NOT EXISTS" — check with PRAGMA table_info
-        self.migrate_drift_column()?;
-
-        // Add blast_radius_json column (idempotent)
-        self.migrate_blast_radius_column()?;
 
         info!("Database migration complete");
         Ok(())
     }
 
-    /// migration: adds drift_json column to graph_snapshots table.
-    ///
-    /// Silently skips if column already exists (idempotent).
-    fn migrate_drift_column(&self) -> Result<()> {
-        // Check existing columns with PRAGMA table_info
-        let has_drift = {
-            let mut stmt = self
-                .conn
-                .prepare("PRAGMA table_info(graph_snapshots)")
-                .context("Failed to prepare PRAGMA table_info query")?;
-
-            let columns: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("Failed to execute PRAGMA query")?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            columns.contains(&"drift_json".to_string())
-        };
-
-        if !has_drift {
-            self.conn
-                .execute_batch(
-                    "ALTER TABLE graph_snapshots ADD COLUMN drift_json TEXT DEFAULT NULL;",
-                )
-                .context("Failed to add drift_json column")?;
-            debug!("migration: drift_json column added");
+    fn invalidate_legacy_table_if_needed(
+        &self,
+        table: &str,
+        required_columns: &[&str],
+    ) -> Result<()> {
+        if !self.table_exists(table)? {
+            return Ok(());
         }
 
+        let columns = self.table_columns(table)?;
+        let is_compatible = required_columns
+            .iter()
+            .all(|column| columns.iter().any(|existing| existing == column));
+        if is_compatible {
+            return Ok(());
+        }
+
+        self.conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+            .with_context(|| format!("Failed to invalidate legacy table: {table}"))?;
+        debug!(table, "Legacy cache table invalidated");
         Ok(())
     }
 
-    /// migration: adds blast_radius_json column to graph_snapshots table.
-    ///
-    /// Silently skips if column already exists (idempotent).
-    fn migrate_blast_radius_column(&self) -> Result<()> {
-        let has_column = {
-            let mut stmt = self
-                .conn
-                .prepare("PRAGMA table_info(graph_snapshots)")
-                .context("Failed to prepare PRAGMA table_info query")?;
-
-            let columns: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("Failed to execute PRAGMA query")?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            columns.contains(&"blast_radius_json".to_string())
-        };
-
-        if !has_column {
-            self.conn
-                .execute_batch(
-                    "ALTER TABLE graph_snapshots \
-                     ADD COLUMN blast_radius_json TEXT DEFAULT NULL;",
-                )
-                .context("Failed to add blast_radius_json column")?;
-            debug!("migration: blast_radius_json column added");
-        }
-
-        Ok(())
+    fn table_exists(&self, table: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+                [table],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .context("Failed to check table existence")
     }
 
-    /// Begins an explicit transaction. Call `commit_transaction()` when done.
-    /// All inserts between begin/commit are batched into a single fsync.
+    fn table_columns(&self, table: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("Failed to inspect table: {table}"))?;
+
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .with_context(|| format!("Failed to query table info: {table}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("Failed to collect table columns: {table}"))
+    }
+
     pub fn begin_transaction(&self) -> Result<()> {
         self.conn
             .execute_batch("BEGIN TRANSACTION")
             .context("Failed to begin transaction")
     }
 
-    /// Commits the current transaction (flushes all batched writes).
     pub fn commit_transaction(&self) -> Result<()> {
         self.conn
             .execute_batch("COMMIT")
             .context("Failed to commit transaction")
     }
 
-    /// Clears all graph data before a scan operation.
-    pub fn clear_all_graph_snapshots(&self) -> Result<()> {
+    pub fn ensure_repository(&self, repo_id: &str) -> Result<()> {
         self.conn
-            .execute_batch(
-                "DELETE FROM commits;
-                 DELETE FROM graph_snapshots;",
+            .execute(
+                "INSERT OR IGNORE INTO repositories (repo_id, repo_root) VALUES (?1, ?2)",
+                rusqlite::params![repo_id, repo_id],
             )
-            .context("Failed to clear all snapshots")?;
-        info!("All snapshot data cleared from DB");
+            .with_context(|| format!("Failed to register repository: {repo_id}"))?;
         Ok(())
     }
 
-    // =========================================================================
-    // Commit operations
-    // =========================================================================
+    pub fn clear_repo_graph_snapshots(&self, repo_id: &str) -> Result<()> {
+        self.ensure_repository(repo_id)?;
+        self.conn
+            .execute("DELETE FROM snapshot_frames WHERE repo_id = ?1", [repo_id])
+            .with_context(|| format!("Failed to clear snapshot frames for repo: {repo_id}"))?;
+        self.conn
+            .execute(
+                "DELETE FROM graph_checkpoints WHERE repo_id = ?1",
+                [repo_id],
+            )
+            .with_context(|| format!("Failed to clear checkpoints for repo: {repo_id}"))?;
+        self.conn
+            .execute("DELETE FROM commits WHERE repo_id = ?1", [repo_id])
+            .with_context(|| format!("Failed to clear commits for repo: {repo_id}"))?;
+        self.conn
+            .execute("DELETE FROM repo_scan_state WHERE repo_id = ?1", [repo_id])
+            .with_context(|| format!("Failed to clear scan state for repo: {repo_id}"))?;
+        info!(repo_id, "Repository snapshot data cleared from DB");
+        Ok(())
+    }
 
-    /// Inserts a single commit into the database (INSERT OR REPLACE — idempotent).
-    pub fn insert_commit(&self, commit: &CommitInfo) -> Result<()> {
+    pub fn load_repo_scan_state(&self, repo_id: &str) -> Result<Option<(String, RepoScanState)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT commit_hash, state_bin
+                 FROM repo_scan_state
+                 WHERE repo_id = ?1",
+            )
+            .context("Failed to prepare repo scan state query")?;
+
+        let row = stmt
+            .query_row([repo_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .optional()
+            .context("Failed to load repo scan state")?;
+
+        row.map(|(commit_hash, bytes)| {
+            deserialize_blob::<RepoScanState>(&bytes, &format!("repo scan state for {repo_id}"))
+                .map(|state| (commit_hash, state))
+        })
+        .transpose()
+    }
+
+    pub fn save_repo_scan_state(
+        &self,
+        repo_id: &str,
+        commit_hash: &str,
+        state: &RepoScanState,
+    ) -> Result<()> {
+        self.ensure_repository(repo_id)?;
+        let state_bin = serialize_blob(state, &format!("repo scan state for {repo_id}"))?;
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO repo_scan_state (repo_id, commit_hash, state_bin)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![repo_id, commit_hash, state_bin],
+            )
+            .with_context(|| format!("Failed to save repo scan state: {repo_id}"))?;
+        Ok(())
+    }
+
+    pub fn insert_commit(&self, repo_id: &str, commit: &CommitInfo) -> Result<()> {
+        self.ensure_repository(repo_id)?;
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO commits
-                    (hash, author_name, author_email, message, timestamp, tree_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (repo_id, hash, author_name, author_email, message, timestamp, tree_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
+                    repo_id,
                     commit.hash,
                     commit.author_name,
                     commit.author_email,
@@ -216,25 +333,23 @@ impl Database {
                 ],
             )
             .with_context(|| format!("Failed to write commit to database: {}", &commit.hash))?;
-
-        debug!(hash = %commit.hash, "Commit saved");
         Ok(())
     }
 
-    /// Lists all commits in descending timestamp order.
     #[cfg(test)]
-    pub fn list_commits(&self) -> Result<Vec<CommitInfo>> {
+    pub fn list_commits(&self, repo_id: &str) -> Result<Vec<CommitInfo>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT hash, author_name, author_email, message, timestamp, tree_id
                  FROM commits
+                 WHERE repo_id = ?1
                  ORDER BY timestamp DESC",
             )
             .context("Failed to prepare commit list query")?;
 
         let commits = stmt
-            .query_map([], |row| {
+            .query_map([repo_id], |row| {
                 Ok(CommitInfo {
                     hash: row.get(0)?,
                     author_name: row.get(1)?,
@@ -251,679 +366,1069 @@ impl Database {
         Ok(commits)
     }
 
-    /// Returns the total number of commits in the database.
-    pub fn commit_count(&self) -> Result<usize> {
+    pub fn commit_count(&self, repo_id: &str) -> Result<usize> {
         let count: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE repo_id = ?1",
+                [repo_id],
+                |row| row.get(0),
+            )
             .context("Failed to query commit count")?;
         Ok(count as usize)
     }
 
-    // =========================================================================
-    // Graph snapshot operations
-    // =========================================================================
-
-    /// Saves a graph snapshot as JSON to the database.
-    ///
-    /// The GraphSnapshot struct is serialized with serde_json and written to the
-    /// snapshot_json column. node_count and edge_count are also stored as
-    /// denormalized columns for fast queries.
-    pub fn insert_graph_snapshot(&self, snapshot: &GraphSnapshot) -> Result<()> {
-        let json = serde_json::to_string(snapshot).with_context(|| {
-            format!(
-                "Failed to serialize GraphSnapshot to JSON: {}",
-                &snapshot.commit_hash
-            )
-        })?;
-
-        let drift_json = snapshot
+    pub fn insert_snapshot_frame(&self, repo_id: &str, frame: &SnapshotFrame) -> Result<()> {
+        self.ensure_repository(repo_id)?;
+        let drift_bin = frame
             .drift
             .as_ref()
-            .map(|d| serde_json::to_string(d).unwrap_or_default());
-
-        let blast_radius_json = snapshot
-            .blast_radius
-            .as_ref()
-            .map(|br| serde_json::to_string(br).unwrap_or_default());
+            .map(|drift| serialize_blob(drift, &format!("drift {}", frame.commit_hash)))
+            .transpose()?;
+        let scan_metadata_bin = serialize_blob(
+            &frame.scan_metadata,
+            &format!("scan metadata {}", frame.commit_hash),
+        )?;
+        let delta_bin =
+            serialize_blob(&frame.delta, &format!("graph delta {}", frame.commit_hash))?;
 
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO graph_snapshots
-                    (commit_hash, snapshot_json, node_count, edge_count, \
-                     drift_json, blast_radius_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO snapshot_frames
+                    (repo_id, commit_hash, scan_order, timestamp, node_count, edge_count,
+                     drift_bin, scan_metadata_bin, delta_bin, analysis_version,
+                     config_fingerprint, has_full_artifacts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
-                    snapshot.commit_hash,
-                    json,
-                    snapshot.node_count as i64,
-                    snapshot.edge_count as i64,
-                    drift_json,
-                    blast_radius_json,
+                    repo_id,
+                    frame.commit_hash,
+                    frame.scan_order,
+                    frame.timestamp,
+                    frame.node_count as i64,
+                    frame.edge_count as i64,
+                    drift_bin,
+                    scan_metadata_bin,
+                    delta_bin,
+                    frame.analysis_version as i64,
+                    frame.config_fingerprint,
+                    frame.has_full_artifacts as i64,
+                ],
+            )
+            .with_context(|| format!("Failed to insert snapshot frame {}", frame.commit_hash))?;
+        Ok(())
+    }
+
+    pub fn insert_graph_checkpoint(
+        &self,
+        repo_id: &str,
+        checkpoint: &GraphCheckpoint,
+    ) -> Result<()> {
+        self.ensure_repository(repo_id)?;
+        let state_bin = serialize_blob(
+            &checkpoint.state,
+            &format!("graph checkpoint {}", checkpoint.commit_hash),
+        )?;
+        let full_artifacts_bin = checkpoint
+            .full_artifacts
+            .as_ref()
+            .map(|value| {
+                serialize_blob(value, &format!("full artifacts {}", checkpoint.commit_hash))
+            })
+            .transpose()?;
+
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO graph_checkpoints
+                    (repo_id, commit_hash, scan_order, state_bin, full_artifacts_bin)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    repo_id,
+                    checkpoint.commit_hash,
+                    checkpoint.scan_order,
+                    state_bin,
+                    full_artifacts_bin,
                 ],
             )
             .with_context(|| {
                 format!(
-                    "Failed to write graph snapshot to database: {}",
-                    &snapshot.commit_hash
+                    "Failed to insert graph checkpoint {}",
+                    checkpoint.commit_hash
                 )
             })?;
-
-        debug!(
-            hash = %snapshot.commit_hash,
-            nodes = snapshot.node_count,
-            edges = snapshot.edge_count,
-            drift = ?snapshot.drift.as_ref().map(|d| d.total),
-            "Graph snapshot saved"
-        );
         Ok(())
     }
 
-    /// Lists the last N graph snapshots with commit information.
-    ///
-    /// JOINs with the commits table to include commit message and timestamp.
-    /// Results are in descending timestamp order.
-    ///
-    /// # Returns
-    /// `Vec<(commit_hash, message_first_line, timestamp, node_count, edge_count)>`
+    pub fn graph_snapshot_count(&self, repo_id: &str) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM snapshot_frames WHERE repo_id = ?1",
+                [repo_id],
+                |row| row.get(0),
+            )
+            .context("Failed to query snapshot frame count")?;
+        Ok(count as usize)
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn list_recent_graphs(
         &self,
+        repo_id: &str,
         limit: usize,
     ) -> Result<Vec<(String, String, i64, usize, usize)>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT g.commit_hash, c.message, c.timestamp, g.node_count, g.edge_count
-                 FROM graph_snapshots g
-                 JOIN commits c ON g.commit_hash = c.hash
-                 ORDER BY c.timestamp DESC
-                 LIMIT ?1",
+                "SELECT f.commit_hash, c.message, f.timestamp, f.node_count, f.edge_count
+                   FROM snapshot_frames f
+                   JOIN commits c ON f.repo_id = c.repo_id AND f.commit_hash = c.hash
+                  WHERE f.repo_id = ?1
+                  ORDER BY f.scan_order DESC
+                  LIMIT ?2",
             )
             .context("Failed to prepare graph list query")?;
 
         let rows = stmt
-            .query_map([limit as i64], |row| {
-                let hash: String = row.get(0)?;
-                let message: String = row.get(1)?;
-                let timestamp: i64 = row.get(2)?;
-                let nodes: i64 = row.get(3)?;
-                let edges: i64 = row.get(4)?;
-                Ok((hash, message, timestamp, nodes as usize, edges as usize))
+            .query_map(rusqlite::params![repo_id, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)? as usize,
+                    row.get::<_, i64>(4)? as usize,
+                ))
             })
             .context("Failed to execute graph list query")?
             .collect::<Result<Vec<_>, _>>()
-            .context("Failed to read graph data")?;
+            .context("Failed to read graph list")?;
 
         Ok(rows)
     }
 
-    /// Returns the total number of graph snapshots in the database.
-    pub fn graph_snapshot_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM graph_snapshots", [], |row| row.get(0))
-            .context("Failed to query graph snapshot count")?;
-        Ok(count as usize)
-    }
-
-    // =========================================================================
-    // Drift-aware graph snapshot operations
-    // =========================================================================
-
-    /// Retrieves a graph snapshot for a specific commit hash.
-    ///
-    /// Deserializes from JSON and returns the full `GraphSnapshot`.
-    /// If drift info exists, the `drift` field will be populated.
-    ///
-    /// # Returns
-    /// - `Ok(Some(snapshot))`: Snapshot found
-    /// - `Ok(None)`: No snapshot for this commit
-    pub fn get_graph_snapshot(&self, commit_hash: &str) -> Result<Option<GraphSnapshot>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT snapshot_json FROM graph_snapshots WHERE commit_hash = ?1")
-            .context("Failed to prepare graph snapshot query")?;
-
-        let result = stmt
-            .query_row([commit_hash], |row| {
-                let json: String = row.get(0)?;
-                Ok(json)
-            })
-            .optional()
-            .context("Failed to execute graph snapshot query")?;
-
-        match result {
-            Some(json) => {
-                let snapshot: GraphSnapshot = serde_json::from_str(&json).with_context(|| {
-                    format!("Failed to parse graph snapshot JSON: {commit_hash}")
-                })?;
-                Ok(Some(snapshot))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Lists drift trend data for the last N commits.
-    ///
-    /// Returns snapshots with drift scores in timestamp order.
-    /// Each row: commit_hash, message, node count, edge count,
-    /// drift score, delta from previous commit.
-    ///
-    /// # Returns
-    /// `Vec<(commit_hash, message, nodes, edges, drift_total, timestamp)>`
     #[allow(clippy::type_complexity)]
     pub fn list_drift_trend(
         &self,
+        repo_id: &str,
         limit: usize,
     ) -> Result<Vec<(String, String, usize, usize, Option<u8>, i64)>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT g.commit_hash, c.message, g.node_count, g.edge_count,
-                        g.drift_json, c.timestamp
-                 FROM graph_snapshots g
-                 JOIN commits c ON g.commit_hash = c.hash
-                 ORDER BY c.timestamp DESC
-                 LIMIT ?1",
+                "SELECT f.commit_hash, c.message, f.timestamp, f.node_count, f.edge_count, f.drift_bin
+                   FROM snapshot_frames f
+                   JOIN commits c ON f.repo_id = c.repo_id AND f.commit_hash = c.hash
+                  WHERE f.repo_id = ?1
+                  ORDER BY f.scan_order DESC
+                  LIMIT ?2",
             )
             .context("Failed to prepare drift trend query")?;
 
         let rows = stmt
-            .query_map([limit as i64], |row| {
-                let hash: String = row.get(0)?;
-                let message: String = row.get(1)?;
-                let nodes: i64 = row.get(2)?;
-                let edges: i64 = row.get(3)?;
-                let drift_json: Option<String> = row.get(4)?;
-                let timestamp: i64 = row.get(5)?;
-
-                // Parse drift_json if present, otherwise None
-                let drift_total: Option<u8> = drift_json.and_then(|json| {
-                    serde_json::from_str::<DriftScore>(&json)
-                        .ok()
-                        .map(|d| d.total)
-                });
-
+            .query_map(rusqlite::params![repo_id, limit as i64], |row| {
+                let drift_bytes: Option<Vec<u8>> = row.get(5)?;
+                let drift_total = drift_bytes
+                    .as_deref()
+                    .map(|bytes| deserialize_blob::<DriftScore>(bytes, "drift trend entry"))
+                    .transpose()
+                    .map_err(map_anyhow)?
+                    .map(|drift| drift.total);
                 Ok((
-                    hash,
-                    message,
-                    nodes as usize,
-                    edges as usize,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(3)? as usize,
+                    row.get::<_, i64>(4)? as usize,
                     drift_total,
-                    timestamp,
+                    row.get::<_, i64>(2)?,
                 ))
             })
             .context("Failed to execute drift trend query")?
             .collect::<Result<Vec<_>, _>>()
-            .context("Failed to read drift data")?;
+            .context("Failed to collect drift trend")?;
 
         Ok(rows)
     }
 
-    /// Updates the drift score for a specific commit.
-    ///
-    /// Updates the drift_json column of an existing graph snapshot.
-    /// Only drift info is added if the snapshot already exists.
-    #[cfg(test)]
-    pub fn update_drift_score(&self, commit_hash: &str, drift: &DriftScore) -> Result<()> {
-        let drift_json = serde_json::to_string(drift)
-            .with_context(|| format!("Failed to serialize DriftScore to JSON: {commit_hash}"))?;
-
+    pub fn get_latest_scanned_commit(&self, repo_id: &str) -> Result<Option<(String, i64)>> {
         self.conn
-            .execute(
-                "UPDATE graph_snapshots SET drift_json = ?1 WHERE commit_hash = ?2",
-                rusqlite::params![drift_json, commit_hash],
-            )
-            .with_context(|| format!("Failed to update drift score: {commit_hash}"))?;
-
-        debug!(
-            hash = %commit_hash,
-            total = drift.total,
-            "Drift score updated"
-        );
-        Ok(())
-    }
-
-    // =========================================================================
-    // Incremental scan support
-    // =========================================================================
-
-    /// Returns the commit hash of the most recently scanned commit.
-    ///
-    /// Uses ROWID to get the absolute last entry inserted into the database,
-    /// which is the most reliable way to determine the current scan head
-    /// regardless of Git commit timestamps.
-    pub fn get_latest_scanned_commit(&self) -> Result<Option<String>> {
-        let result = self
-            .conn
             .query_row(
-                "SELECT commit_hash FROM graph_snapshots ORDER BY ROWID DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
+                "SELECT commit_hash, scan_order
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1
+                  ORDER BY scan_order DESC
+                  LIMIT 1",
+                [repo_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()
-            .context("Failed to get latest scanned commit")?;
-        Ok(result)
+            .context("Failed to fetch latest scanned commit")
     }
 
-    // =========================================================================
-    // Bulk snapshot loading for TUI
-    // =========================================================================
+    pub fn get_scan_order(&self, repo_id: &str, commit_hash: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT scan_order
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1 AND commit_hash = ?2",
+                rusqlite::params![repo_id, commit_hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .with_context(|| format!("Failed to fetch scan order for commit: {commit_hash}"))
+    }
 
-    /// Loads the last N graph snapshots with full JSON deserialization.
-    ///
-    /// Returns snapshots in newest → oldest order for use in the TUI timeline.
-    /// Each snapshot contains the full `GraphSnapshot` struct (nodes, edges, drift).
-    pub fn get_recent_snapshots(&self, limit: usize) -> Result<Vec<GraphSnapshot>> {
+    pub fn get_snapshot_metadata(
+        &self,
+        repo_id: &str,
+        commit_hash: &str,
+    ) -> Result<Option<SnapshotMetadata>> {
+        self.conn
+            .query_row(
+                "SELECT commit_hash, scan_order, timestamp, drift_bin
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1 AND commit_hash = ?2",
+                rusqlite::params![repo_id, commit_hash],
+                |row| {
+                    let drift_bytes: Option<Vec<u8>> = row.get(3)?;
+                    let drift = drift_bytes
+                        .as_deref()
+                        .map(|bytes| {
+                            deserialize_blob::<DriftScore>(bytes, "snapshot metadata drift")
+                        })
+                        .transpose()
+                        .map_err(map_anyhow)?;
+                    Ok(SnapshotMetadata {
+                        commit_hash: row.get(0)?,
+                        scan_order: row.get(1)?,
+                        timestamp: row.get(2)?,
+                        drift,
+                    })
+                },
+            )
+            .optional()
+            .context("Failed to fetch snapshot metadata")
+    }
+
+    pub fn get_graph_snapshot(
+        &self,
+        repo_id: &str,
+        commit_hash: &str,
+    ) -> Result<Option<GraphSnapshot>> {
+        let Some(frame) = self.fetch_snapshot_frame(repo_id, commit_hash)? else {
+            return Ok(None);
+        };
+        self.reconstruct_snapshot_from_frame(repo_id, &frame)
+            .map(Some)
+    }
+
+    pub fn get_previous_snapshot(
+        &self,
+        repo_id: &str,
+        scan_order: i64,
+    ) -> Result<Option<GraphSnapshot>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT g.snapshot_json
-                 FROM graph_snapshots g
-                 JOIN commits c ON g.commit_hash = c.hash
-                 ORDER BY c.timestamp DESC
-                 LIMIT ?1",
+                "SELECT commit_hash, scan_order, timestamp, node_count, edge_count, drift_bin,
+                        scan_metadata_bin, delta_bin, analysis_version, config_fingerprint,
+                        has_full_artifacts
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1 AND scan_order < ?2
+                  ORDER BY scan_order DESC
+                  LIMIT 1",
             )
-            .context("Failed to prepare recent snapshots query")?;
-
-        let snapshots = stmt
-            .query_map([limit as i64], |row| {
-                let json: String = row.get(0)?;
-                Ok(json)
+            .context("Failed to prepare previous snapshot query")?;
+        let frame = stmt
+            .query_row(rusqlite::params![repo_id, scan_order], |row| {
+                self.read_frame(row)
             })
-            .context("Failed to execute recent snapshots query")?
-            .filter_map(|r| r.ok())
-            .filter_map(|json| serde_json::from_str::<GraphSnapshot>(&json).ok())
-            .collect();
-
-        Ok(snapshots)
+            .optional()
+            .context("Failed to load previous snapshot frame")?;
+        frame
+            .map(|value| self.reconstruct_snapshot_from_frame(repo_id, &value))
+            .transpose()
     }
 
-    /// Loads graph snapshots sampled evenly across the full history.
-    ///
-    /// When the DB contains more snapshots than `target_count`, this method
-    /// picks snapshots at evenly spaced intervals so the TUI timeline covers
-    /// the entire commit history instead of just the most recent N.
-    ///
-    /// The **first** (newest) and **last** (oldest) snapshots are always included.
-    ///
-    /// Returns snapshots in newest-first order (consistent with `get_recent_snapshots`).
-    pub fn get_sampled_snapshots(&self, target_count: usize) -> Result<Vec<GraphSnapshot>> {
-        let total = self.graph_snapshot_count()?;
-        if total == 0 {
-            return Ok(vec![]);
-        }
-
-        // If total fits within target, just load them all
-        if total <= target_count {
-            return self.get_recent_snapshots(total);
-        }
-
-        // Load all (hash, rowid) pairs ordered by timestamp DESC
-        // then pick evenly spaced indices
+    #[allow(clippy::type_complexity)]
+    pub fn list_previous_drift_entries(
+        &self,
+        repo_id: &str,
+        scan_order: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, String, usize, usize, Option<u8>, i64)>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT g.commit_hash
-             FROM graph_snapshots g
-             JOIN commits c ON g.commit_hash = c.hash
-             ORDER BY c.timestamp DESC",
+                "SELECT f.commit_hash, c.message, f.timestamp, f.node_count, f.edge_count, f.drift_bin
+                   FROM snapshot_frames f
+                   JOIN commits c ON f.repo_id = c.repo_id AND f.commit_hash = c.hash
+                  WHERE f.repo_id = ?1 AND f.scan_order < ?2
+                  ORDER BY f.scan_order DESC
+                  LIMIT ?3",
             )
-            .context("Failed to prepare sampled snapshots query")?;
+            .context("Failed to prepare previous drift query")?;
 
-        let all_hashes: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .context("Failed to query snapshot hashes")?
-            .filter_map(|r| r.ok())
-            .collect();
+        let rows = stmt
+            .query_map(
+                rusqlite::params![repo_id, scan_order, limit as i64],
+                |row| {
+                    let drift_bytes: Option<Vec<u8>> = row.get(5)?;
+                    let drift_total = drift_bytes
+                        .as_deref()
+                        .map(|bytes| deserialize_blob::<DriftScore>(bytes, "previous drift entry"))
+                        .transpose()
+                        .map_err(map_anyhow)?
+                        .map(|drift| drift.total);
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(3)? as usize,
+                        row.get::<_, i64>(4)? as usize,
+                        drift_total,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .context("Failed to execute previous drift query")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect previous drift entries")?;
 
-        let n = all_hashes.len();
-        if n <= target_count {
-            return self.get_recent_snapshots(n);
+        Ok(rows)
+    }
+
+    pub fn get_recent_snapshots(&self, repo_id: &str, limit: usize) -> Result<SnapshotLoadResult> {
+        let metadata = self.get_recent_snapshot_metadata(repo_id, limit)?;
+        self.load_snapshots_from_metadata(repo_id, &metadata)
+    }
+
+    pub fn get_sampled_snapshots(
+        &self,
+        repo_id: &str,
+        target_count: usize,
+    ) -> Result<SnapshotLoadResult> {
+        let metadata = self.get_sampled_snapshot_metadata(repo_id, target_count)?;
+        self.load_snapshots_from_metadata(repo_id, &metadata)
+    }
+
+    pub fn get_recent_snapshot_metadata(
+        &self,
+        repo_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT commit_hash, scan_order, timestamp, drift_bin
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1
+                  ORDER BY scan_order DESC
+                  LIMIT ?2",
+            )
+            .context("Failed to prepare recent metadata query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![repo_id, limit as i64], |row| {
+                let drift_bytes: Option<Vec<u8>> = row.get(3)?;
+                let drift = drift_bytes
+                    .as_deref()
+                    .map(|bytes| deserialize_blob::<DriftScore>(bytes, "recent snapshot metadata"))
+                    .transpose()
+                    .map_err(map_anyhow)?;
+                Ok(SnapshotMetadata {
+                    commit_hash: row.get(0)?,
+                    scan_order: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    drift,
+                })
+            })
+            .context("Failed to execute recent metadata query")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect recent metadata")?;
+
+        Ok(rows)
+    }
+
+    pub fn get_sampled_snapshot_metadata(
+        &self,
+        repo_id: &str,
+        target_count: usize,
+    ) -> Result<Vec<SnapshotMetadata>> {
+        let total = self.graph_snapshot_count(repo_id)?;
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        if target_count == 0 || target_count >= total {
+            return self.get_recent_snapshot_metadata(repo_id, total);
+        }
+        if target_count == 1 {
+            return self.get_recent_snapshot_metadata(repo_id, 1);
         }
 
-        // Pick evenly spaced indices
+        let all = self.get_recent_snapshot_metadata(repo_id, total)?;
+        let n = all.len();
         let mut picked_indices: Vec<usize> = (0..target_count)
             .map(|i| i * (n - 1) / (target_count - 1))
             .collect();
         picked_indices.dedup();
 
-        // Load picked snapshots by hash
-        let mut snapshots = Vec::with_capacity(picked_indices.len());
-        for idx in &picked_indices {
-            let hash = &all_hashes[*idx];
-            if let Some(snapshot) = self.get_graph_snapshot(hash)? {
-                snapshots.push(snapshot);
+        Ok(picked_indices
+            .into_iter()
+            .filter_map(|index| all.get(index).cloned())
+            .collect())
+    }
+
+    pub fn get_commit_messages_for_metadata(
+        &self,
+        repo_id: &str,
+        metadata: &[SnapshotMetadata],
+    ) -> Result<Vec<(String, String, i64)>> {
+        let mut result = Vec::with_capacity(metadata.len());
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT message, timestamp
+                   FROM commits
+                  WHERE repo_id = ?1 AND hash = ?2",
+            )
+            .context("Failed to prepare commit message query")?;
+
+        for meta in metadata {
+            let row = stmt
+                .query_row(rusqlite::params![repo_id, meta.commit_hash], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .optional()
+                .context("Failed to fetch commit message")?;
+
+            if let Some((message, timestamp)) = row {
+                result.push((meta.commit_hash.clone(), message, timestamp));
             }
         }
 
-        info!(
-            total = n,
-            sampled = snapshots.len(),
-            "Loaded evenly sampled snapshots across full history"
-        );
-
-        Ok(snapshots)
+        Ok(result)
     }
 
-    /// Retrieves commit message info for the given snapshot list.
-    ///
-    /// Returns (hash, first_line_of_message, timestamp) tuples for display
-    /// in the timeline widget. Preserves snapshot order.
-    #[allow(clippy::type_complexity)]
-    pub fn get_commit_messages_for_snapshots(
+    fn load_snapshots_from_metadata(
         &self,
-        snapshots: &[GraphSnapshot],
-    ) -> Result<Vec<(String, String, i64)>> {
-        let mut result = Vec::with_capacity(snapshots.len());
+        repo_id: &str,
+        metadata: &[SnapshotMetadata],
+    ) -> Result<SnapshotLoadResult> {
+        let mut result = SnapshotLoadResult {
+            snapshots: Vec::with_capacity(metadata.len()),
+            skipped_corrupt: 0,
+        };
 
-        for snapshot in snapshots {
-            let commit_info = self
-                .conn
-                .query_row(
-                    "SELECT message, timestamp FROM commits WHERE hash = ?1",
-                    [&snapshot.commit_hash],
-                    |row| {
-                        let message: String = row.get(0)?;
-                        let timestamp: i64 = row.get(1)?;
-                        Ok((message, timestamp))
-                    },
-                )
-                .optional()
-                .with_context(|| {
-                    format!("Failed to fetch commit info: {}", &snapshot.commit_hash)
-                })?;
-
-            match commit_info {
-                Some((message, timestamp)) => {
-                    let first_line = message.lines().next().unwrap_or("").to_string();
-                    result.push((snapshot.commit_hash.clone(), first_line, timestamp));
-                }
-                None => {
-                    // If not in commits table, use snapshot info
-                    result.push((
-                        snapshot.commit_hash.clone(),
-                        String::new(),
-                        snapshot.timestamp,
-                    ));
+        for meta in metadata {
+            match self.get_graph_snapshot(repo_id, &meta.commit_hash) {
+                Ok(Some(snapshot)) => result.snapshots.push(snapshot),
+                Ok(None) => result.skipped_corrupt += 1,
+                Err(err) => {
+                    result.skipped_corrupt += 1;
+                    warn!(hash = %meta.commit_hash, error = %err, "Failed to reconstruct snapshot");
                 }
             }
         }
 
         Ok(result)
     }
-}
 
-/// rusqlite optional trait helper — returns None when query_row finds no rows.
-///
-/// rusqlite's `query_row` returns an error if no row is found.
-/// This trait adds an `optional()` method that returns None instead.
-trait OptionalRow<T> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error>;
-}
+    fn fetch_snapshot_frame(
+        &self,
+        repo_id: &str,
+        commit_hash: &str,
+    ) -> Result<Option<SnapshotFrame>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT commit_hash, scan_order, timestamp, node_count, edge_count, drift_bin,
+                        scan_metadata_bin, delta_bin, analysis_version, config_fingerprint,
+                        has_full_artifacts
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1 AND commit_hash = ?2",
+            )
+            .context("Failed to prepare snapshot frame query")?;
 
-impl<T> OptionalRow<T> for Result<T, rusqlite::Error> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
+        stmt.query_row(rusqlite::params![repo_id, commit_hash], |row| {
+            self.read_frame(row)
+        })
+        .optional()
+        .context("Failed to execute snapshot frame query")
+    }
+
+    fn read_frame(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotFrame> {
+        let drift_bytes: Option<Vec<u8>> = row.get(5)?;
+        let drift = drift_bytes
+            .as_deref()
+            .map(|bytes| deserialize_blob::<DriftScore>(bytes, "snapshot frame drift"))
+            .transpose()
+            .map_err(map_anyhow)?;
+        let scan_metadata_bytes: Vec<u8> = row.get(6)?;
+        let scan_metadata =
+            deserialize_blob::<ScanMetadata>(&scan_metadata_bytes, "snapshot frame metadata")
+                .map_err(map_anyhow)?;
+        let delta_bytes: Vec<u8> = row.get(7)?;
+        let delta = deserialize_blob::<GraphDelta>(&delta_bytes, "snapshot frame delta")
+            .map_err(map_anyhow)?;
+
+        Ok(SnapshotFrame {
+            commit_hash: row.get(0)?,
+            scan_order: row.get(1)?,
+            timestamp: row.get(2)?,
+            node_count: row.get::<_, i64>(3)? as usize,
+            edge_count: row.get::<_, i64>(4)? as usize,
+            drift,
+            scan_metadata,
+            delta,
+            analysis_version: row.get::<_, i64>(8)? as u32,
+            config_fingerprint: row.get(9)?,
+            has_full_artifacts: row.get::<_, i64>(10)? != 0,
+        })
+    }
+
+    fn load_checkpoint_before_or_at(
+        &self,
+        repo_id: &str,
+        scan_order: i64,
+    ) -> Result<Option<GraphCheckpoint>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT commit_hash, scan_order, state_bin, full_artifacts_bin
+                   FROM graph_checkpoints
+                  WHERE repo_id = ?1 AND scan_order <= ?2
+                  ORDER BY scan_order DESC
+                  LIMIT 1",
+            )
+            .context("Failed to prepare checkpoint lookup")?;
+
+        let row = stmt
+            .query_row(rusqlite::params![repo_id, scan_order], |row| {
+                let state_bin: Vec<u8> = row.get(2)?;
+                let state = deserialize_blob::<RepoScanState>(&state_bin, "checkpoint state")
+                    .map_err(map_anyhow)?;
+                let artifacts_bin: Option<Vec<u8>> = row.get(3)?;
+                let full_artifacts = artifacts_bin
+                    .as_deref()
+                    .map(|bytes| {
+                        deserialize_blob::<HeavySnapshotArtifacts>(bytes, "checkpoint artifacts")
+                    })
+                    .transpose()
+                    .map_err(map_anyhow)?;
+                Ok(GraphCheckpoint {
+                    commit_hash: row.get(0)?,
+                    scan_order: row.get(1)?,
+                    state,
+                    full_artifacts,
+                })
+            })
+            .optional()
+            .context("Failed to load checkpoint")?;
+
+        Ok(row)
+    }
+
+    fn load_frames_between(
+        &self,
+        repo_id: &str,
+        start_scan_order: i64,
+        end_scan_order: i64,
+    ) -> Result<Vec<SnapshotFrame>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT commit_hash, scan_order, timestamp, node_count, edge_count, drift_bin,
+                        scan_metadata_bin, delta_bin, analysis_version, config_fingerprint,
+                        has_full_artifacts
+                   FROM snapshot_frames
+                  WHERE repo_id = ?1 AND scan_order > ?2 AND scan_order <= ?3
+                  ORDER BY scan_order ASC",
+            )
+            .context("Failed to prepare frame range query")?;
+
+        let rows = stmt
+            .query_map(
+                rusqlite::params![repo_id, start_scan_order, end_scan_order],
+                |row| self.read_frame(row),
+            )
+            .context("Failed to execute frame range query")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect frame range")?;
+
+        Ok(rows)
+    }
+
+    fn load_checkpoint_artifacts(
+        &self,
+        repo_id: &str,
+        scan_order: i64,
+    ) -> Result<Option<HeavySnapshotArtifacts>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT full_artifacts_bin
+                   FROM graph_checkpoints
+                  WHERE repo_id = ?1 AND scan_order = ?2",
+            )
+            .context("Failed to prepare checkpoint artifact query")?;
+        let bytes = stmt
+            .query_row(rusqlite::params![repo_id, scan_order], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })
+            .optional()
+            .context("Failed to load checkpoint artifact row")?
+            .flatten();
+
+        bytes
+            .map(|blob| deserialize_blob::<HeavySnapshotArtifacts>(&blob, "checkpoint artifacts"))
+            .transpose()
+    }
+
+    fn reconstruct_snapshot_from_frame(
+        &self,
+        repo_id: &str,
+        frame: &SnapshotFrame,
+    ) -> Result<GraphSnapshot> {
+        let Some(mut checkpoint) = self.load_checkpoint_before_or_at(repo_id, frame.scan_order)?
+        else {
+            anyhow::bail!("No checkpoint available for {}", frame.commit_hash);
+        };
+        let deltas = self.load_frames_between(repo_id, checkpoint.scan_order, frame.scan_order)?;
+        for delta_frame in &deltas {
+            apply_delta_to_repo_state(&mut checkpoint.state, &delta_frame.delta);
         }
+
+        let full_artifacts = if frame.has_full_artifacts {
+            self.load_checkpoint_artifacts(repo_id, frame.scan_order)?
+                .or(checkpoint.full_artifacts.take())
+        } else {
+            None
+        };
+
+        Ok(materialize_snapshot_from_repo_state(
+            &checkpoint.state,
+            frame,
+            full_artifacts,
+        ))
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
+fn apply_delta_to_repo_state(state: &mut RepoScanState, delta: &GraphDelta) {
+    for path in &delta.deletes {
+        state.files.remove(path);
+    }
+    for (path, file_state) in &delta.upserts {
+        state.files.insert(path.clone(), file_state.clone());
+    }
+}
+
+fn materialize_snapshot_from_repo_state(
+    repo_state: &RepoScanState,
+    frame: &SnapshotFrame,
+    full_artifacts: Option<HeavySnapshotArtifacts>,
+) -> GraphSnapshot {
+    let projection = project_repo_state(
+        repo_state,
+        frame.scan_metadata.external_min_importers as usize,
+    );
+    GraphSnapshot {
+        commit_hash: frame.commit_hash.clone(),
+        nodes: projection.nodes,
+        edges: projection.edges,
+        node_count: frame.node_count,
+        edge_count: frame.edge_count,
+        timestamp: frame.timestamp,
+        analysis_version: frame.analysis_version,
+        config_fingerprint: frame.config_fingerprint.clone(),
+        node_metadata: projection.node_metadata,
+        scan_metadata: frame.scan_metadata.clone(),
+        drift: frame.drift.clone(),
+        blast_radius: full_artifacts
+            .as_ref()
+            .map(|value| value.blast_radius.clone()),
+        instability_metrics: full_artifacts
+            .as_ref()
+            .map(|value| value.instability_metrics.clone())
+            .unwrap_or_default(),
+        diagnostics: full_artifacts
+            .as_ref()
+            .map(|value| value.diagnostics.clone())
+            .unwrap_or_default(),
+    }
+}
+
+struct StateProjection {
+    nodes: Vec<String>,
+    edges: Vec<DependencyEdge>,
+    node_metadata: HashMap<String, NodeMetadata>,
+}
+
+fn project_repo_state(
+    repo_state: &RepoScanState,
+    external_min_importers: usize,
+) -> StateProjection {
+    let mut internal_file_counts: HashMap<String, usize> = HashMap::new();
+    let mut edge_weights: HashMap<(String, String), u32> = HashMap::new();
+    let mut edge_samples: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut target_importers: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    for (path, file_state) in &repo_state.files {
+        *internal_file_counts
+            .entry(file_state.package_name.clone())
+            .or_insert(0) += 1;
+
+        let mut seen_targets = HashSet::new();
+        for import in &file_state.imports {
+            *edge_weights
+                .entry((file_state.package_name.clone(), import.module_name.clone()))
+                .or_insert(0) += import.weight;
+            edge_samples
+                .entry((file_state.package_name.clone(), import.module_name.clone()))
+                .or_default()
+                .insert(path.clone());
+
+            if seen_targets.insert(import.module_name.clone()) {
+                *target_importers
+                    .entry(import.module_name.clone())
+                    .or_default()
+                    .entry(file_state.package_name.clone())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    let internal_nodes: HashSet<String> = internal_file_counts.keys().cloned().collect();
+    let kept_external: HashSet<String> = target_importers
+        .iter()
+        .filter(|(module_name, importers)| {
+            !internal_nodes.contains(*module_name) && importers.len() >= external_min_importers
+        })
+        .map(|(module_name, _)| module_name.clone())
+        .collect();
+    let kept_nodes: HashSet<String> = internal_nodes
+        .iter()
+        .cloned()
+        .chain(kept_external.iter().cloned())
+        .collect();
+
+    let mut edges = Vec::new();
+    for ((from_module, to_module), weight) in &edge_weights {
+        if !kept_nodes.contains(from_module) || !kept_nodes.contains(to_module) || *weight == 0 {
+            continue;
+        }
+
+        let mut sample_paths: Vec<String> = edge_samples
+            .get(&(from_module.clone(), to_module.clone()))
+            .map(|paths| paths.iter().cloned().collect())
+            .unwrap_or_default();
+        sample_paths.sort();
+        sample_paths.truncate(5);
+        let file_path = sample_paths.first().cloned().unwrap_or_default();
+        let sample_origins = sample_paths
+            .into_iter()
+            .map(|file_path| EdgeOrigin {
+                file_path,
+                line: None,
+            })
+            .collect();
+
+        edges.push(DependencyEdge {
+            from_module: from_module.clone(),
+            to_module: to_module.clone(),
+            file_path,
+            line: None,
+            weight: *weight,
+            sample_origins,
+        });
+    }
+    edges.sort_by(|a, b| {
+        a.from_module
+            .cmp(&b.from_module)
+            .then(a.to_module.cmp(&b.to_module))
+    });
+
+    let mut nodes: Vec<String> = kept_nodes.iter().cloned().collect();
+    nodes.sort();
+
+    let mut node_metadata = HashMap::with_capacity(kept_nodes.len());
+    for node in &kept_nodes {
+        let metadata = if internal_nodes.contains(node) {
+            NodeMetadata {
+                kind: NodeKind::Internal,
+                importer_count: None,
+            }
+        } else {
+            NodeMetadata {
+                kind: NodeKind::External,
+                importer_count: target_importers
+                    .get(node)
+                    .map(|importers| importers.len() as u32),
+            }
+        };
+        node_metadata.insert(node.clone(), metadata);
+    }
+
+    StateProjection {
+        nodes,
+        edges,
+        node_metadata,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::DependencyEdge;
+    use crate::models::{
+        BlastRadiusReport, BlastRadiusSummary, CascadePath, FileDependencyState,
+        FilteredExternalSample, InstabilityMetric, ModuleImpact,
+    };
 
-    #[test]
-    fn test_insert_and_list_commits() {
-        let db = Database::open_in_memory().expect("DB should open");
+    const TEST_REPO_ID: &str = "repo/test";
 
-        let commit1 = CommitInfo {
-            hash: "aaa111".to_string(),
-            author_name: "Alice".to_string(),
-            author_email: "alice@test.com".to_string(),
-            message: "First commit".to_string(),
-            timestamp: 1_000_000,
-            tree_id: "tree_aaa".to_string(),
-        };
-        let commit2 = CommitInfo {
-            hash: "bbb222".to_string(),
-            author_name: "Bob".to_string(),
-            author_email: "bob@test.com".to_string(),
-            message: "Second commit".to_string(),
-            timestamp: 2_000_000,
-            tree_id: "tree_bbb".to_string(),
-        };
-
-        db.insert_commit(&commit1).unwrap();
-        db.insert_commit(&commit2).unwrap();
-
-        assert_eq!(db.commit_count().unwrap(), 2);
-
-        let commits = db.list_commits().unwrap();
-        assert_eq!(commits.len(), 2);
-        assert_eq!(commits[0].hash, "bbb222");
-        assert_eq!(commits[1].hash, "aaa111");
+    fn test_config_fingerprint() -> String {
+        "{\"ignore\":{\"paths\":[]},\"scoring\":{}}".to_string()
     }
 
-    #[test]
-    fn test_upsert_commit() {
-        let db = Database::open_in_memory().expect("DB should open");
-
-        let original = CommitInfo {
-            hash: "abc123".to_string(),
-            author_name: "Old Name".to_string(),
-            author_email: "old@test.com".to_string(),
-            message: "Original message".to_string(),
-            timestamp: 1_000_000,
-            tree_id: "tree_1".to_string(),
-        };
-        let updated = CommitInfo {
-            hash: "abc123".to_string(),
-            author_name: "New Name".to_string(),
-            author_email: "new@test.com".to_string(),
-            message: "Updated message".to_string(),
-            timestamp: 1_000_000,
-            tree_id: "tree_1".to_string(),
-        };
-
-        db.insert_commit(&original).unwrap();
-        db.insert_commit(&updated).unwrap();
-
-        assert_eq!(db.commit_count().unwrap(), 1);
-        let commits = db.list_commits().unwrap();
-        assert_eq!(commits[0].author_name, "New Name");
-    }
-
-    #[test]
-    fn test_insert_and_list_graph_snapshots() {
-        let db = Database::open_in_memory().expect("DB should open");
-
-        // First insert a commit (required for JOIN)
-        let commit = CommitInfo {
-            hash: "abc123".to_string(),
+    fn make_commit(hash: &str, timestamp: i64) -> CommitInfo {
+        CommitInfo {
+            hash: hash.to_string(),
             author_name: "Test".to_string(),
             author_email: "test@test.com".to_string(),
-            message: "Test commit\nBody here".to_string(),
-            timestamp: 1_000_000,
-            tree_id: "tree_abc".to_string(),
-        };
-        db.insert_commit(&commit).unwrap();
-
-        // Insert graph snapshot
-        let snapshot = GraphSnapshot {
-            commit_hash: "abc123".to_string(),
-            nodes: vec!["main".to_string(), "serde".to_string(), "std".to_string()],
-            edges: vec![
-                DependencyEdge {
-                    from_module: "main".to_string(),
-                    to_module: "serde".to_string(),
-                    file_path: "src/main.rs".to_string(),
-                    line: 1,
-                    weight: 1,
-                },
-                DependencyEdge {
-                    from_module: "main".to_string(),
-                    to_module: "std".to_string(),
-                    file_path: "src/main.rs".to_string(),
-                    line: 2,
-                    weight: 1,
-                },
-            ],
-            node_count: 3,
-            edge_count: 2,
-            timestamp: 1_000_000,
-            drift: None,
-            blast_radius: None,
-        };
-        db.insert_graph_snapshot(&snapshot).unwrap();
-
-        // Count check
-        assert_eq!(db.graph_snapshot_count().unwrap(), 1);
-
-        // List check
-        let graphs = db.list_recent_graphs(10).unwrap();
-        assert_eq!(graphs.len(), 1);
-        let (hash, message, _ts, nodes, edges) = &graphs[0];
-        assert_eq!(hash, "abc123");
-        assert!(message.starts_with("Test commit"));
-        assert_eq!(*nodes, 3);
-        assert_eq!(*edges, 2);
+            message: format!("Commit {hash}"),
+            timestamp,
+            tree_id: format!("tree_{hash}"),
+        }
     }
 
-    #[test]
-    fn test_drift_score_storage_and_retrieval() {
-        let db = Database::open_in_memory().expect("DB should open");
-
-        // Insert commit
-        let commit = CommitInfo {
-            hash: "drift01".to_string(),
-            author_name: "Test".to_string(),
-            author_email: "test@test.com".to_string(),
-            message: "Drift test commit".to_string(),
-            timestamp: 3_000_000,
-            tree_id: "tree_drift".to_string(),
-        };
-        db.insert_commit(&commit).unwrap();
-
-        // Insert snapshot with drift
-        let drift = DriftScore {
-            total: 65,
-            fan_in_delta: 3,
-            fan_out_delta: -2,
-            new_cycles: 1,
-            boundary_violations: 2,
-            cognitive_complexity: 12.5,
-            timestamp: 3_000_000,
-            cycle_debt: 0.0,
-            layering_debt: 0.0,
-            hub_debt: 0.0,
-            coupling_debt: 0.0,
-            cognitive_debt: 0.0,
-            instability_debt: 0.0,
-        };
-
-        let snapshot = GraphSnapshot {
-            commit_hash: "drift01".to_string(),
-            nodes: vec!["A".to_string(), "B".to_string()],
-            edges: vec![DependencyEdge {
-                from_module: "A".to_string(),
-                to_module: "B".to_string(),
-                file_path: "src/a.rs".to_string(),
-                line: 1,
-                weight: 1,
-            }],
-            node_count: 2,
-            edge_count: 1,
-            timestamp: 3_000_000,
-            drift: Some(drift),
-            blast_radius: None,
-        };
-        db.insert_graph_snapshot(&snapshot).unwrap();
-
-        // Read back snapshot
-        let retrieved = db
-            .get_graph_snapshot("drift01")
-            .unwrap()
-            .expect("Snapshot should be found");
-        assert_eq!(retrieved.commit_hash, "drift01");
-        let d = retrieved.drift.expect("Drift should exist");
-        assert_eq!(d.total, 65);
-        assert_eq!(d.fan_in_delta, 3);
-        assert_eq!(d.new_cycles, 1);
-
-        // Drift trend
-        let trend = db.list_drift_trend(10).unwrap();
-        assert_eq!(trend.len(), 1);
-        let (hash, _msg, nodes, edges, drift_total, _ts) = &trend[0];
-        assert_eq!(hash, "drift01");
-        assert_eq!(*nodes, 2);
-        assert_eq!(*edges, 1);
-        assert_eq!(*drift_total, Some(65));
-    }
-
-    #[test]
-    fn test_update_drift_score() {
-        let db = Database::open_in_memory().expect("DB should open");
-
-        let commit = CommitInfo {
-            hash: "upd01".to_string(),
-            author_name: "Test".to_string(),
-            author_email: "t@t.com".to_string(),
-            message: "Update test".to_string(),
-            timestamp: 4_000_000,
-            tree_id: "tree_upd".to_string(),
-        };
-        db.insert_commit(&commit).unwrap();
-
-        // Insert snapshot without drift
-        let snapshot = GraphSnapshot {
-            commit_hash: "upd01".to_string(),
-            nodes: vec!["X".to_string()],
-            edges: vec![],
+    fn make_frame(
+        hash: &str,
+        scan_order: i64,
+        delta: GraphDelta,
+        has_full_artifacts: bool,
+    ) -> SnapshotFrame {
+        SnapshotFrame {
+            commit_hash: hash.to_string(),
+            scan_order,
+            timestamp: scan_order,
             node_count: 1,
             edge_count: 0,
-            timestamp: 4_000_000,
-            drift: None,
-            blast_radius: None,
-        };
-        db.insert_graph_snapshot(&snapshot).unwrap();
+            analysis_version: crate::models::CURRENT_ANALYSIS_VERSION,
+            config_fingerprint: test_config_fingerprint(),
+            drift: Some(DriftScore {
+                total: scan_order as u8,
+                fan_in_delta: 0,
+                fan_out_delta: 0,
+                new_cycles: 0,
+                boundary_violations: 0,
+                layering_violations: 0,
+                cognitive_complexity: 0.0,
+                timestamp: scan_order,
+                cycle_debt: 0.0,
+                layering_debt: 0.0,
+                hub_debt: 0.0,
+                coupling_debt: 0.0,
+                cognitive_debt: 0.0,
+                instability_debt: 0.0,
+            }),
+            scan_metadata: ScanMetadata {
+                external_min_importers: 3,
+                included_external_count: 0,
+                filtered_external_count: 0,
+                filtered_external_samples: Vec::<FilteredExternalSample>::new(),
+            },
+            delta,
+            has_full_artifacts,
+        }
+    }
 
-        // Update drift afterwards
-        let drift = DriftScore {
-            total: 42,
-            fan_in_delta: 0,
-            fan_out_delta: 1,
-            new_cycles: 0,
-            boundary_violations: 0,
-            cognitive_complexity: 5.0,
-            timestamp: 4_000_000,
-            cycle_debt: 0.0,
-            layering_debt: 0.0,
-            hub_debt: 0.0,
-            coupling_debt: 0.0,
-            cognitive_debt: 0.0,
-            instability_debt: 0.0,
-        };
-        db.update_drift_score("upd01", &drift).unwrap();
-
-        // Verify from trend
-        let trend = db.list_drift_trend(10).unwrap();
-        assert_eq!(trend[0].4, Some(42), "Updated drift score should be 42");
+    fn make_full_artifacts() -> HeavySnapshotArtifacts {
+        HeavySnapshotArtifacts {
+            blast_radius: BlastRadiusReport {
+                impacts: vec![ModuleImpact {
+                    module_name: "core".to_string(),
+                    blast_score: 0.8,
+                    downstream_count: 2,
+                    weighted_reach: 1.0,
+                    is_articulation_point: false,
+                }],
+                articulation_points: Vec::new(),
+                critical_paths: vec![CascadePath {
+                    chain: vec!["core".to_string(), "web".to_string()],
+                    total_weight: 1,
+                    depth: 2,
+                }],
+                summary: BlastRadiusSummary {
+                    articulation_point_count: 0,
+                    max_blast_score: 0.8,
+                    most_impactful_module: "core".to_string(),
+                    mean_blast_score: 0.8,
+                    longest_chain_depth: 2,
+                },
+            },
+            instability_metrics: vec![InstabilityMetric {
+                module_name: "core".to_string(),
+                instability: 0.2,
+                fan_in: 1,
+                fan_out: 1,
+            }],
+            diagnostics: vec!["stable".to_string()],
+        }
     }
 
     #[test]
-    fn test_get_graph_snapshot_not_found() {
-        let db = Database::open_in_memory().expect("DB should open");
+    fn reconstructs_snapshot_from_checkpoint_and_delta() {
+        let db = Database::open_in_memory().unwrap();
+        let commit_a = make_commit("a", 1);
+        let commit_b = make_commit("b", 2);
+        db.insert_commit(TEST_REPO_ID, &commit_a).unwrap();
+        db.insert_commit(TEST_REPO_ID, &commit_b).unwrap();
 
-        let result = db.get_graph_snapshot("nonexistent").unwrap();
-        assert!(result.is_none(), "Should return None for missing commit");
+        let baseline_state = RepoScanState {
+            files: HashMap::from([(
+                "src/core.ts".to_string(),
+                FileDependencyState {
+                    package_name: "core".to_string(),
+                    imports: Vec::new(),
+                },
+            )]),
+        };
+        db.insert_graph_checkpoint(
+            TEST_REPO_ID,
+            &GraphCheckpoint {
+                commit_hash: "a".to_string(),
+                scan_order: 1,
+                state: baseline_state,
+                full_artifacts: None,
+            },
+        )
+        .unwrap();
+        db.insert_snapshot_frame(
+            TEST_REPO_ID,
+            &make_frame("a", 1, GraphDelta::default(), false),
+        )
+        .unwrap();
+        db.insert_snapshot_frame(
+            TEST_REPO_ID,
+            &make_frame(
+                "b",
+                2,
+                GraphDelta {
+                    upserts: vec![(
+                        "src/web.ts".to_string(),
+                        FileDependencyState {
+                            package_name: "web".to_string(),
+                            imports: vec![crate::models::FileImportTarget {
+                                module_name: "core".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                    )],
+                    deletes: Vec::new(),
+                },
+                false,
+            ),
+        )
+        .unwrap();
+
+        let snapshot = db.get_graph_snapshot(TEST_REPO_ID, "b").unwrap().unwrap();
+        assert_eq!(snapshot.nodes, vec!["core".to_string(), "web".to_string()]);
+        assert_eq!(snapshot.edges.len(), 1);
+        assert_eq!(snapshot.edges[0].from_module, "web");
+        assert_eq!(snapshot.edges[0].to_module, "core");
+    }
+
+    #[test]
+    fn repo_scoped_frames_do_not_collide() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_b = "repo/other";
+        let commit = make_commit("samehash", 1);
+        db.insert_commit(TEST_REPO_ID, &commit).unwrap();
+        db.insert_commit(repo_b, &commit).unwrap();
+
+        let state_a = RepoScanState {
+            files: HashMap::from([(
+                "src/core.ts".to_string(),
+                FileDependencyState {
+                    package_name: "core".to_string(),
+                    imports: Vec::new(),
+                },
+            )]),
+        };
+        let state_b = RepoScanState {
+            files: HashMap::from([(
+                "src/web.ts".to_string(),
+                FileDependencyState {
+                    package_name: "web".to_string(),
+                    imports: Vec::new(),
+                },
+            )]),
+        };
+        db.insert_graph_checkpoint(
+            TEST_REPO_ID,
+            &GraphCheckpoint {
+                commit_hash: "samehash".to_string(),
+                scan_order: 1,
+                state: state_a,
+                full_artifacts: Some(make_full_artifacts()),
+            },
+        )
+        .unwrap();
+        db.insert_graph_checkpoint(
+            repo_b,
+            &GraphCheckpoint {
+                commit_hash: "samehash".to_string(),
+                scan_order: 1,
+                state: state_b,
+                full_artifacts: Some(make_full_artifacts()),
+            },
+        )
+        .unwrap();
+        db.insert_snapshot_frame(
+            TEST_REPO_ID,
+            &make_frame("samehash", 1, GraphDelta::default(), true),
+        )
+        .unwrap();
+        db.insert_snapshot_frame(
+            repo_b,
+            &make_frame("samehash", 1, GraphDelta::default(), true),
+        )
+        .unwrap();
+
+        let repo_a = db
+            .get_graph_snapshot(TEST_REPO_ID, "samehash")
+            .unwrap()
+            .unwrap();
+        let repo_b_loaded = db.get_graph_snapshot(repo_b, "samehash").unwrap().unwrap();
+        assert_eq!(repo_a.nodes, vec!["core".to_string()]);
+        assert_eq!(repo_b_loaded.nodes, vec!["web".to_string()]);
+        assert_eq!(
+            repo_a
+                .blast_radius
+                .as_ref()
+                .unwrap()
+                .summary
+                .max_blast_score,
+            0.8
+        );
+    }
+
+    #[test]
+    fn previous_drift_entries_return_older_commits_first() {
+        let db = Database::open_in_memory().unwrap();
+        for idx in 1..=4 {
+            let hash = format!("c{idx}");
+            db.insert_commit(TEST_REPO_ID, &make_commit(&hash, idx as i64))
+                .unwrap();
+            db.insert_snapshot_frame(
+                TEST_REPO_ID,
+                &make_frame(&hash, idx as i64, GraphDelta::default(), false),
+            )
+            .unwrap();
+        }
+
+        let previous = db.list_previous_drift_entries(TEST_REPO_ID, 4, 3).unwrap();
+        let hashes: Vec<String> = previous.into_iter().map(|entry| entry.0).collect();
+        assert_eq!(
+            hashes,
+            vec!["c3".to_string(), "c2".to_string(), "c1".to_string()]
+        );
     }
 }

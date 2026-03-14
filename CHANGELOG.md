@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-03-14
+
+### Added
+- **Interactive Architecture Map:** A completely new TUI component for visualizing project boundaries and inter-layer dependencies with high-performance rendering.
+- **Deep AST Analysis:** Enhanced `parser.rs` with more granular dependency detection across TypeScript, Rust, Go, and Python.
+- **Advanced Blast Radius Detection:** Re-architected the blast radius engine to provide deeper insights into potential regression zones.
+- **Comprehensive Documentation Overhaul:** Entirely rewritten installation, configuration, and concept guides in the official website.
+- **Monorepo Configuration V2:** Introduced a more robust and flexible configuration schema for complex monorepo structures.
+
+### Changed
+- **TUI Revamp:** Significant performance optimizations and UX improvements in the terminal dashboard.
+- **Core Engine Refactor:** Massive internal refactoring of the scanner, database, and scoring modules for scalability.
+- **Website Redesign:** Updated website components and styles for better accessibility and navigation.
+
 ## [1.2.4] - 2026-03-11
 
 ### Fixed

@@ -11,6 +11,7 @@
 // =============================================================================
 
 pub mod app;
+pub mod architecture_map;
 pub mod graph_renderer;
 pub mod insight_panel;
 pub mod timeline;

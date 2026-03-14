@@ -4,23 +4,25 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'MorphArch',
-  tagline: 'Visualizing Software Architecture Evolution',
+  tagline: 'Visual Architecture Intelligence for Modern Monorepos',
   favicon: 'img/favicon.svg',
 
   url: 'https://morpharch.dev',
   baseUrl: '/',
 
-  // SEO and Metadata
   customFields: {
-    description: 'High-performance monorepo architecture drift visualizer with animated TUI and health scoring.',
+    description:
+      'High-performance terminal intelligence to visualize dependency structures, monitor architectural drift, and identify hotspots in large-scale repositories.',
   },
 
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
 
-  clientModules: [
-    require.resolve('./src/analytics.ts'),
-  ],
+  clientModules: [require.resolve('./src/analytics.ts')],
 
   i18n: {
     defaultLocale: 'en',
@@ -45,10 +47,10 @@ const config: Config = {
 
   plugins: [
     [
-      require.resolve("@easyops-cn/docusaurus-search-local"),
+      require.resolve('@easyops-cn/docusaurus-search-local'),
       {
         hashed: true,
-        language: ["en"],
+        language: ['en'],
         highlightSearchTermsOnTargetPage: true,
         explicitSearchResultPath: true,
       },
@@ -58,7 +60,10 @@ const config: Config = {
   themeConfig: {
     image: 'img/social-card.svg',
     metadata: [
-      {name: 'keywords', content: 'monorepo, architecture, rust, visualizer, tech-debt, git'},
+      {
+        name: 'keywords',
+        content: 'monorepo, architecture, rust, visualizer, tech-debt, git',
+      },
       {name: 'twitter:card', content: 'summary_large_image'},
     ],
     navbar: {

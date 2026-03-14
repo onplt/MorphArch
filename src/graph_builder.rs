@@ -29,6 +29,12 @@ pub fn build_graph(_nodes: &HashSet<String>, edges: &[DependencyEdge]) -> DiGrap
     let mut graph = DiGraph::new();
     let mut node_indices: HashMap<String, NodeIndex> = HashMap::new();
 
+    let mut ordered_nodes: Vec<_> = _nodes.iter().cloned().collect();
+    ordered_nodes.sort();
+    for node in ordered_nodes {
+        node_indices.insert(node.clone(), graph.add_node(node));
+    }
+
     // Process edges and dynamically add nodes (deduplicated)
     for edge in edges {
         // Both from_module and to_module are already clean package names.
@@ -77,15 +83,17 @@ mod tests {
                 from_module: "main".to_string(),
                 to_module: "serde".to_string(),
                 file_path: "src/main.rs".to_string(),
-                line: 1,
+                line: Some(1),
                 weight: 1,
+                sample_origins: Vec::new(),
             },
             DependencyEdge {
                 from_module: "main".to_string(),
                 to_module: "std".to_string(),
                 file_path: "src/main.rs".to_string(),
-                line: 2,
+                line: Some(2),
                 weight: 1,
+                sample_origins: Vec::new(),
             },
         ];
 
@@ -108,15 +116,17 @@ mod tests {
                 from_module: "web".to_string(),
                 to_module: "core".to_string(),
                 file_path: "apps/web/src/app.ts".to_string(),
-                line: 1,
+                line: Some(1),
                 weight: 2,
+                sample_origins: Vec::new(),
             },
             DependencyEdge {
                 from_module: "web".to_string(),
                 to_module: "core".to_string(),
                 file_path: "apps/web/src/index.ts".to_string(),
-                line: 1,
+                line: Some(1),
                 weight: 3,
+                sample_origins: Vec::new(),
             },
         ];
 
@@ -144,5 +154,17 @@ mod tests {
 
         assert_eq!(graph.node_count(), 0);
         assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_build_graph_preserves_isolated_nodes() {
+        let nodes = HashSet::from(["isolated".to_string(), "connected".to_string()]);
+        let edges = vec![];
+
+        let graph = build_graph(&nodes, &edges);
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.node_indices().any(|idx| graph[idx] == "isolated"));
     }
 }

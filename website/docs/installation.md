@@ -1,31 +1,29 @@
 # Installation
 
-MorphArch is distributed as a high-performance Rust binary. You can install it using several methods.
+MorphArch is distributed as a local CLI binary for architecture analysis.
 
 ## Prerequisites
 
-- **Zero External Dependencies**: Because MorphArch is powered by the `gitoxide` (`gix`) pure-Rust Git engine, you do **not** even need the `git` CLI installed on your system to run it!
-- **Rust Toolchain** (only for `cargo install` or building from source): You need the Rust compiler (v1.88+) and Cargo installed. If you don't have it, install it from [rustup.rs](https://rustup.rs/).
+- No external Git CLI is required for normal use
+- Rust is only required if you install from source or with Cargo
 
 ---
 
-## Quick Install (Recommended)
+## Quick Install
 
-The fastest way to install MorphArch.
-
-**Via Cargo (Crates.io):**
+### Cargo
 
 ```bash
 cargo install morpharch
 ```
 
-**Via Shell Script (Linux / macOS):**
+### Linux / macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/onplt/morpharch/main/install.sh | sh
 ```
 
-**Via PowerShell (Windows):**
+### Windows PowerShell
 
 ```powershell
 irm https://raw.githubusercontent.com/onplt/morpharch/main/install.ps1 | iex
@@ -33,15 +31,9 @@ irm https://raw.githubusercontent.com/onplt/morpharch/main/install.ps1 | iex
 
 ---
 
-## Installation Methods
+## Other Install Methods
 
-### From crates.io
-
-```bash
-cargo install morpharch
-```
-
-### Homebrew (macOS/Linux)
+### Homebrew
 
 ```bash
 brew install onplt/morpharch
@@ -55,38 +47,26 @@ npm install -g morpharch
 
 ### cargo-binstall
 
-If you have [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), you can skip the compilation step:
-
 ```bash
 cargo binstall morpharch
 ```
 
-### Scoop (Windows)
+### Scoop
 
 ```powershell
 scoop bucket add morpharch https://github.com/onplt/scoop-morpharch
 scoop install morpharch
 ```
 
-### AUR (Arch Linux)
-
-```bash
-yay -S morpharch-bin
-```
-
-### DEB / RPM
-
-Download `.deb` or `.rpm` packages directly from the [GitHub Releases](https://github.com/onplt/morpharch/releases) page.
-
 ### Docker
 
 ```bash
-docker run --rm -v .:/repo ghcr.io/onplt/morpharch scan .
+docker run --rm -v .:/repo ghcr.io/onplt/morpharch scan . -n 1
 ```
 
-### From Source
+---
 
-If you want the latest features from the `main` branch:
+## Build From Source
 
 ```bash
 git clone https://github.com/onplt/morpharch.git
@@ -94,16 +74,26 @@ cd morpharch
 cargo build --release
 ```
 
-The binary will be available at `./target/release/morpharch`. You can move it to your `/usr/local/bin` or equivalent.
+The binary will be available at:
+
+```text
+target/release/morpharch
+```
 
 ---
 
-## Verifying Installation
-
-Run the following command to verify that MorphArch is installed correctly:
+## Verify the Install
 
 ```bash
 morpharch --version
 ```
 
-If you see the version number, you're ready to visualize your architecture!
+Then try:
+
+```bash
+morpharch scan . -n 1
+morpharch watch . -n 50
+```
+
+You should see a short scan complete successfully, then land on the map view
+and be able to open clusters and inspect individual members.

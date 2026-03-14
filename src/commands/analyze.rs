@@ -21,6 +21,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tracing::info;
 
+use crate::analysis;
 use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::graph_builder;
@@ -30,6 +31,7 @@ use crate::scoring;
 /// Runs the analyze command: produces a detailed drift report.
 pub fn run_analyze(
     repo_path: &Path,
+    repo_id: &str,
     commit_ish: Option<&str>,
     db: &Database,
     project_config: &ProjectConfig,
@@ -45,9 +47,34 @@ pub fn run_analyze(
     info!(hash = %commit_hash, "Analyzing commit");
 
     // ── Fetch graph snapshot ──
-    let snapshot = db
-        .get_graph_snapshot(&commit_hash)?
+    let mut snapshot = db
+        .get_graph_snapshot(repo_id, &commit_hash)?
         .with_context(|| format!("No graph snapshot found for this commit: {short_hash}"))?;
+    if snapshot.requires_core_recompute() || snapshot.needs_full_analysis() {
+        let prev_snapshot = match db.get_scan_order(repo_id, &commit_hash)? {
+            Some(scan_order) => db.get_previous_snapshot(repo_id, scan_order)?,
+            None => None,
+        };
+        let prev_graph = prev_snapshot.map(|previous| {
+            let nodes: HashSet<String> = previous.nodes.into_iter().collect();
+            graph_builder::build_graph(&nodes, &previous.edges)
+        });
+        let nodes: HashSet<String> = snapshot.nodes.iter().cloned().collect();
+        let artifacts = analysis::build_snapshot_artifacts(
+            &nodes,
+            &snapshot.edges,
+            prev_graph.as_ref(),
+            snapshot.timestamp,
+            &project_config.scoring,
+            analysis::SnapshotAnalysisDetail::Full,
+        );
+        snapshot.node_count = artifacts.graph.node_count();
+        snapshot.edge_count = artifacts.graph.edge_count();
+        snapshot.drift = Some(artifacts.drift);
+        snapshot.blast_radius = artifacts.blast_radius;
+        snapshot.instability_metrics = artifacts.instability_metrics;
+        snapshot.diagnostics = artifacts.diagnostics;
+    }
 
     println!("  Commit Analysis: {short_hash}");
     println!();
@@ -71,15 +98,11 @@ pub fn run_analyze(
     println!("  Temporal Analysis (comparison with previous commits):");
     println!();
 
-    let trend = db.list_drift_trend(20)?;
-
-    let current_pos = trend.iter().position(|(h, ..)| h == &commit_hash);
-
-    if let Some(pos) = current_pos {
-        let prev_commits: Vec<_> = trend.iter().skip(pos + 1).take(3).collect();
+    if let Some(scan_order) = db.get_scan_order(repo_id, &commit_hash)? {
+        let prev_commits = db.list_previous_drift_entries(repo_id, scan_order, 3)?;
 
         if prev_commits.is_empty() {
-            println!("  First commit — no previous commits to compare.");
+            println!("  No earlier commits available.");
         } else {
             let header = format!(
                 "  {:<9} {:>6} {:>6} {:>7} {:>8}",
@@ -185,10 +208,10 @@ fn print_drift_report(
         drift.new_cycles
     );
     println!(
-        "     Layering    ({:>2}%):  {:5.1}/100  {} back-edges",
+        "     Layering    ({:>2}%):  {:5.1}/100  {} cross-links",
         pct(n.layering),
         drift.layering_debt,
-        drift.boundary_violations
+        drift.layering_violations
     );
     println!(
         "     Hub/God     ({:>2}%):  {:5.1}/100",
@@ -234,12 +257,11 @@ fn print_boundary_details(edges: &[crate::models::DependencyEdge], config: &Proj
         pairs
             .iter()
             .filter(|(from, to)| {
-                config.scoring.boundaries.iter().any(|rule| {
-                    from.starts_with(rule.from.trim_end_matches('*').trim_end_matches('/'))
-                        && rule.deny.iter().any(|denied| {
-                            to.starts_with(denied.trim_end_matches('*').trim_end_matches('/'))
-                        })
-                })
+                config
+                    .scoring
+                    .boundaries
+                    .iter()
+                    .any(|rule| rule.matches(from, to))
             })
             .collect()
     };
@@ -294,7 +316,7 @@ fn print_recommendations(drift: &Option<DriftScore>) {
             "   {} extra edge(s) inside dependency cycles (score: {:.0}/100). \
              The dependency flow isn't clean — organizing layers to depend \
              only in one direction would improve clarity.",
-            d.boundary_violations, d.layering_debt
+            d.layering_violations, d.layering_debt
         ));
     }
 
