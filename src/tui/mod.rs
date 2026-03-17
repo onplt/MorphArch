@@ -10,6 +10,7 @@
 //   widgets         → Shared widget helpers
 // =============================================================================
 
+pub mod ai_panel;
 pub mod app;
 pub mod architecture_map;
 pub mod graph_renderer;

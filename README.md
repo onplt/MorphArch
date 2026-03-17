@@ -59,6 +59,9 @@ monorepo layouts.
   modules without leaving the terminal.
 - **Config-driven clustering**: semantic families, rules, constraints, aliases,
   kind hints, and color mode can all be customized per repo.
+- **AI architecture assistant**: ask natural language questions about your
+  codebase's health, coupling, hotspots, and blast radius — powered by any
+  OpenAI-compatible LLM.
 - **Incremental performance**: subtree caching, blob caching, delta frames, and
   parallel parsing reduce repeated scan cost substantially.
 
@@ -234,6 +237,7 @@ MorphArch uses one interaction model everywhere:
 | `c` | Reset the current graph viewport |
 | `r` | Reheat the raw graph layout |
 | `x` | Toggle blast overlay |
+| `a` | Toggle AI assistant panel |
 | `b` / `i` | Toggle sidebar or detail panel |
 | `q` | Quit |
 
@@ -372,6 +376,79 @@ third-party = "deps"
 
 ---
 
+## AI Architecture Assistant
+
+Press `a` in the TUI to open the AI assistant panel. It answers natural
+language questions about your codebase using the full architecture context:
+health scores, dependency edges, blast radius, churn hotspots, bus factor
+risks, cycle groups, and more.
+
+### Setup
+
+Set your API key as an environment variable:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+That is all you need — the default config uses `gpt-4o-mini` via the OpenAI
+API. For local models or other providers, add an `[ai]` section to
+`morpharch.toml`:
+
+```toml
+[ai]
+provider = "ollama"
+api_key_env = ""
+model = "llama3.1:8b"
+endpoint = "http://localhost:11434/v1/chat/completions"
+stream = true
+max_tokens = 4096
+temperature = 0.3
+max_context_tokens = 12000
+```
+
+### What you can ask
+
+The assistant has access to all computed architecture data, including:
+
+- health scores (6-component breakdown), drift trends, and scoring config
+- module instability, fan-in/fan-out, blast scores, and god module flags
+- cluster membership, inter-cluster coupling, and layer topology
+- cycle groups (strongly connected components) and boundary violations
+- churn hotspots (frequently changed + unstable modules)
+- bus factor risks (modules with very few contributors)
+- commit-to-commit diffs (what changed since the previous snapshot)
+
+When you inspect a specific module, the assistant automatically receives the
+full edge list (all inbound/outbound dependencies with weights), cycle
+partners, and per-file metrics for that module.
+
+### Slash commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/model` | Display current AI configuration |
+| `/diff N` | Compare architecture with N commits ago |
+| `/clear` | Clear conversation history |
+| `/history` | Show conversation statistics |
+| `/export` | Export conversation to file |
+
+### Interaction features
+
+- **Module highlighting**: module names in AI responses are visually
+  highlighted so you can immediately see which modules are discussed.
+- **Navigation suggestions**: after a response, the panel suggests "Inspect"
+  actions for mentioned modules — press Tab and Enter to navigate directly.
+- **Context-aware suggestions**: the panel generates relevant questions based on
+  what you are currently viewing (overview, cluster, or module inspect).
+- **Streaming**: responses stream in real-time with a spinner indicator.
+
+See the [AI Assistant Guide](https://morpharch.dev/docs/guides/ai-assistant)
+for more detail.
+
+---
+
 ## Architecture Health Scoring
 
 MorphArch assigns a health score from `0` to `100`.
@@ -405,6 +482,7 @@ the full explanation.
 - Quick start: [morpharch.dev/docs/quick-start](https://morpharch.dev/docs/quick-start)
 - CLI reference: [morpharch.dev/docs/cli-reference](https://morpharch.dev/docs/cli-reference)
 - Configuration guide: [morpharch.dev/docs/guides/configuration](https://morpharch.dev/docs/guides/configuration)
+- AI assistant guide: [morpharch.dev/docs/guides/ai-assistant](https://morpharch.dev/docs/guides/ai-assistant)
 - How it works: [morpharch.dev/docs/concepts/how-it-works](https://morpharch.dev/docs/concepts/how-it-works)
 
 Docs source lives under [website/docs](website/docs).

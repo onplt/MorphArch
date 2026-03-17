@@ -547,7 +547,8 @@ fn median_i32(values: &mut [i32]) -> i32 {
     values.sort_unstable();
     let mid = values.len() / 2;
     if values.len().is_multiple_of(2) {
-        (values[mid - 1] + values[mid]) / 2
+        // Use i64 intermediary to avoid i32 overflow on addition
+        ((values[mid - 1] as i64 + values[mid] as i64) / 2) as i32
     } else {
         values[mid]
     }
@@ -821,6 +822,25 @@ pub fn count_cycles_public(graph: &DiGraph<String, u32>) -> usize {
     count_cycles(graph)
 }
 
+/// Extracts the members of each non-trivial SCC (strongly-connected component).
+///
+/// Returns groups sorted by size descending. Each group contains module names
+/// sorted alphabetically. Only SCCs with 2+ members are included.
+pub fn extract_scc_members(graph: &DiGraph<String, u32>) -> Vec<Vec<String>> {
+    let sccs = kosaraju_scc(graph);
+    let mut groups: Vec<Vec<String>> = sccs
+        .into_iter()
+        .filter(|scc| scc.len() > 1)
+        .map(|scc| {
+            let mut names: Vec<String> = scc.iter().map(|&idx| graph[idx].clone()).collect();
+            names.sort();
+            names
+        })
+        .collect();
+    groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
+    groups
+}
+
 pub fn edges_to_pairs(edges: &[crate::models::DependencyEdge]) -> Vec<(String, String)> {
     edges
         .iter()
@@ -1073,6 +1093,208 @@ pub fn generate_diagnostics(
     }
 
     lines
+}
+
+// =============================================================================
+// AI Context Extraction — detailed breakdowns for the AI assistant
+// =============================================================================
+
+/// Detailed breakdown of cognitive debt sub-factors.
+#[derive(Debug, Clone)]
+pub struct CognitiveDebtDetail {
+    pub score: f64,
+    pub edge_excess_ratio: f64,
+    pub degree_excess: f64,
+    pub avg_degree: f64,
+    pub expected_avg_degree: f64,
+    pub baseline_edges: usize,
+    pub actual_edges: usize,
+    pub scale_factor: f64,
+}
+
+/// Extracts cognitive debt breakdown for AI context.
+pub fn extract_cognitive_detail(graph: &DiGraph<String, u32>) -> CognitiveDebtDetail {
+    let n = graph.node_count();
+    let e = graph.edge_count();
+    if n < 3 {
+        return CognitiveDebtDetail {
+            score: 0.0,
+            edge_excess_ratio: 0.0,
+            degree_excess: 0.0,
+            avg_degree: 0.0,
+            expected_avg_degree: 0.0,
+            baseline_edges: 0,
+            actual_edges: e,
+            scale_factor: 0.0,
+        };
+    }
+
+    let baseline_edges = 2 * n;
+    let edge_excess = if baseline_edges > 0 {
+        ((e as f64 / baseline_edges as f64) - 1.0).max(0.0)
+    } else {
+        0.0
+    };
+    let excess_ratio = (edge_excess / 2.0).min(1.0);
+
+    let avg_degree = 2.0 * e as f64 / n as f64;
+    let expected_avg = (2.0 * (n as f64).ln()).max(3.0);
+    let degree_excess = ((avg_degree / expected_avg) - 1.0).clamp(0.0, 1.0);
+
+    let scale = 1.0 - (-(n as f64) / 20.0).exp();
+    let raw = (0.50 * excess_ratio + 0.50 * degree_excess) * scale;
+    let score = 100.0 * (1.0 - (-3.0 * raw).exp());
+
+    CognitiveDebtDetail {
+        score,
+        edge_excess_ratio: (excess_ratio * 100.0).round() / 100.0,
+        degree_excess: (degree_excess * 100.0).round() / 100.0,
+        avg_degree: (avg_degree * 100.0).round() / 100.0,
+        expected_avg_degree: (expected_avg * 100.0).round() / 100.0,
+        baseline_edges,
+        actual_edges: e,
+        scale_factor: (scale * 100.0).round() / 100.0,
+    }
+}
+
+/// A god module flagged by the hub debt algorithm.
+#[derive(Debug, Clone)]
+pub struct GodModuleInfo {
+    pub name: String,
+    pub fan_in: usize,
+    pub fan_out: usize,
+    pub hub_ratio: f64,
+    pub excess_ratio: f64,
+}
+
+/// Extracts the list of god modules (matching `compute_hub_debt` logic).
+pub fn extract_god_modules(
+    graph: &DiGraph<String, u32>,
+    thresholds: &Thresholds,
+    exemptions: &Exemptions,
+) -> Vec<GodModuleInfo> {
+    let n = graph.node_count();
+    if n < 6 {
+        return Vec::new();
+    }
+
+    let threshold = (2.0 * (n as f64).sqrt()).max(8.0);
+    let mut gods = Vec::new();
+
+    for node_idx in graph.node_indices() {
+        let module_name = &graph[node_idx];
+
+        if exemptions
+            .hub_exempt
+            .iter()
+            .any(|e| module_name.contains(e.as_str()))
+        {
+            continue;
+        }
+
+        if is_entry_point_stem(module_name, &exemptions.entry_point_stems) {
+            continue;
+        }
+
+        let fan_in = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Incoming)
+            .count();
+        let fan_out = graph
+            .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+            .count();
+        let total_degree = fan_in + fan_out;
+
+        if (total_degree as f64) < threshold {
+            continue;
+        }
+
+        let hub_ratio = fan_out as f64 / (fan_in as f64 + 1.0);
+
+        if hub_ratio < thresholds.hub_exemption_ratio {
+            continue;
+        }
+
+        if fan_in <= thresholds.entry_point_max_fan_in {
+            continue;
+        }
+
+        let excess = (total_degree as f64 - threshold) / threshold;
+
+        gods.push(GodModuleInfo {
+            name: module_name.clone(),
+            fan_in,
+            fan_out,
+            hub_ratio: (hub_ratio * 100.0).round() / 100.0,
+            excess_ratio: (excess * 100.0).round() / 100.0,
+        });
+    }
+
+    gods.sort_by(|a, b| (b.fan_in + b.fan_out).cmp(&(a.fan_in + a.fan_out)));
+    gods.truncate(10);
+    gods
+}
+
+/// A boundary rule violation with edge detail.
+#[derive(Debug, Clone)]
+pub struct BoundaryViolationDetail {
+    pub from_module: String,
+    pub to_module: String,
+    pub rule_from_pattern: String,
+    pub rule_deny_patterns: Vec<String>,
+}
+
+/// Extracts detailed boundary violations for AI context.
+pub fn extract_boundary_violations(
+    graph: &DiGraph<String, u32>,
+    config: &ScoringConfig,
+) -> Vec<BoundaryViolationDetail> {
+    if config.boundaries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut source_rule_cache: HashMap<NodeIndex, Vec<usize>> = HashMap::new();
+    for node_idx in graph.node_indices() {
+        let from = &graph[node_idx];
+        let matching_rules: Vec<usize> = config
+            .boundaries
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_idx, rule)| rule.matches_from(from).then_some(rule_idx))
+            .collect();
+        if !matching_rules.is_empty() {
+            source_rule_cache.insert(node_idx, matching_rules);
+        }
+    }
+
+    let mut target_rule_cache: HashMap<(usize, NodeIndex), bool> = HashMap::new();
+    let mut violations = Vec::new();
+
+    for edge_idx in graph.edge_indices() {
+        let Some((src, tgt)) = graph.edge_endpoints(edge_idx) else {
+            continue;
+        };
+        let Some(rule_indices) = source_rule_cache.get(&src) else {
+            continue;
+        };
+        let to = &graph[tgt];
+        for &rule_idx in rule_indices {
+            let is_match = *target_rule_cache
+                .entry((rule_idx, tgt))
+                .or_insert_with(|| config.boundaries[rule_idx].matches_to(to));
+            if is_match {
+                violations.push(BoundaryViolationDetail {
+                    from_module: graph[src].clone(),
+                    to_module: graph[tgt].clone(),
+                    rule_from_pattern: config.boundaries[rule_idx].from.clone(),
+                    rule_deny_patterns: config.boundaries[rule_idx].deny.clone(),
+                });
+                break; // One violation per edge is enough
+            }
+        }
+    }
+
+    violations.truncate(15);
+    violations
 }
 
 // =============================================================================

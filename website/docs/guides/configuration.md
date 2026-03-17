@@ -521,7 +521,84 @@ deps = "third-party"
 platform = "infra"
 third-party = "deps"
 frontend = "entry"
+
+[ai]
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-4o-mini"
+stream = true
+max_tokens = 4096
+temperature = 0.3
 ```
+
+---
+
+## AI Assistant
+
+Configure the built-in AI architecture assistant. It works with any
+OpenAI-compatible endpoint.
+
+```toml
+[ai]
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-4o-mini"
+endpoint = "https://api.openai.com/v1/chat/completions"
+stream = true
+max_tokens = 4096
+temperature = 0.3
+max_context_tokens = 12000
+```
+
+### Configuration options
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `provider` | `"openai"` | Display name for the provider |
+| `api_key_env` | `"OPENAI_API_KEY"` | Environment variable holding the API key (leave empty for local models) |
+| `model` | `"gpt-4o-mini"` | Model identifier sent in the API request |
+| `endpoint` | `"https://api.openai.com/v1/chat/completions"` | Chat completions endpoint URL |
+| `stream` | `true` | Enable SSE streaming for real-time token display |
+| `max_tokens` | `4096` | Maximum tokens in AI response |
+| `temperature` | `0.3` | Response creativity (0.0 = deterministic, 1.0 = creative) |
+| `max_context_tokens` | `12000` | Token budget for architecture context data |
+
+### Provider examples
+
+**Local Ollama:**
+
+```toml
+[ai]
+provider = "ollama"
+api_key_env = ""
+model = "llama3.1:8b"
+endpoint = "http://localhost:11434/v1/chat/completions"
+stream = true
+```
+
+**LM Studio:**
+
+```toml
+[ai]
+provider = "lmstudio"
+api_key_env = ""
+model = "local-model"
+endpoint = "http://localhost:1234/v1/chat/completions"
+stream = true
+```
+
+**Azure OpenAI:**
+
+```toml
+[ai]
+provider = "azure"
+api_key_env = "AZURE_OPENAI_KEY"
+model = "gpt-4o"
+endpoint = "https://your-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-02-15-preview"
+```
+
+See the [AI Assistant Guide](./ai-assistant) for detailed usage, slash
+commands, and example questions.
 
 ---
 

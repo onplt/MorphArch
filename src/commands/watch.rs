@@ -59,6 +59,7 @@ pub async fn run_watch(
     app.set_timeline_commits(timeline_commits);
     app.set_scoring_config(project_config.scoring.clone());
     app.set_clustering_config(project_config.clustering.clone());
+    app.ai_panel.ai_config = project_config.ai.clone();
 
     let repo_name = repo_path
         .file_name()

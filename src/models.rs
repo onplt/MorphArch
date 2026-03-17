@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_ANALYSIS_VERSION: u32 = 3;
+pub const CURRENT_ANALYSIS_VERSION: u32 = 5;
 
 /// Metadata for a single Git commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,12 +86,27 @@ pub struct FileDependencyState {
     pub package_name: String,
     #[serde(default)]
     pub imports: Vec<FileImportTarget>,
+    /// Number of function/method definitions in this file (None for old scans).
+    #[serde(default)]
+    pub function_count: Option<u32>,
+    /// Number of type definitions (struct/class/interface/enum/trait) in this file.
+    #[serde(default)]
+    pub type_count: Option<u32>,
+    /// Cyclomatic complexity estimate (decision-point keyword count).
+    #[serde(default)]
+    pub complexity: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RepoScanState {
     #[serde(default)]
     pub files: HashMap<String, FileDependencyState>,
+    /// Per-module commit touch count (churn) accumulated across scan runs.
+    #[serde(default)]
+    pub module_churn: HashMap<String, u32>,
+    /// Per-module author commit counts for bus factor analysis, accumulated across scan runs.
+    #[serde(default)]
+    pub module_authors: HashMap<String, HashMap<String, u32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -148,6 +163,12 @@ pub struct GraphSnapshot {
     pub instability_metrics: Vec<InstabilityMetric>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+    /// Per-module commit touch count (churn) across scanned history.
+    #[serde(default)]
+    pub module_churn: HashMap<String, u32>,
+    /// Per-module authorship data for bus factor analysis.
+    #[serde(default)]
+    pub bus_factor: Vec<BusFactorEntry>,
 }
 
 /// Lighter version of GraphSnapshot for UI lists and timelines.
@@ -174,11 +195,25 @@ pub struct SnapshotFrame {
     pub has_full_artifacts: bool,
 }
 
+/// Per-module authorship summary for bus factor analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusFactorEntry {
+    pub module_name: String,
+    pub unique_authors: usize,
+    pub top_author: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeavySnapshotArtifacts {
     pub blast_radius: BlastRadiusReport,
     pub instability_metrics: Vec<InstabilityMetric>,
     pub diagnostics: Vec<String>,
+    /// Per-module commit touch count across all scanned commits.
+    #[serde(default)]
+    pub module_churn: HashMap<String, u32>,
+    /// Per-module authorship data (bus factor analysis).
+    #[serde(default)]
+    pub bus_factor: Vec<BusFactorEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

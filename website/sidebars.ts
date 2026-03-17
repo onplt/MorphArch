@@ -26,6 +26,7 @@ const sidebars: SidebarsConfig = {
       label: 'Guides',
       items: [
         'guides/configuration',
+        'guides/ai-assistant',
         'guides/ci-cd-integration',
         'guides/security',
       ],
