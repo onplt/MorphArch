@@ -122,10 +122,77 @@ pub struct ProjectConfig {
     pub scoring: ScoringConfig,
     #[serde(default)]
     pub clustering: ClusteringConfig,
+    #[serde(default)]
+    pub ai: AiConfig,
 
     /// Compiled glob set for ignore paths — not serialized.
     #[serde(skip)]
     ignore_globs: Option<GlobSet>,
+}
+
+// —— AI Configuration ——
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    #[serde(default = "default_ai_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    #[serde(default = "default_ai_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_ai_stream")]
+    pub stream: bool,
+    #[serde(default = "default_ai_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_ai_temperature")]
+    pub temperature: f32,
+    /// Approximate context budget for architecture data (in estimated tokens).
+    /// When the serialized context exceeds this budget, lower-priority fields
+    /// are trimmed. Default: 12000.
+    #[serde(default = "default_ai_max_context_tokens")]
+    pub max_context_tokens: usize,
+}
+
+fn default_ai_provider() -> String {
+    "openai".to_string()
+}
+fn default_ai_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+fn default_ai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+fn default_ai_endpoint() -> String {
+    "https://api.openai.com/v1/chat/completions".to_string()
+}
+fn default_ai_stream() -> bool {
+    true
+}
+fn default_ai_max_tokens() -> u32 {
+    4096
+}
+fn default_ai_temperature() -> f32 {
+    0.3
+}
+fn default_ai_max_context_tokens() -> usize {
+    12000
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_ai_provider(),
+            api_key_env: default_ai_api_key_env(),
+            model: default_ai_model(),
+            endpoint: default_ai_endpoint(),
+            stream: default_ai_stream(),
+            max_tokens: default_ai_max_tokens(),
+            temperature: default_ai_temperature(),
+            max_context_tokens: default_ai_max_context_tokens(),
+        }
+    }
 }
 
 impl ProjectConfig {

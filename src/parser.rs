@@ -127,6 +127,172 @@ fn may_contain_imports(content: &str, lang: Language) -> bool {
     }
 }
 
+/// Returns `(function_count, type_count, cyclomatic_complexity)` for the given
+/// source content.
+///
+/// Uses lightweight line-based heuristics (no tree-sitter needed) to count
+/// top-level definitions and decision points. Approximate but sufficient for
+/// AI context insights. Complexity counts decision-point keywords (if, for,
+/// while, match/switch, etc.) — the caller can add 1 per function for the
+/// McCabe baseline if desired.
+pub fn count_definitions(content: &str, lang: Language) -> (u32, u32, u32) {
+    if content.len() > MAX_FILE_SIZE {
+        return (0, 0, 0);
+    }
+    match lang {
+        Language::Rust => count_rust_definitions(content),
+        Language::TypeScript => count_typescript_definitions(content),
+        Language::Python => count_python_definitions(content),
+        Language::Go => count_go_definitions(content),
+    }
+}
+
+fn count_rust_definitions(content: &str) -> (u32, u32, u32) {
+    let masked = mask_rust_code(content).unwrap_or_default();
+    let mut fns = 0u32;
+    let mut types = 0u32;
+    let mut complexity = 0u32;
+    for line in masked.lines() {
+        let t = line.trim_start();
+        // Strip visibility modifiers
+        let t = t
+            .strip_prefix("pub(crate) ")
+            .or_else(|| t.strip_prefix("pub(super) "))
+            .or_else(|| t.strip_prefix("pub "))
+            .unwrap_or(t);
+        let t = t.strip_prefix("async ").unwrap_or(t);
+        let t = t.strip_prefix("unsafe ").unwrap_or(t);
+        let t = t.strip_prefix("const ").unwrap_or(t);
+        if t.starts_with("fn ") {
+            fns += 1;
+        } else if t.starts_with("struct ")
+            || t.starts_with("enum ")
+            || t.starts_with("trait ")
+            || t.starts_with("type ")
+        {
+            types += 1;
+        }
+        // Cyclomatic complexity: count decision-point keywords
+        if t.starts_with("if ")
+            || t.starts_with("if(")
+            || t.starts_with("match ")
+            || t.starts_with("match(")
+            || t.starts_with("for ")
+            || t.starts_with("for(")
+            || t.starts_with("while ")
+            || t.starts_with("while(")
+            || t.starts_with("loop ")
+            || t.starts_with("loop{")
+            || t == "loop"
+            || t.starts_with("} else if ")
+        {
+            complexity += 1;
+        }
+    }
+    (fns, types, complexity)
+}
+
+fn count_typescript_definitions(content: &str) -> (u32, u32, u32) {
+    let masked = mask_c_like_code(content, true, true, false).unwrap_or_default();
+    let mut fns = 0u32;
+    let mut types = 0u32;
+    let mut complexity = 0u32;
+    for line in masked.lines() {
+        let t = line.trim_start();
+        let t = t
+            .strip_prefix("export default ")
+            .or_else(|| t.strip_prefix("export "))
+            .or_else(|| t.strip_prefix("declare "))
+            .unwrap_or(t);
+        let t = t.strip_prefix("async ").unwrap_or(t);
+        if t.starts_with("function ") || t.starts_with("function*(") {
+            fns += 1;
+        } else if t.starts_with("class ") || t.starts_with("interface ") || t.starts_with("type ") {
+            types += 1;
+        }
+        // Cyclomatic complexity: count decision-point keywords
+        if t.starts_with("if ")
+            || t.starts_with("if(")
+            || t.starts_with("switch ")
+            || t.starts_with("switch(")
+            || t.starts_with("for ")
+            || t.starts_with("for(")
+            || t.starts_with("while ")
+            || t.starts_with("while(")
+            || t.starts_with("catch ")
+            || t.starts_with("catch(")
+            || t.starts_with("} catch ")
+            || t.starts_with("} catch(")
+            || t.starts_with("} else if ")
+        {
+            complexity += 1;
+        }
+    }
+    (fns, types, complexity)
+}
+
+fn count_python_definitions(content: &str) -> (u32, u32, u32) {
+    let masked = mask_python_code(content).unwrap_or_default();
+    let mut fns = 0u32;
+    let mut types = 0u32;
+    let mut complexity = 0u32;
+    for line in masked.lines() {
+        let t = line.trim_start();
+        let t = t.strip_prefix("async ").unwrap_or(t);
+        if t.starts_with("def ") {
+            fns += 1;
+        } else if t.starts_with("class ") {
+            types += 1;
+        }
+        // Cyclomatic complexity: count decision-point keywords
+        if t.starts_with("if ")
+            || t.starts_with("if(")
+            || t.starts_with("elif ")
+            || t.starts_with("elif(")
+            || t.starts_with("for ")
+            || t.starts_with("for(")
+            || t.starts_with("while ")
+            || t.starts_with("while(")
+            || t.starts_with("except ")
+            || t.starts_with("except:")
+        {
+            complexity += 1;
+        }
+    }
+    (fns, types, complexity)
+}
+
+fn count_go_definitions(content: &str) -> (u32, u32, u32) {
+    let masked = mask_c_comments_only(content).unwrap_or_default();
+    let mut fns = 0u32;
+    let mut types = 0u32;
+    let mut complexity = 0u32;
+    for line in masked.lines() {
+        let t = line.trim_start();
+        if t.starts_with("func ") {
+            fns += 1;
+        } else if t.starts_with("type ") {
+            types += 1;
+        }
+        // Cyclomatic complexity: count decision-point keywords
+        if t.starts_with("if ")
+            || t.starts_with("if(")
+            || t.starts_with("switch ")
+            || t.starts_with("switch(")
+            || t == "switch {"
+            || t.starts_with("select ")
+            || t == "select {"
+            || t.starts_with("for ")
+            || t.starts_with("for(")
+            || t == "for {"
+            || t.starts_with("} else if ")
+        {
+            complexity += 1;
+        }
+    }
+    (fns, types, complexity)
+}
+
 pub fn parse_imports(content: &str, lang: Language) -> Vec<String> {
     if content.len() > MAX_FILE_SIZE {
         debug!(size = content.len(), "File too large, skipping");
@@ -354,6 +520,92 @@ fn collect_go_import_strings(node: Node, source: &[u8], imports: &mut Vec<String
 mod tests {
     use super::*;
 
+    // ── Definition counting tests ─────────────────────────────────────
+
+    #[test]
+    fn rust_definition_counts() {
+        let content = r#"
+use std::io;
+
+pub fn main() {}
+fn helper() {}
+pub(crate) async fn run() {}
+pub struct Config { }
+enum State { A, B }
+pub trait Handler {}
+type Alias = String;
+"#;
+        let (fns, types, _complexity) = count_definitions(content, Language::Rust);
+        assert_eq!(fns, 3);
+        assert_eq!(types, 4);
+    }
+
+    #[test]
+    fn typescript_definition_counts() {
+        let content = r#"
+import { foo } from './bar';
+
+export function doStuff() {}
+async function helper() {}
+export class MyClass {}
+interface Props {}
+export type ID = string;
+"#;
+        let (fns, types, _complexity) = count_definitions(content, Language::TypeScript);
+        assert_eq!(fns, 2);
+        assert_eq!(types, 3);
+    }
+
+    #[test]
+    fn python_definition_counts() {
+        let content = r#"
+import os
+
+def main():
+    pass
+
+async def fetch():
+    pass
+
+class Engine:
+    def method(self):
+        pass
+"#;
+        let (fns, types, _complexity) = count_definitions(content, Language::Python);
+        assert_eq!(fns, 3); // main, fetch, method
+        assert_eq!(types, 1);
+    }
+
+    #[test]
+    fn go_definition_counts() {
+        let content = r#"
+package main
+
+import "fmt"
+
+func main() {}
+func helper() int { return 0 }
+type Config struct {}
+type Handler interface {}
+"#;
+        let (fns, types, _complexity) = count_definitions(content, Language::Go);
+        assert_eq!(fns, 2);
+        assert_eq!(types, 2);
+    }
+
+    #[test]
+    fn definition_counting_ignores_comments() {
+        let content = r#"
+// fn fake_function() {}
+/* struct FakeStruct {} */
+fn real_function() {}
+pub struct RealStruct {}
+"#;
+        let (fns, types, _complexity) = count_definitions(content, Language::Rust);
+        assert_eq!(fns, 1);
+        assert_eq!(types, 1);
+    }
+
     #[test]
     fn typescript_relative_imports_preserve_raw_path() {
         let content = "import foo from './core/http';\nimport bar from '../ui/http';";
@@ -512,6 +764,96 @@ use real::module;
         let imports = parse_imports(content, Language::Rust);
         assert_eq!(imports, vec!["real"]);
     }
+
+    // ── Cyclomatic complexity counting tests ─────────────────────────
+
+    #[test]
+    fn rust_complexity_count() {
+        let content = r#"
+fn example() {
+    if x > 0 {
+        match val {
+            A => {}
+            B => {}
+        }
+    } else if y > 0 {
+        for item in list {
+            while running {
+                loop {
+                    break;
+                }
+            }
+        }
+    }
+}
+"#;
+        let (_fns, _types, complexity) = count_definitions(content, Language::Rust);
+        // if, match, } else if, for, while, loop = 6
+        assert_eq!(complexity, 6);
+    }
+
+    #[test]
+    fn typescript_complexity_count() {
+        let content = r#"
+function example() {
+    if (x > 0) {
+        switch (val) {
+            case 1: break;
+        }
+    }
+    for (const item of list) {}
+    while (running) {}
+    try {
+    } catch (e) {}
+}
+"#;
+        let (_fns, _types, complexity) = count_definitions(content, Language::TypeScript);
+        // if, switch, for, while, catch = 5
+        assert_eq!(complexity, 5);
+    }
+
+    #[test]
+    fn python_complexity_count() {
+        let content = r#"
+def example():
+    if x > 0:
+        pass
+    elif y > 0:
+        pass
+    for item in lst:
+        while running:
+            pass
+    try:
+        pass
+    except ValueError:
+        pass
+"#;
+        let (_fns, _types, complexity) = count_definitions(content, Language::Python);
+        // if, elif, for, while, except = 5
+        assert_eq!(complexity, 5);
+    }
+
+    #[test]
+    fn go_complexity_count() {
+        let content = r#"
+package main
+
+func example() {
+    if x > 0 {
+    }
+    switch val {
+    case 1:
+    }
+    for i := 0; i < 10; i++ {
+    }
+    select {
+    }
+}
+"#;
+        let (_fns, _types, complexity) = count_definitions(content, Language::Go);
+        // if, switch, for, select = 4
+        assert_eq!(complexity, 4);
+    }
 }
 
 fn extract_typescript_imports_fast_safe(content: &str) -> FastParseResult {
@@ -665,34 +1007,63 @@ fn extract_python_imports_fast_safe(content: &str) -> FastParseResult {
 
 fn extract_python_imports_fast(content: &str) -> Vec<String> {
     let mut imports = Vec::new();
+    let mut continued_line = String::new();
 
     for raw_line in content.lines() {
-        let line = raw_line.trim_start();
-        if let Some(module_part) = line.strip_prefix("import ") {
-            for module in module_part.split(',') {
-                let module = module.trim().split(" as ").next().unwrap_or("").trim();
-                let top = module.split('.').next().unwrap_or(module);
-                if !top.is_empty() {
-                    imports.push(top.to_string());
-                }
+        // Handle line continuation: join lines ending with `\`
+        if !continued_line.is_empty() {
+            continued_line.push(' ');
+            continued_line.push_str(raw_line.trim());
+            if continued_line.ends_with('\\') {
+                continued_line.truncate(continued_line.len() - 1);
+                continue;
             }
+            // Process the joined line, then clear
+            process_python_import_line(&continued_line, &mut imports);
+            continued_line.clear();
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix("from ") {
-            let module = rest.split_whitespace().next().unwrap_or("");
-            if module.starts_with('.') {
-                imports.extend(extract_python_relative_imports(line, module));
-            } else {
-                let top = module.split('.').next().unwrap_or(module);
-                if !top.is_empty() {
-                    imports.push(top.to_string());
-                }
-            }
+        let line = raw_line.trim_start();
+        if line.ends_with('\\') {
+            continued_line = line.trim_end_matches('\\').to_string();
+            continue;
         }
+
+        process_python_import_line(line, &mut imports);
+    }
+
+    // Handle trailing continuation without final newline
+    if !continued_line.is_empty() {
+        process_python_import_line(&continued_line, &mut imports);
     }
 
     imports
+}
+
+fn process_python_import_line(line: &str, imports: &mut Vec<String>) {
+    if let Some(module_part) = line.strip_prefix("import ") {
+        for module in module_part.split(',') {
+            let module = module.trim().split(" as ").next().unwrap_or("").trim();
+            let top = module.split('.').next().unwrap_or(module);
+            if !top.is_empty() {
+                imports.push(top.to_string());
+            }
+        }
+        return;
+    }
+
+    if let Some(rest) = line.strip_prefix("from ") {
+        let module = rest.split_whitespace().next().unwrap_or("");
+        if module.starts_with('.') {
+            imports.extend(extract_python_relative_imports(line, module));
+        } else {
+            let top = module.split('.').next().unwrap_or(module);
+            if !top.is_empty() {
+                imports.push(top.to_string());
+            }
+        }
+    }
 }
 
 fn extract_go_imports_fast_safe(content: &str) -> FastParseResult {
@@ -736,6 +1107,22 @@ fn extract_go_imports_fast(original: &str, masked: &str) -> Vec<String> {
     }
 
     imports
+}
+
+/// Returns true if the quote at `idx` is escaped by an odd number of preceding backslashes.
+/// `"hello\\"` → the `"` is NOT escaped (even backslashes), `"hello\"` → IS escaped (odd).
+fn is_quote_escaped(bytes: &[u8], idx: usize) -> bool {
+    let mut backslash_count = 0usize;
+    let mut pos = idx;
+    while pos > 0 {
+        pos -= 1;
+        if bytes[pos] == b'\\' {
+            backslash_count += 1;
+        } else {
+            break;
+        }
+    }
+    !backslash_count.is_multiple_of(2)
 }
 
 fn mask_rust_code(content: &str) -> Option<String> {
@@ -799,11 +1186,11 @@ fn mask_c_comments_only(content: &str) -> Option<String> {
             continue;
         }
 
-        masked.push(b as char);
+        masked.push(if b.is_ascii() { b as char } else { '_' });
         idx += 1;
     }
 
-    if in_line_comment || block_comment_depth > 0 {
+    if block_comment_depth > 0 {
         return None;
     }
 
@@ -881,7 +1268,7 @@ fn mask_c_like_code(
         }
 
         if let Some(quote) = string_quote {
-            if b == quote && bytes.get(idx.saturating_sub(1)) != Some(&b'\\') {
+            if b == quote && !is_quote_escaped(bytes, idx) {
                 string_quote = None;
             }
             masked.push(if b == b'\n' { '\n' } else { ' ' });
@@ -922,6 +1309,54 @@ fn mask_c_like_code(
             }
         }
 
+        // Rust: distinguish char literals ('x', '\n') from lifetime annotations ('a, 'static)
+        if allow_raw_strings && b == b'\'' {
+            let next = bytes.get(idx + 1).copied();
+            if next == Some(b'\\') {
+                // Escape sequence char literal: '\n', '\x41', '\u{1234}', '\\'
+                let mut end = idx + 2;
+                let limit = (idx + 12).min(bytes.len());
+                let mut found_close = false;
+                while end < limit {
+                    if bytes[end] == b'\n' {
+                        break;
+                    }
+                    if bytes[end] == b'\'' && !is_quote_escaped(bytes, end) {
+                        found_close = true;
+                        end += 1;
+                        break;
+                    }
+                    end += 1;
+                }
+                if found_close {
+                    for _ in idx..end {
+                        masked.push(' ');
+                    }
+                    idx = end;
+                } else {
+                    // Malformed escape or lifetime — preserve as-is
+                    masked.push('\'');
+                    idx += 1;
+                }
+            } else if let Some(c) = next {
+                if c != b'\'' && c != b'\n' && bytes.get(idx + 2) == Some(&b'\'') {
+                    // Simple char literal: 'a', ' ', etc.
+                    masked.push(' ');
+                    masked.push(' ');
+                    masked.push(' ');
+                    idx += 3;
+                } else {
+                    // Lifetime annotation — preserve as-is
+                    masked.push('\'');
+                    idx += 1;
+                }
+            } else {
+                masked.push('\'');
+                idx += 1;
+            }
+            continue;
+        }
+
         if b == b'"' || b == b'\'' || (allow_backticks && b == b'`') {
             string_quote = Some(b);
             masked.push(' ');
@@ -929,15 +1364,11 @@ fn mask_c_like_code(
             continue;
         }
 
-        masked.push(b as char);
+        masked.push(if b.is_ascii() { b as char } else { '_' });
         idx += 1;
     }
 
-    if in_line_comment
-        || block_comment_depth > 0
-        || string_quote.is_some()
-        || raw_string_hashes.is_some()
-    {
+    if block_comment_depth > 0 || string_quote.is_some() || raw_string_hashes.is_some() {
         return None;
     }
 
@@ -995,11 +1426,11 @@ fn mask_python_code(content: &str) -> Option<String> {
             continue;
         }
 
-        masked.push(b as char);
+        masked.push(if b.is_ascii() { b as char } else { '_' });
         idx += 1;
     }
 
-    if line_comment || string_delim.is_some() {
+    if string_delim.is_some() {
         return None;
     }
 
@@ -1037,7 +1468,7 @@ fn matches_python_string_end(bytes: &[u8], idx: usize, quote: u8, len: usize) ->
             && bytes.get(idx + 1) == Some(&quote)
             && bytes.get(idx + 2) == Some(&quote)
     } else {
-        bytes.get(idx) == Some(&quote) && bytes.get(idx.saturating_sub(1)) != Some(&b'\\')
+        bytes.get(idx) == Some(&quote) && !is_quote_escaped(bytes, idx)
     }
 }
 
@@ -1132,7 +1563,7 @@ fn parse_static_string_literal_prefix(input: &str) -> Option<(String, usize)> {
 
     let mut idx = 1usize;
     while idx < bytes.len() {
-        if bytes[idx] == quote && bytes.get(idx.saturating_sub(1)) != Some(&b'\\') {
+        if bytes[idx] == quote && !is_quote_escaped(bytes, idx) {
             let literal = &input[1..idx];
             if quote == b'`' && literal.contains("${") {
                 return None;
@@ -1153,7 +1584,7 @@ fn find_quoted_literal(input: &str) -> Option<String> {
             let start = idx + 1;
             let mut end = start;
             while end < bytes.len() {
-                if bytes[end] == quote && bytes.get(end.saturating_sub(1)) != Some(&b'\\') {
+                if bytes[end] == quote && !is_quote_escaped(bytes, end) {
                     let literal = &input[start..end];
                     if quote == b'`' && literal.contains("${") {
                         return None;

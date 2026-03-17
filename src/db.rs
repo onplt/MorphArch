@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, info, warn};
 
@@ -182,11 +182,21 @@ impl Database {
         Ok(())
     }
 
+    /// Validates that a table name contains only safe identifier characters
+    /// to prevent SQL injection when used in format strings.
+    fn validate_table_name(table: &str) -> Result<()> {
+        if table.is_empty() || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!("Invalid table name: {table}");
+        }
+        Ok(())
+    }
+
     fn invalidate_legacy_table_if_needed(
         &self,
         table: &str,
         required_columns: &[&str],
     ) -> Result<()> {
+        Self::validate_table_name(table)?;
         if !self.table_exists(table)? {
             return Ok(());
         }
@@ -219,6 +229,7 @@ impl Database {
     }
 
     fn table_columns(&self, table: &str) -> Result<Vec<String>> {
+        Self::validate_table_name(table)?;
         let mut stmt = self
             .conn
             .prepare(&format!("PRAGMA table_info({table})"))
@@ -817,18 +828,104 @@ impl Database {
             skipped_corrupt: 0,
         };
 
-        for meta in metadata {
-            match self.get_graph_snapshot(repo_id, &meta.commit_hash) {
-                Ok(Some(snapshot)) => result.snapshots.push(snapshot),
+        if metadata.is_empty() {
+            return Ok(result);
+        }
+
+        // Use a savepoint for consistent reads across multiple queries.
+        // Savepoints work both inside and outside existing transactions.
+        self.conn
+            .execute_batch("SAVEPOINT snap_load")
+            .context("Failed to create savepoint for snapshot loading")?;
+
+        // Run the actual loading in a closure so we always release the savepoint.
+        let inner_result = self.load_snapshots_inner(repo_id, metadata, &mut result);
+
+        // Always release the savepoint, even on error.
+        let _ = self.conn.execute_batch("RELEASE snap_load");
+
+        inner_result?;
+        Ok(result)
+    }
+
+    fn load_snapshots_inner(
+        &self,
+        repo_id: &str,
+        metadata: &[SnapshotMetadata],
+        result: &mut SnapshotLoadResult,
+    ) -> Result<()> {
+        // Collect frames for all requested snapshots
+        let mut frames: Vec<(usize, SnapshotFrame)> = Vec::with_capacity(metadata.len());
+        for (i, meta) in metadata.iter().enumerate() {
+            match self.fetch_snapshot_frame(repo_id, &meta.commit_hash) {
+                Ok(Some(frame)) => frames.push((i, frame)),
                 Ok(None) => result.skipped_corrupt += 1,
                 Err(err) => {
                     result.skipped_corrupt += 1;
-                    warn!(hash = %meta.commit_hash, error = %err, "Failed to reconstruct snapshot");
+                    warn!(hash = %meta.commit_hash, error = %err, "Failed to load snapshot frame");
                 }
             }
         }
 
-        Ok(result)
+        // Sort by scan_order ASC so we can replay deltas incrementally
+        frames.sort_by_key(|(_, f)| f.scan_order);
+
+        // Group by checkpoint and replay deltas once per group
+        let mut last_checkpoint_order: Option<i64> = None;
+        let mut checkpoint_state: Option<GraphCheckpoint> = None;
+        let mut replay_cursor: i64 = 0;
+        let mut indexed_snapshots: Vec<(usize, GraphSnapshot)> = Vec::with_capacity(frames.len());
+
+        for (original_idx, frame) in &frames {
+            // Load checkpoint if needed (different checkpoint window)
+            let needed_checkpoint = self.load_checkpoint_before_or_at(repo_id, frame.scan_order)?;
+            let Some(needed) = needed_checkpoint else {
+                result.skipped_corrupt += 1;
+                warn!(
+                    hash = %frame.commit_hash,
+                    "No checkpoint available, skipping"
+                );
+                continue;
+            };
+
+            if last_checkpoint_order != Some(needed.scan_order) {
+                // New checkpoint window — reset state
+                replay_cursor = needed.scan_order;
+                last_checkpoint_order = Some(needed.scan_order);
+                checkpoint_state = Some(needed);
+            }
+
+            let state = checkpoint_state.as_mut().unwrap();
+
+            // Replay deltas from cursor to this frame's scan_order
+            if replay_cursor < frame.scan_order {
+                let deltas = self.load_frames_between(repo_id, replay_cursor, frame.scan_order)?;
+                for delta_frame in &deltas {
+                    apply_delta_to_repo_state(&mut state.state, &delta_frame.delta);
+                }
+                replay_cursor = frame.scan_order;
+            }
+
+            let full_artifacts = if frame.has_full_artifacts {
+                self.load_checkpoint_artifacts(repo_id, frame.scan_order)?
+                    .or_else(|| state.full_artifacts.clone())
+            } else {
+                None
+            };
+
+            indexed_snapshots.push((
+                *original_idx,
+                materialize_snapshot_from_repo_state(&state.state, frame, full_artifacts),
+            ));
+        }
+
+        // Restore original order
+        indexed_snapshots.sort_by_key(|(idx, _)| *idx);
+        for (_, snapshot) in indexed_snapshots {
+            result.snapshots.push(snapshot);
+        }
+
+        Ok(())
     }
 
     fn fetch_snapshot_frame(
@@ -1052,6 +1149,14 @@ fn materialize_snapshot_from_repo_state(
             .as_ref()
             .map(|value| value.diagnostics.clone())
             .unwrap_or_default(),
+        module_churn: full_artifacts
+            .as_ref()
+            .map(|value| value.module_churn.clone())
+            .unwrap_or_default(),
+        bus_factor: full_artifacts
+            .as_ref()
+            .map(|value| value.bus_factor.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -1270,6 +1375,8 @@ mod tests {
                 fan_out: 1,
             }],
             diagnostics: vec!["stable".to_string()],
+            module_churn: HashMap::new(),
+            bus_factor: Vec::new(),
         }
     }
 
@@ -1287,8 +1394,12 @@ mod tests {
                 FileDependencyState {
                     package_name: "core".to_string(),
                     imports: Vec::new(),
+                    function_count: None,
+                    type_count: None,
+                    complexity: None,
                 },
             )]),
+            ..Default::default()
         };
         db.insert_graph_checkpoint(
             TEST_REPO_ID,
@@ -1319,6 +1430,9 @@ mod tests {
                                 module_name: "core".to_string(),
                                 weight: 1,
                             }],
+                            function_count: None,
+                            type_count: None,
+                            complexity: None,
                         },
                     )],
                     deletes: Vec::new(),
@@ -1349,8 +1463,12 @@ mod tests {
                 FileDependencyState {
                     package_name: "core".to_string(),
                     imports: Vec::new(),
+                    function_count: None,
+                    type_count: None,
+                    complexity: None,
                 },
             )]),
+            ..Default::default()
         };
         let state_b = RepoScanState {
             files: HashMap::from([(
@@ -1358,8 +1476,12 @@ mod tests {
                 FileDependencyState {
                     package_name: "web".to_string(),
                     imports: Vec::new(),
+                    function_count: None,
+                    type_count: None,
+                    complexity: None,
                 },
             )]),
+            ..Default::default()
         };
         db.insert_graph_checkpoint(
             TEST_REPO_ID,

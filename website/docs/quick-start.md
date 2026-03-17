@@ -104,7 +104,32 @@ Focus the timeline and scrub commits with:
 Use this to watch architecture drift, coupling changes, and cluster evolution
 across commits.
 
-## 7. Generate a static report
+## 7. Ask the AI assistant
+
+Press `a` to open the AI assistant panel. It answers natural language
+questions using the full architecture context.
+
+```bash
+# Set your API key first
+export OPENAI_API_KEY="sk-..."
+```
+
+Try these questions:
+
+- "What is the overall health of this codebase?"
+- "Which modules are the most fragile?"
+- "How can I break the circular dependencies?"
+
+When inspecting a specific module, the assistant gets deeper context about
+that module's edges, blast score, churn, and bus factor.
+
+Use `/diff 1` to ask what changed compared to the previous commit, or
+`/help` to see all available slash commands.
+
+See the [AI Assistant Guide](./guides/ai-assistant) for configuration and
+advanced usage.
+
+## 8. Generate a static report
 
 If you want a non-interactive report for the current commit:
 
@@ -118,7 +143,7 @@ For recent drift:
 morpharch list-drift --path .
 ```
 
-## 8. Add project-specific config when needed
+## 9. Add project-specific config when needed
 
 Create a `morpharch.toml` if you want to customize:
 
@@ -128,5 +153,6 @@ Create a `morpharch.toml` if you want to customize:
 - boundary rules
 - semantic families and clustering constraints
 - presentation aliases, kinds, and color mode
+- AI assistant provider, model, and token limits
 
 See the [Configuration Guide](./guides/configuration) for the full reference.

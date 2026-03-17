@@ -20,7 +20,7 @@ use crate::config::ProjectConfig;
 use crate::db::Database;
 use crate::git_scanner;
 use crate::models::{
-    CURRENT_ANALYSIS_VERSION, CommitInfo, FileDependencyState, FileImportTarget,
+    BusFactorEntry, CURRENT_ANALYSIS_VERSION, CommitInfo, FileDependencyState, FileImportTarget,
     FilteredExternalSample, GraphCheckpoint, GraphDelta, GraphSnapshot, HeavySnapshotArtifacts,
     RepoScanState, ScanMetadata, SnapshotFrame,
 };
@@ -47,11 +47,7 @@ fn is_noise_import(name: &str) -> bool {
     if name.len() <= 1 {
         return true;
     }
-    if name.starts_with("http://")
-        || name.starts_with("https://")
-        || name.starts_with("npm:")
-        || name.starts_with("node:")
-    {
+    if name.starts_with("http://") || name.starts_with("https://") {
         return true;
     }
     let lower = name.to_ascii_lowercase();
@@ -147,7 +143,7 @@ impl ScanPhaseTimings {
 struct ScanContext {
     repo: gix::ThreadSafeRepository,
     subtree_cache: Arc<git_scanner::SubtreeCache>,
-    blob_import_cache: Arc<DashMap<BlobParseCacheKey, Vec<String>>>,
+    blob_parse_cache: Arc<DashMap<BlobParseCacheKey, BlobParseResult>>,
     package_name_cache: Arc<DashMap<String, String>>,
     ignore_globs: Option<globset::GlobSet>,
     package_depth: usize,
@@ -166,6 +162,14 @@ impl Hash for BlobParseCacheKey {
         self.language.hash(state);
         self.oid.hash(state);
     }
+}
+
+#[derive(Debug, Clone)]
+struct BlobParseResult {
+    imports: Vec<String>,
+    function_count: u32,
+    type_count: u32,
+    complexity: u32,
 }
 
 #[derive(Clone)]
@@ -208,9 +212,15 @@ impl IncrementalGraphState {
         state
     }
 
-    fn to_repo_state(&self) -> RepoScanState {
+    fn to_repo_state(
+        &self,
+        module_churn: &HashMap<String, u32>,
+        module_authors: &HashMap<String, HashMap<String, u32>>,
+    ) -> RepoScanState {
         RepoScanState {
             files: self.files.clone(),
+            module_churn: module_churn.clone(),
+            module_authors: module_authors.clone(),
         }
     }
 
@@ -253,9 +263,30 @@ impl IncrementalGraphState {
 
     fn sync_node(&mut self, module: &str) {
         if self.should_include_node(module) {
+            let was_new = !self.node_indices.contains_key(module);
             self.ensure_node(module);
+            if was_new {
+                // Module just became included — resync all edges involving it
+                // so that edges from/to other modules are restored.
+                self.resync_edges_for_module(module);
+            }
         } else {
             self.remove_node_by_name(module);
+        }
+    }
+
+    /// When a module transitions from not-included to included, resync all
+    /// edges in `edge_weights` that reference it so the graph stays consistent.
+    fn resync_edges_for_module(&mut self, module: &str) {
+        let module_str = module.to_string();
+        let affected: Vec<(String, String)> = self
+            .edge_weights
+            .keys()
+            .filter(|(from, to)| *from == module_str || *to == module_str)
+            .cloned()
+            .collect();
+        for (from, to) in affected {
+            self.sync_graph_edge(&from, &to);
         }
     }
 
@@ -595,31 +626,46 @@ fn scan_blob_to_file_state(
         language: lang,
         oid: blob_oid.as_bytes().to_vec(),
     };
-    let imports = if let Some(cached) = ctx.blob_import_cache.get(&cache_key) {
+    let parsed = if let Some(cached) = ctx.blob_parse_cache.get(&cache_key) {
         cached.value().clone()
     } else {
         let blob = repo.find_object(blob_oid)?;
         let Ok(content) = std::str::from_utf8(&blob.data) else {
             return Ok(None);
         };
-        let parsed = parser::parse_imports(content, lang);
-        ctx.blob_import_cache.insert(cache_key, parsed.clone());
-        parsed
+        let imports = parser::parse_imports(content, lang);
+        let (function_count, type_count, complexity) = parser::count_definitions(content, lang);
+        let result = BlobParseResult {
+            imports,
+            function_count,
+            type_count,
+            complexity,
+        };
+        ctx.blob_parse_cache.insert(cache_key, result.clone());
+        result
     };
 
-    let mut file_imports: Vec<FileImportTarget> =
-        extract_file_target_counts(lang, &package_name, &imports, path, ctx.package_depth)
-            .into_iter()
-            .map(|(module_name, weight)| FileImportTarget {
-                module_name,
-                weight,
-            })
-            .collect();
+    let mut file_imports: Vec<FileImportTarget> = extract_file_target_counts(
+        lang,
+        &package_name,
+        &parsed.imports,
+        path,
+        ctx.package_depth,
+    )
+    .into_iter()
+    .map(|(module_name, weight)| FileImportTarget {
+        module_name,
+        weight,
+    })
+    .collect();
     file_imports.sort_unstable_by(|a, b| a.module_name.cmp(&b.module_name));
 
     Ok(Some(FileDependencyState {
         package_name,
         imports: file_imports,
+        function_count: Some(parsed.function_count),
+        type_count: Some(parsed.type_count),
+        complexity: Some(parsed.complexity),
     }))
 }
 
@@ -816,7 +862,15 @@ pub fn run_scan(
 
     let mut latest_scanned = db.get_latest_scanned_commit(repo_id)?;
     let latest_snapshot = if let Some((ref last_hash, _)) = latest_scanned {
-        db.get_graph_snapshot(repo_id, last_hash)?
+        match db.get_graph_snapshot(repo_id, last_hash) {
+            Ok(snap) => snap,
+            Err(e) => {
+                info!("Failed to load latest snapshot (schema change?): {e:#}. Will rebuild.");
+                db.clear_repo_graph_snapshots(repo_id)?;
+                latest_scanned = None;
+                None
+            }
+        }
     } else {
         None
     };
@@ -938,7 +992,7 @@ pub fn run_scan(
         subtree_cache: Arc::new(git_scanner::load_persistent_subtree_cache(
             cache_dir, repo_id,
         )?),
-        blob_import_cache: Arc::new(DashMap::with_capacity(50_000)),
+        blob_parse_cache: Arc::new(DashMap::with_capacity(50_000)),
         package_name_cache: Arc::new(DashMap::with_capacity(10_000)),
         ignore_globs: project_config.ignore_globs().cloned(),
         package_depth: project_config.scan.package_depth,
@@ -947,13 +1001,29 @@ pub fn run_scan(
     };
     let mut timings = ScanPhaseTimings::default();
 
+    // Load churn/bus factor from previous scan state if available for incremental continuity.
+    let (mut module_churn, mut module_authors): (
+        HashMap<String, u32>,
+        HashMap<String, HashMap<String, u32>>,
+    ) = (HashMap::new(), HashMap::new());
+
     let mut scan_state = if let Some((ref last_hash, _)) = effective_last_commit {
         match db.load_repo_scan_state(repo_id)? {
             Some((stored_hash, repo_state)) if stored_hash == *last_hash => {
                 info!(hash = %stored_hash, "Loaded incremental scan baseline from DB cache");
+                module_churn = repo_state.module_churn.clone();
+                module_authors = repo_state.module_authors.clone();
                 IncrementalGraphState::from_repo_state(repo_state, ctx.external_min_importers)
             }
-            _ => {
+            Some((_stored_hash, repo_state)) => {
+                // Hash mismatch — graph state needs rebuild, but churn/authors
+                // are cumulative and can be preserved for continuity.
+                module_churn = repo_state.module_churn;
+                module_authors = repo_state.module_authors;
+                info!(hash = %last_hash, "Bootstrapping incremental scan baseline from last scanned commit (churn data preserved)");
+                build_state_from_commit(last_hash, &ctx, &mut timings)?
+            }
+            None => {
                 info!(hash = %last_hash, "Bootstrapping incremental scan baseline from last scanned commit");
                 build_state_from_commit(last_hash, &ctx, &mut timings)?
             }
@@ -994,7 +1064,7 @@ pub fn run_scan(
                     graphs_created,
                     total_commits,
                     elapsed,
-                    ctx.blob_import_cache.len()
+                    ctx.blob_parse_cache.len()
                 );
             }
             let batch_start = idx + 1;
@@ -1031,8 +1101,45 @@ pub fn run_scan(
             )?
         } else {
             scan_state = build_state_from_commit(&commit_info.hash, &ctx, &mut timings)?;
-            GraphDelta::default()
+            // Build a full delta from the initial state so churn/bus factor
+            // tracking captures the first commit's files.
+            GraphDelta {
+                upserts: scan_state
+                    .files
+                    .iter()
+                    .map(|(p, s)| (p.clone(), s.clone()))
+                    .collect(),
+                deletes: Vec::new(),
+            }
         };
+
+        // Phase 3: accumulate churn and bus factor from delta
+        {
+            let mut touched_packages: HashSet<String> = HashSet::new();
+            for (_path, file_state) in &delta.upserts {
+                touched_packages.insert(file_state.package_name.clone());
+            }
+            for del_path in &delta.deletes {
+                // Only count churn for files that would actually be tracked
+                if !should_track_file_with_patterns(
+                    del_path,
+                    ctx.ignore_globs.as_ref(),
+                    &ctx.test_path_patterns,
+                ) {
+                    continue;
+                }
+                let pkg = parser::extract_package_name_str_with_depth(del_path, ctx.package_depth);
+                touched_packages.insert(pkg);
+            }
+            for pkg in &touched_packages {
+                *module_churn.entry(pkg.clone()).or_insert(0) += 1;
+                *module_authors
+                    .entry(pkg.clone())
+                    .or_default()
+                    .entry(commit_info.author_email.clone())
+                    .or_insert(0) += 1;
+            }
+        }
 
         let db_write_start = Instant::now();
         db.insert_commit(repo_id, &commit_info)?;
@@ -1084,8 +1191,24 @@ pub fn run_scan(
                 &GraphCheckpoint {
                     commit_hash: commit_info.hash.clone(),
                     scan_order: next_scan_order,
-                    state: scan_state.to_repo_state(),
+                    state: scan_state.to_repo_state(&module_churn, &module_authors),
                     full_artifacts: if matches!(detail, SnapshotAnalysisDetail::Full) {
+                        // Build bus factor entries from accumulated author data
+                        let bus_factor: Vec<BusFactorEntry> = module_authors
+                            .iter()
+                            .map(|(module, authors)| {
+                                let top = authors
+                                    .iter()
+                                    .max_by_key(|(_, count)| *count)
+                                    .map(|(name, _)| name.clone())
+                                    .unwrap_or_default();
+                                BusFactorEntry {
+                                    module_name: module.clone(),
+                                    unique_authors: authors.len(),
+                                    top_author: top,
+                                }
+                            })
+                            .collect();
                         Some(HeavySnapshotArtifacts {
                             blast_radius: analysis_artifacts
                                 .blast_radius
@@ -1093,6 +1216,8 @@ pub fn run_scan(
                                 .expect("full analysis should contain blast radius"),
                             instability_metrics: analysis_artifacts.instability_metrics.clone(),
                             diagnostics: analysis_artifacts.diagnostics.clone(),
+                            module_churn: module_churn.clone(),
+                            bus_factor,
                         })
                     } else {
                         None
@@ -1117,13 +1242,17 @@ pub fn run_scan(
             graphs_created,
             total_commits,
             elapsed,
-            ctx.blob_import_cache.len()
+            ctx.blob_parse_cache.len()
         );
     }
 
     if let Some(commit_hash) = previous_commit_hash.as_deref() {
         let db_write_start = Instant::now();
-        db.save_repo_scan_state(repo_id, commit_hash, &scan_state.to_repo_state())?;
+        db.save_repo_scan_state(
+            repo_id,
+            commit_hash,
+            &scan_state.to_repo_state(&module_churn, &module_authors),
+        )?;
         timings.db_write += db_write_start.elapsed();
     }
     git_scanner::save_persistent_subtree_cache(cache_dir, repo_id, &ctx.subtree_cache)?;
@@ -1323,6 +1452,9 @@ mod tests {
                     module_name: "jsonwebtoken".to_string(),
                     weight: 1,
                 }],
+                function_count: None,
+                type_count: None,
+                complexity: None,
             },
         );
 

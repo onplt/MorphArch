@@ -185,6 +185,9 @@ pub struct App {
     pub skipped_snapshot_count: usize,
     /// Whether the current snapshot required legacy artifact recomputation
     pub legacy_snapshot_recomputed: bool,
+
+    // -- AI Assistant Panel --
+    pub ai_panel: super::ai_panel::AiPanelState,
 }
 
 struct GraphRenderCache {
@@ -301,6 +304,8 @@ impl App {
             blast_impact_scroll: 0,
             skipped_snapshot_count: 0,
             legacy_snapshot_recomputed: false,
+            // AI Assistant Panel
+            ai_panel: super::ai_panel::AiPanelState::default(),
         };
 
         if let Some(first_meta) = app.snapshots_metadata.first() {
@@ -873,7 +878,7 @@ impl App {
             .selected_pkg_index
             .or(preferred_idx)
             .unwrap_or(0)
-            .min(entries.len() - 1);
+            .min(entries.len().saturating_sub(1));
         self.selected_pkg_index = Some(idx);
         self.ensure_sidebar_index_visible(idx, entries.len());
 
@@ -1339,6 +1344,38 @@ impl App {
     }
 
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // ── AI Assistant panel input ──
+        if self.ai_panel.visible {
+            let consumed = self.ai_panel.handle_key(code, modifiers);
+            let is_submit = !consumed && !self.ai_panel.input.is_empty();
+            if is_submit {
+                let text = self.ai_panel.input.text.trim().to_string();
+                // Check if this is a navigation suggestion ("→ Inspect X")
+                if let Some(module_name) = text.strip_prefix("\u{2192} Inspect ") {
+                    let module_name = module_name.trim().to_string();
+                    self.ai_panel.input.clear();
+                    if let Some(node_idx) = self
+                        .graph_layout
+                        .labels
+                        .iter()
+                        .position(|l| l == &module_name)
+                    {
+                        self.open_member_inspect(node_idx);
+                        self.refresh_ai_suggestions();
+                    }
+                } else if !self.ai_panel.try_execute_command(&text) {
+                    self.submit_ai_query();
+                }
+                // Handle /diff command (needs App context to resolve snapshots)
+                if let Some(n) = self.ai_panel.pending_diff_query.take() {
+                    self.handle_diff_command(n);
+                }
+            }
+            if consumed || is_submit {
+                return;
+            }
+        }
+
         // ── Filter bar input mode ──
         if self.filter_active {
             match code {
@@ -1445,6 +1482,13 @@ impl App {
                 self.reheat_layout();
                 return;
             }
+            KeyCode::Char('a') => {
+                self.ai_panel.toggle();
+                if self.ai_panel.visible {
+                    self.refresh_ai_suggestions();
+                }
+                return;
+            }
             KeyCode::Char('x') => {
                 self.blast_overlay_active = !self.blast_overlay_active;
                 if self.blast_overlay_active {
@@ -1515,7 +1559,7 @@ impl App {
                 }
                 let next = self
                     .selected_pkg_index
-                    .map(|i| (i + 1).min(entries.len() - 1))
+                    .map(|i| (i + 1).min(entries.len().saturating_sub(1)))
                     .unwrap_or(0);
                 self.selected_pkg_index = Some(next);
                 self.ensure_sidebar_index_visible(next, entries.len());
@@ -1540,8 +1584,9 @@ impl App {
             }
             KeyCode::Char('G') => {
                 if !entries.is_empty() {
-                    self.selected_pkg_index = Some(entries.len() - 1);
-                    self.ensure_sidebar_index_visible(entries.len() - 1, entries.len());
+                    let last = entries.len().saturating_sub(1);
+                    self.selected_pkg_index = Some(last);
+                    self.ensure_sidebar_index_visible(last, entries.len());
                     self.sync_sidebar_selection();
                 }
             }
@@ -1590,7 +1635,7 @@ impl App {
                 }
                 let idx = self
                     .selected_pkg_index
-                    .map(|i| (i + 1).min(entries.len() - 1))
+                    .map(|i| (i + 1).min(entries.len().saturating_sub(1)))
                     .unwrap_or(0);
                 self.set_selected_sidebar_index(idx);
             }
@@ -1793,6 +1838,859 @@ impl App {
         }
     }
 
+    pub fn submit_ai_query(&mut self) {
+        if self.ai_panel.is_streaming || self.ai_panel.input.is_empty() {
+            return;
+        }
+
+        let question = self.ai_panel.input.take_text();
+        self.ai_panel.input.push_history(question.clone());
+        self.ai_panel.last_query = Some(question.clone());
+        self.ai_panel.is_streaming = true;
+        self.ai_panel.scroll_offset = usize::MAX; // scroll to bottom so new question is visible
+        self.ai_panel.auto_scroll = true;
+
+        // Build context label from current view
+        let view_label = match self.nav_stack.last() {
+            Some(ViewContext::PackageDetail(name)) => format!("Cluster: {}", name),
+            Some(ViewContext::ModuleInspect(name)) => format!("Module: {}", name),
+            _ => "Overview".to_string(),
+        };
+        let focused_label = format!("{:?}", self.focused_panel);
+        let context_label = super::ai_panel::ContextLabel {
+            view: view_label,
+            focused: focused_label,
+        };
+
+        // Build architecture context
+        let (node_count, edge_count) = self
+            .current_snapshot()
+            .map(|s| (s.nodes.len(), s.edges.len()))
+            .unwrap_or((0, 0));
+
+        let current_drift = self.current_snapshot().and_then(|s| s.drift.as_ref());
+        let blast_radius = self
+            .current_snapshot()
+            .and_then(|s| s.blast_radius.as_ref());
+
+        let instability_metrics = self
+            .current_snapshot()
+            .map(|s| {
+                s.instability_metrics
+                    .iter()
+                    .map(|m| (m.module_name.clone(), m.instability, m.fan_in, m.fan_out))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let cluster_infos = self
+            .architecture_map
+            .as_ref()
+            .map(|map| {
+                map.clusters
+                    .iter()
+                    .map(|c| {
+                        // Resolve member indices to module names, sorted by degree
+                        let top_members: Vec<String> = {
+                            let mut member_names: Vec<(String, usize)> = c
+                                .members
+                                .iter()
+                                .filter_map(|&idx| {
+                                    self.graph_layout.labels.get(idx).map(|name| {
+                                        let degree = instability_metrics
+                                            .iter()
+                                            .find(|(n, _, _, _)| n == name)
+                                            .map(|(_, _, fi, fo)| fi + fo)
+                                            .unwrap_or(0);
+                                        (name.clone(), degree)
+                                    })
+                                })
+                                .collect();
+                            member_names.sort_by(|a, b| b.1.cmp(&a.1));
+                            member_names
+                                .into_iter()
+                                .take(15)
+                                .map(|(name, _)| name)
+                                .collect()
+                        };
+
+                        crate::ai_query::ClusterInfo {
+                            name: c.name.clone(),
+                            kind: format!("{:?}", c.kind),
+                            layer: c.layer,
+                            role: format!("{:?}", c.overview_role()),
+                            member_count: c.members.len(),
+                            internal_count: c.internal_member_count,
+                            external_count: c.external_member_count,
+                            inbound_weight: c.inbound_weight,
+                            outbound_weight: c.outbound_weight,
+                            internal_weight: c.internal_weight,
+                            top_members,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Inter-cluster coupling edges (top 15 by weight)
+        let cluster_couplings: Vec<crate::ai_query::ClusterCoupling> = self
+            .architecture_map
+            .as_ref()
+            .map(|map| {
+                let mut edges: Vec<_> = map
+                    .edges
+                    .iter()
+                    .filter_map(|e| {
+                        let from_name = map.clusters.get(e.from)?.name.clone();
+                        let to_name = map.clusters.get(e.to)?.name.clone();
+                        Some(crate::ai_query::ClusterCoupling {
+                            from: from_name,
+                            to: to_name,
+                            total_weight: e.total_weight,
+                            edge_count: e.edge_count,
+                        })
+                    })
+                    .collect();
+                edges.sort_by(|a, b| b.total_weight.cmp(&a.total_weight));
+                edges.truncate(15);
+                edges
+            })
+            .unwrap_or_default();
+
+        // Extract SCC cycle groups from the graph
+        let cycle_groups: Vec<Vec<String>> = self
+            .current_snapshot()
+            .map(|s| {
+                let node_set: std::collections::HashSet<String> = s.nodes.iter().cloned().collect();
+                let graph = graph_builder::build_graph(&node_set, &s.edges);
+                scoring::extract_scc_members(&graph)
+            })
+            .unwrap_or_default();
+
+        // All edge weights for distribution stats
+        let all_edge_weights: Vec<u32> = self
+            .current_snapshot()
+            .map(|s| s.edges.iter().map(|e| e.weight).collect())
+            .unwrap_or_default();
+
+        // Heaviest edges (top 15 by weight)
+        let heaviest_edges: Vec<crate::ai_query::HeavyEdge> = self
+            .current_snapshot()
+            .map(|s| {
+                let mut edges: Vec<_> = s
+                    .edges
+                    .iter()
+                    .map(|e| crate::ai_query::HeavyEdge {
+                        from: e.from_module.clone(),
+                        to: e.to_module.clone(),
+                        weight: e.weight,
+                    })
+                    .collect();
+                edges.sort_by(|a, b| b.weight.cmp(&a.weight));
+                edges.truncate(15);
+                edges
+            })
+            .unwrap_or_default();
+
+        // Diagnostics from scoring engine
+        let diagnostics: Vec<String> = self
+            .current_snapshot()
+            .map(|s| s.diagnostics.clone())
+            .unwrap_or_default();
+
+        // Current commit context
+        let current_commit =
+            self.timeline
+                .commits
+                .get(self.timeline.current_index)
+                .map(|(hash, msg, ts)| crate::ai_query::CommitContext {
+                    short_hash: hash.chars().take(8).collect(),
+                    message: msg.clone(),
+                    timestamp: *ts,
+                });
+
+        // Per-component trend decomposition
+        let trend = {
+            let mut total = Vec::new();
+            let mut cycle_debt = Vec::new();
+            let mut layering_debt = Vec::new();
+            let mut hub_debt = Vec::new();
+            let mut coupling_debt = Vec::new();
+            let mut cognitive_debt = Vec::new();
+            let mut instability_debt = Vec::new();
+
+            for meta in self
+                .snapshots_metadata
+                .iter()
+                .take(self.timeline.current_index + 1)
+            {
+                if let Some(drift) = self
+                    .snapshot_cache
+                    .peek(&meta.commit_hash)
+                    .and_then(|s| s.drift.as_ref())
+                {
+                    total.push(drift.total);
+                    let r1 = |v: f64| (v * 10.0).round() / 10.0;
+                    cycle_debt.push(r1(drift.cycle_debt));
+                    layering_debt.push(r1(drift.layering_debt));
+                    hub_debt.push(r1(drift.hub_debt));
+                    coupling_debt.push(r1(drift.coupling_debt));
+                    cognitive_debt.push(r1(drift.cognitive_debt));
+                    instability_debt.push(r1(drift.instability_debt));
+                }
+            }
+
+            crate::ai_query::TrendData {
+                total,
+                cycle_debt,
+                layering_debt,
+                hub_debt,
+                coupling_debt,
+                cognitive_debt,
+                instability_debt,
+            }
+        };
+
+        // Build focused context for the current view
+        let focused_context = crate::ai_query::build_focused_context(
+            &self.nav_stack,
+            &self.focused_panel,
+            &self.insight_tab,
+            self.hovered_node
+                .and_then(|idx| self.graph_layout.labels.get(idx))
+                .cloned(),
+            self.selected_cluster.and_then(|idx| {
+                self.architecture_map
+                    .as_ref()
+                    .and_then(|m| m.clusters.get(idx).map(|c| c.name.clone()))
+            }),
+        );
+
+        // Scoring configuration context
+        let scoring_context = {
+            let sc = &self.scoring_config;
+            crate::ai_query::ScoringContext {
+                weights: crate::ai_query::ScoringWeights {
+                    cycle: sc.weights.cycle,
+                    layering: sc.weights.layering,
+                    hub: sc.weights.hub,
+                    coupling: sc.weights.coupling,
+                    cognitive: sc.weights.cognitive,
+                    instability: sc.weights.instability,
+                },
+                hub_exempt: sc.exemptions.hub_exempt.clone(),
+                instability_exempt: sc.exemptions.instability_exempt.clone(),
+                entry_point_stems: sc.exemptions.entry_point_stems.clone(),
+                boundary_rules_count: sc.boundaries.len(),
+                hub_exemption_ratio: sc.thresholds.hub_exemption_ratio,
+                entry_point_max_fan_in: sc.thresholds.entry_point_max_fan_in,
+                brittle_instability_ratio: sc.thresholds.brittle_instability_ratio,
+            }
+        };
+
+        // ── Phase 2: Enriched breakdowns ──
+        let phase2 = {
+            // Build graph for extraction functions (only when snapshot exists)
+            let graph_opt = self.current_snapshot().map(|s| {
+                let node_set: std::collections::HashSet<String> = s.nodes.iter().cloned().collect();
+                graph_builder::build_graph(&node_set, &s.edges)
+            });
+
+            // 2.3 Cognitive debt detail
+            let cognitive_detail = graph_opt.as_ref().map(|g| {
+                let d = scoring::extract_cognitive_detail(g);
+                crate::ai_query::CognitiveDetail {
+                    edge_excess_ratio: d.edge_excess_ratio,
+                    degree_excess: d.degree_excess,
+                    avg_degree: d.avg_degree,
+                    expected_avg_degree: d.expected_avg_degree,
+                    baseline_edges: d.baseline_edges,
+                    actual_edges: d.actual_edges,
+                    scale_factor: d.scale_factor,
+                }
+            });
+
+            // 2.1 God modules
+            let god_modules: Vec<crate::ai_query::GodModule> = graph_opt
+                .as_ref()
+                .map(|g| {
+                    scoring::extract_god_modules(
+                        g,
+                        &self.scoring_config.thresholds,
+                        &self.scoring_config.exemptions,
+                    )
+                    .into_iter()
+                    .map(|gm| crate::ai_query::GodModule {
+                        name: gm.name,
+                        fan_in: gm.fan_in,
+                        fan_out: gm.fan_out,
+                        hub_ratio: gm.hub_ratio,
+                        excess_ratio: gm.excess_ratio,
+                    })
+                    .collect()
+                })
+                .unwrap_or_default();
+
+            // 2.2 Boundary violations
+            let boundary_violations: Vec<crate::ai_query::BoundaryViolation> = graph_opt
+                .as_ref()
+                .map(|g| {
+                    scoring::extract_boundary_violations(g, &self.scoring_config)
+                        .into_iter()
+                        .map(|bv| crate::ai_query::BoundaryViolation {
+                            from_module: bv.from_module,
+                            to_module: bv.to_module,
+                            rule_from_pattern: bv.rule_from_pattern,
+                            rule_deny_patterns: bv.rule_deny_patterns,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // 2.4 Layer topology
+            let layer_topology = self.architecture_map.as_ref().map(|map| {
+                // Group clusters by layer
+                let mut layer_map: std::collections::BTreeMap<usize, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for c in &map.clusters {
+                    layer_map.entry(c.layer).or_default().push(c.name.clone());
+                }
+                let layers: Vec<crate::ai_query::LayerLevel> = layer_map
+                    .into_iter()
+                    .map(|(level, cluster_names)| crate::ai_query::LayerLevel {
+                        level,
+                        cluster_names,
+                    })
+                    .collect();
+
+                // Find upward violations: edges from higher layer to lower layer
+                let mut upward_violations = Vec::new();
+                for e in &map.edges {
+                    if let (Some(from_c), Some(to_c)) =
+                        (map.clusters.get(e.from), map.clusters.get(e.to))
+                        && from_c.layer > to_c.layer
+                    {
+                        upward_violations.push(crate::ai_query::LayerViolation {
+                            from_cluster: from_c.name.clone(),
+                            from_layer: from_c.layer,
+                            to_cluster: to_c.name.clone(),
+                            to_layer: to_c.layer,
+                        });
+                    }
+                }
+
+                crate::ai_query::LayerTopology {
+                    layers,
+                    upward_violations,
+                }
+            });
+
+            crate::ai_query::Phase2Enrichments {
+                cognitive_detail,
+                god_modules,
+                boundary_violations,
+                layer_topology,
+            }
+        };
+
+        // ── Phase 3: File metrics, churn hotspots, bus factor risks ──
+        let phase3 = {
+            // 3.2 Module file metrics — aggregate function/type counts per module
+            // Load RepoScanState from DB to access per-file function/type counts.
+            let module_file_metrics: Vec<crate::ai_query::ModuleFileMetrics> = self
+                .db
+                .as_ref()
+                .and_then(|db| {
+                    db.load_repo_scan_state(&self.repo_id)
+                        .ok()
+                        .flatten()
+                        .map(|(_, state)| {
+                            let mut agg: std::collections::HashMap<String, (usize, u32, u32, u32)> =
+                                std::collections::HashMap::new();
+                            for file_state in state.files.values() {
+                                let entry = agg
+                                    .entry(file_state.package_name.clone())
+                                    .or_insert((0, 0, 0, 0));
+                                entry.0 += 1;
+                                entry.1 += file_state.function_count.unwrap_or(0);
+                                entry.2 += file_state.type_count.unwrap_or(0);
+                                entry.3 += file_state.complexity.unwrap_or(0);
+                            }
+                            let mut metrics: Vec<_> = agg
+                                .into_iter()
+                                .map(|(name, (fc, fns, tys, cplx))| {
+                                    crate::ai_query::ModuleFileMetrics {
+                                        module_name: name,
+                                        file_count: fc,
+                                        total_functions: fns,
+                                        total_types: tys,
+                                        avg_functions_per_file: if fc > 0 {
+                                            fns as f64 / fc as f64
+                                        } else {
+                                            0.0
+                                        },
+                                        avg_complexity: if fc > 0 {
+                                            cplx as f32 / fc as f32
+                                        } else {
+                                            0.0
+                                        },
+                                    }
+                                })
+                                .collect();
+                            metrics.sort_by(|a, b| b.total_functions.cmp(&a.total_functions));
+                            metrics
+                        })
+                })
+                .unwrap_or_default();
+
+            // 3.1 Churn hotspots — cross-reference churn with instability
+            let churn_hotspots: Vec<crate::ai_query::ChurnHotspot> = self
+                .current_snapshot()
+                .map(|s| {
+                    let mut hotspots: Vec<crate::ai_query::ChurnHotspot> = s
+                        .module_churn
+                        .iter()
+                        .filter_map(|(module, &touch_count)| {
+                            let instability = instability_metrics
+                                .iter()
+                                .find(|(n, _, _, _)| n == module)
+                                .map(|(_, i, _, _)| *i)
+                                .unwrap_or(0.0);
+                            let risk = touch_count as f64 * instability;
+                            if risk > 0.0 {
+                                Some(crate::ai_query::ChurnHotspot {
+                                    module_name: module.clone(),
+                                    touch_count,
+                                    instability: (instability * 100.0).round() / 100.0,
+                                    risk_score: (risk * 100.0).round() / 100.0,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    hotspots.sort_by(|a, b| {
+                        b.risk_score
+                            .partial_cmp(&a.risk_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    hotspots.truncate(15);
+                    hotspots
+                })
+                .unwrap_or_default();
+
+            // 3.3 Bus factor risks — modules with <=2 contributors and fan_in > 0
+            let bus_factor_risks: Vec<crate::ai_query::BusFactorRisk> = self
+                .current_snapshot()
+                .map(|s| {
+                    let mut risks: Vec<crate::ai_query::BusFactorRisk> = s
+                        .bus_factor
+                        .iter()
+                        .filter(|bf| bf.unique_authors <= 2)
+                        .filter_map(|bf| {
+                            let fan_in = instability_metrics
+                                .iter()
+                                .find(|(n, _, _, _)| n == &bf.module_name)
+                                .map(|(_, _, fi, _)| *fi)
+                                .unwrap_or(0);
+                            if fan_in > 0 {
+                                Some(crate::ai_query::BusFactorRisk {
+                                    module_name: bf.module_name.clone(),
+                                    unique_authors: bf.unique_authors,
+                                    top_author: bf.top_author.clone(),
+                                    fan_in,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    risks.sort_by(|a, b| b.fan_in.cmp(&a.fan_in));
+                    risks.truncate(15);
+                    risks
+                })
+                .unwrap_or_default();
+
+            crate::ai_query::Phase3Enrichments {
+                module_file_metrics,
+                churn_hotspots,
+                bus_factor_risks,
+            }
+        };
+
+        // Phase 4C: build focused module detail when inspecting a module
+        let focused_module_detail = match self.nav_stack.last() {
+            Some(ViewContext::ModuleInspect(name)) => {
+                let module_name = name.clone();
+
+                self.current_snapshot().map(|s| {
+                    // Instability + fan_in/fan_out
+                    let (instability, fan_in, fan_out) = s
+                        .instability_metrics
+                        .iter()
+                        .find(|m| m.module_name == module_name)
+                        .map(|m| (m.instability, m.fan_in, m.fan_out))
+                        .unwrap_or((0.0, 0, 0));
+
+                    // Blast score + keystone
+                    let (blast_score, is_keystone) = s
+                        .blast_radius
+                        .as_ref()
+                        .and_then(|br| {
+                            br.impacts
+                                .iter()
+                                .find(|i| i.module_name == module_name)
+                                .map(|i| {
+                                    (
+                                        Some(crate::ai_query::round2(i.blast_score)),
+                                        i.is_articulation_point,
+                                    )
+                                })
+                        })
+                        .unwrap_or((None, false));
+
+                    // Cluster membership
+                    let cluster = self.architecture_map.as_ref().and_then(|map| {
+                        map.clusters
+                            .iter()
+                            .find(|c| {
+                                c.members.iter().any(|&idx| {
+                                    self.graph_layout
+                                        .labels
+                                        .get(idx)
+                                        .is_some_and(|label| label == &module_name)
+                                })
+                            })
+                            .map(|c| c.name.clone())
+                    });
+
+                    // ALL inbound edges (to this module)
+                    let mut all_inbound_edges: Vec<crate::ai_query::ModuleEdge> = s
+                        .edges
+                        .iter()
+                        .filter(|e| e.to_module == module_name)
+                        .map(|e| crate::ai_query::ModuleEdge {
+                            module: e.from_module.clone(),
+                            weight: e.weight,
+                        })
+                        .collect();
+                    all_inbound_edges.sort_by(|a, b| b.weight.cmp(&a.weight));
+
+                    // ALL outbound edges (from this module)
+                    let mut all_outbound_edges: Vec<crate::ai_query::ModuleEdge> = s
+                        .edges
+                        .iter()
+                        .filter(|e| e.from_module == module_name)
+                        .map(|e| crate::ai_query::ModuleEdge {
+                            module: e.to_module.clone(),
+                            weight: e.weight,
+                        })
+                        .collect();
+                    all_outbound_edges.sort_by(|a, b| b.weight.cmp(&a.weight));
+
+                    // Churn
+                    let churn_count = s.module_churn.get(&module_name).copied();
+
+                    // Bus factor
+                    let bus_factor = s
+                        .bus_factor
+                        .iter()
+                        .find(|bf| bf.module_name == module_name)
+                        .map(|bf| crate::ai_query::BusFactorInfo {
+                            unique_authors: bf.unique_authors,
+                            top_author: bf.top_author.clone(),
+                        });
+
+                    // Cycle membership
+                    let mut in_cycle = false;
+                    let mut cycle_partners = Vec::new();
+                    for group in &cycle_groups {
+                        if group.contains(&module_name) {
+                            in_cycle = true;
+                            cycle_partners = group
+                                .iter()
+                                .filter(|m| *m != &module_name)
+                                .cloned()
+                                .collect();
+                            break;
+                        }
+                    }
+
+                    // File metrics (function/type/complexity)
+                    let (function_count, type_count, complexity) = phase3
+                        .module_file_metrics
+                        .iter()
+                        .find(|m| m.module_name == module_name)
+                        .map(|m| {
+                            (
+                                Some(m.total_functions),
+                                Some(m.total_types),
+                                if m.avg_complexity > 0.0 {
+                                    Some(m.avg_complexity as u32)
+                                } else {
+                                    None
+                                },
+                            )
+                        })
+                        .unwrap_or((None, None, None));
+
+                    crate::ai_query::FocusedModuleDetail {
+                        module_name,
+                        instability,
+                        fan_in,
+                        fan_out,
+                        blast_score,
+                        is_keystone,
+                        cluster,
+                        all_inbound_edges,
+                        all_outbound_edges,
+                        churn_count,
+                        bus_factor,
+                        in_cycle,
+                        cycle_partners,
+                        function_count,
+                        type_count,
+                        complexity,
+                    }
+                })
+            }
+            _ => None,
+        };
+
+        // Phase 4B: compute diff with previous snapshot for temporal AI context
+        let recent_diff = if self.timeline.current_index + 1 < self.snapshots_metadata.len() {
+            let prev_meta = &self.snapshots_metadata[self.timeline.current_index + 1];
+            let cur_meta = &self.snapshots_metadata[self.timeline.current_index];
+            let cur_snap = self.snapshot_cache.peek(&cur_meta.commit_hash);
+            let prev_snap = self.snapshot_cache.peek(&prev_meta.commit_hash);
+            match (cur_snap, prev_snap) {
+                (Some(cur), Some(prev)) => Some(crate::ai_query::compute_snapshot_diff(cur, prev)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let mut arch_context = crate::ai_query::build_architecture_context(
+            node_count,
+            edge_count,
+            current_drift,
+            blast_radius,
+            &instability_metrics,
+            &cluster_infos,
+            &cluster_couplings,
+            &cycle_groups,
+            &heaviest_edges,
+            &diagnostics,
+            current_commit,
+            trend,
+            &all_edge_weights,
+            Some(scoring_context),
+            phase2,
+            phase3,
+            recent_diff,
+            focused_module_detail,
+        );
+
+        // Phase 3.4: adaptive context compression
+        crate::ai_query::compress_context(
+            &mut arch_context,
+            self.ai_panel.ai_config.max_context_tokens,
+        );
+
+        // Collect last 3 conversation entries for history
+        let history: Vec<(String, String)> = self
+            .ai_panel
+            .conversation
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .filter(|e| e.is_complete)
+            .map(|e| (e.question.clone(), e.answer.clone()))
+            .collect();
+
+        // Add to conversation BEFORE spawning the stream task.
+        // This prevents a race where early delta chunks arrive via drain_stream()
+        // before the ConversationEntry exists, causing lost or misattributed answers.
+        self.ai_panel
+            .conversation
+            .push(super::ai_panel::ConversationEntry {
+                question: question.clone(),
+                answer: String::new(),
+                context_label,
+                is_complete: false,
+            });
+
+        // Spawn streaming task
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.ai_panel.stream_rx = Some(rx);
+        let config = self.ai_panel.ai_config.clone();
+
+        tokio::spawn(async move {
+            crate::ai_query::send_query_streaming(
+                &question,
+                &arch_context,
+                &focused_context,
+                &history,
+                &config,
+                tx,
+            )
+            .await;
+        });
+    }
+
+    fn handle_diff_command(&mut self, n: usize) {
+        let current_idx = self.timeline.current_index;
+        let target_idx = current_idx + n;
+
+        if target_idx >= self.snapshots_metadata.len() {
+            self.ai_panel
+                .conversation
+                .push(super::ai_panel::ConversationEntry {
+                    question: format!("/diff HEAD~{}", n),
+                    answer: format!(
+                        "Cannot compare: only {} snapshots available, \
+                         requested HEAD~{}",
+                        self.snapshots_metadata.len(),
+                        n
+                    ),
+                    context_label: super::ai_panel::ContextLabel {
+                        view: "System".to_string(),
+                        focused: "Command".to_string(),
+                    },
+                    is_complete: true,
+                });
+            return;
+        }
+
+        // Try to get both snapshots
+        let cur_hash = self.snapshots_metadata[current_idx].commit_hash.clone();
+        let old_hash = self.snapshots_metadata[target_idx].commit_hash.clone();
+
+        let cur_snap = self.snapshot_cache.peek(&cur_hash).cloned();
+        let old_snap = self.snapshot_cache.peek(&old_hash).cloned().or_else(|| {
+            self.db.as_ref().and_then(|db| {
+                db.get_graph_snapshot(&self.repo_id, &old_hash)
+                    .ok()
+                    .flatten()
+            })
+        });
+
+        match (cur_snap, old_snap) {
+            (Some(cur), Some(old)) => {
+                let diff = crate::ai_query::compute_snapshot_diff(&cur, &old);
+                let diff_json = serde_json::to_string_pretty(&diff).unwrap_or_default();
+
+                let cur_short = &cur_hash[..8.min(cur_hash.len())];
+                let old_short = &old_hash[..8.min(old_hash.len())];
+
+                let question = format!(
+                    "Compare the architecture between commit {} \
+                     (current) and commit {} ({} commits ago). \
+                     Here is the diff data:\n{}\n\n\
+                     What are the most significant architectural \
+                     changes? Did the health improve or worsen?",
+                    cur_short, old_short, n, diff_json
+                );
+                self.ai_panel.input.text = question;
+                self.ai_panel.input.cursor = self.ai_panel.input.text.chars().count();
+                self.submit_ai_query();
+            }
+            _ => {
+                self.ai_panel
+                    .conversation
+                    .push(super::ai_panel::ConversationEntry {
+                        question: format!("/diff HEAD~{}", n),
+                        answer: format!(
+                            "Could not load snapshot for comparison. \
+                             The target snapshot (HEAD~{}) may not be \
+                             in cache.",
+                            n
+                        ),
+                        context_label: super::ai_panel::ContextLabel {
+                            view: "System".to_string(),
+                            focused: "Command".to_string(),
+                        },
+                        is_complete: true,
+                    });
+            }
+        }
+    }
+
+    fn refresh_ai_suggestions(&mut self) {
+        let view_name = match self.nav_stack.last() {
+            Some(ViewContext::PackageDetail(_)) => "PackageDetail",
+            Some(ViewContext::ModuleInspect(_)) => "ModuleInspect",
+            _ => "Overview",
+        }
+        .to_string();
+
+        let selected_entity = match self.nav_stack.last() {
+            Some(ViewContext::PackageDetail(n)) | Some(ViewContext::ModuleInspect(n)) => {
+                Some(n.clone())
+            }
+            _ => None,
+        };
+
+        let insight_tab = format!("{:?}", self.insight_tab);
+
+        let (cycle_debt, health_percent) = self
+            .current_drift
+            .as_ref()
+            .map(|d| (d.cycle_debt, 100u8.saturating_sub(d.total)))
+            .unwrap_or((0.0, 100));
+
+        let trend_declining = self
+            .snapshots_metadata
+            .iter()
+            .take(self.timeline.current_index + 1)
+            .rev()
+            .take(5)
+            .filter_map(|meta| {
+                self.snapshot_cache
+                    .peek(&meta.commit_hash)
+                    .and_then(|s| s.drift.as_ref().map(|d| d.total))
+            })
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|w| w[0] > w[1]); // drift increasing = health declining
+
+        let has_blast_data = self.current_blast_radius.is_some();
+        let top_brittle = self.brittle_packages.first().map(|(n, _, _, _)| n.clone());
+
+        let is_latest_commit = self.timeline.current_index == 0;
+        let commit_message = self
+            .snapshots_metadata
+            .get(self.timeline.current_index)
+            .and_then(|meta| {
+                self.snapshot_cache
+                    .peek(&meta.commit_hash)
+                    .map(|_| meta.commit_hash[..8.min(meta.commit_hash.len())].to_string())
+            });
+
+        let ctx = super::ai_panel::SuggestionContext {
+            view_name,
+            selected_entity,
+            insight_tab,
+            cycle_debt,
+            health_percent,
+            trend_declining,
+            has_blast_data,
+            top_brittle,
+            is_latest_commit,
+            commit_message,
+        };
+
+        self.ai_panel.suggestions = super::ai_panel::generate_suggestions(&ctx);
+
+        // Update known module names for response highlighting (sorted by length
+        // descending so longest-match-first avoids partial highlights).
+        let mut modules: Vec<String> = self.graph_layout.labels.clone();
+        modules.sort_by_key(|m| std::cmp::Reverse(m.len()));
+        self.ai_panel.known_modules = modules;
+    }
+
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let col = mouse.column;
         let row = mouse.row;
@@ -1845,6 +2743,39 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_insights_border {
             self.resizing_insights = true;
             return;
+        }
+
+        // AI panel top border resize
+        let ai_panel_area = self.ai_panel.panel_area;
+        if self.ai_panel.visible && ai_panel_area.width > 0 {
+            let on_ai_border = row == ai_panel_area.y
+                && col >= ai_panel_area.x
+                && col < ai_panel_area.x + ai_panel_area.width;
+
+            if self.ai_panel.resizing {
+                match mouse.kind {
+                    MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Down(MouseButton::Left) => {
+                        let bottom = ai_panel_area.y + ai_panel_area.height;
+                        let new_height = bottom.saturating_sub(row);
+                        self.ai_panel.panel_height = new_height.clamp(
+                            super::ai_panel::MIN_PANEL_HEIGHT,
+                            super::ai_panel::MAX_PANEL_HEIGHT,
+                        );
+                        return;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.ai_panel.resizing = false;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_ai_border {
+                self.ai_panel.resizing = true;
+                return;
+            }
         }
 
         // Click on a package in the sidebar
@@ -1927,12 +2858,16 @@ impl App {
                 self.is_playing = false;
                 let ratio = ((col.saturating_sub(tl_inner_x) as f64) / tl_inner_w.max(1) as f64)
                     .clamp(0.0, 1.0);
-                self.seek_to((ratio * (self.timeline.len() - 1) as f64).round() as usize);
+                self.seek_to(
+                    (ratio * self.timeline.len().saturating_sub(1) as f64).round() as usize,
+                );
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_timeline => {
                 let ratio = ((col.saturating_sub(tl_inner_x) as f64) / tl_inner_w.max(1) as f64)
                     .clamp(0.0, 1.0);
-                self.seek_to((ratio * (self.timeline.len() - 1) as f64).round() as usize);
+                self.seek_to(
+                    (ratio * self.timeline.len().saturating_sub(1) as f64).round() as usize,
+                );
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging_timeline => {
                 self.dragging_timeline = false;
@@ -2175,7 +3110,9 @@ impl App {
             }
             MouseEventKind::ScrollUp => {
                 let pos = ratatui::layout::Position::new(col, row);
-                if self.pkg_area.contains(pos) {
+                if self.ai_panel.visible && self.ai_panel.panel_area.contains(pos) {
+                    self.ai_panel.scroll_up(3);
+                } else if self.pkg_area.contains(pos) {
                     let entries_len = self.sidebar_entries().len();
                     self.normalize_sidebar_scroll(entries_len);
                     self.pkg_scroll_offset = self.pkg_scroll_offset.saturating_sub(3);
@@ -2241,7 +3178,9 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 let pos = ratatui::layout::Position::new(col, row);
-                if self.pkg_area.contains(pos) {
+                if self.ai_panel.visible && self.ai_panel.panel_area.contains(pos) {
+                    self.ai_panel.scroll_down(3);
+                } else if self.pkg_area.contains(pos) {
                     let entries_len = self.sidebar_entries().len();
                     let visible_capacity = self.sidebar_visible_capacity(entries_len);
                     if visible_capacity > 0 && entries_len > visible_capacity {
@@ -2489,13 +3428,24 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
     let effective_insights = app.insights_visible && size.width >= 100;
     app.sync_visible_panels(effective_sidebar, effective_insights);
 
-    // ── Main vertical layout: header + content + timeline + filter? + footer ──
+    // ── Main vertical layout: header + content + [ai_panel] + timeline + filter? + footer ──
     let has_filter_bar = app.filter_active;
+    let has_ai_panel = app.ai_panel.visible;
     let mut vert_constraints = vec![
         Constraint::Length(1), // Header/breadcrumb
         Constraint::Min(8),    // Main content area
-        Constraint::Length(3), // Timeline
     ];
+    if has_ai_panel {
+        // Clamp panel height to at most half the terminal
+        let max_ai = (size.height / 2).min(super::ai_panel::MAX_PANEL_HEIGHT);
+        let ai_height = app
+            .ai_panel
+            .panel_height
+            .clamp(super::ai_panel::MIN_PANEL_HEIGHT, max_ai);
+        app.ai_panel.panel_height = ai_height;
+        vert_constraints.push(Constraint::Length(ai_height));
+    }
+    vert_constraints.push(Constraint::Length(3)); // Timeline
     if has_filter_bar {
         vert_constraints.push(Constraint::Length(1)); // Filter bar
     }
@@ -2508,8 +3458,22 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
 
     let header_area = vert[0];
     let content_area = vert[1];
-    let timeline_area = vert[2];
-    let filter_area = if has_filter_bar { Some(vert[3]) } else { None };
+    let mut next_idx = 2;
+    let ai_panel_area = if has_ai_panel {
+        let a = vert[next_idx];
+        next_idx += 1;
+        Some(a)
+    } else {
+        None
+    };
+    let timeline_area = vert[next_idx];
+    next_idx += 1;
+    let filter_area = if has_filter_bar {
+        next_idx += 1;
+        Some(vert[next_idx - 1])
+    } else {
+        None
+    };
     let footer_area = vert[vert.len() - 1];
 
     app.timeline_area = timeline_area;
@@ -2554,6 +3518,11 @@ pub fn render_app(frame: &mut Frame, app: &mut App) {
         render_insights_tabbed(frame, content_chunks[chunk_idx], app);
     } else {
         app.insights_area = Rect::default();
+    }
+
+    // ── AI Panel (inline) ──
+    if let Some(ai_area) = ai_panel_area {
+        super::ai_panel::render_ai_panel(frame, ai_area, &mut app.ai_panel);
     }
 
     // ── Timeline ──
@@ -5125,8 +6094,8 @@ fn build_trend_data(snapshots: &[SnapshotMetadata], current_index: usize) -> Vec
     if snapshots.is_empty() {
         return vec![];
     }
-    let start = current_index.min(snapshots.len() - 1);
-    let end = (start + 49).min(snapshots.len() - 1);
+    let start = current_index.min(snapshots.len().saturating_sub(1));
+    let end = (start + 49).min(snapshots.len().saturating_sub(1));
     let slice = &snapshots[start..=end];
 
     let mut data: Vec<u64> = slice
@@ -5403,6 +6372,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  q / Ctrl+C        Quit"),
         Line::from("  Space / p         Play / pause timeline"),
         Line::from("  b / i             Toggle sidebar / insights"),
+        Line::from("  a                 Toggle AI Assistant panel"),
         Line::from(""),
         Line::from(Span::styled(
             " PACKAGES",
@@ -5436,7 +6406,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::from("  j/k or Up/Down    Move within active insight tab"),
         Line::from("  h/l or Left/Right Switch insight tab"),
-        Line::from("  s                 Sort hotspots"),
+        Line::from("  S                 Sort hotspots"),
         Line::from("  Enter             Inspect selected hotspot / blast item"),
         Line::from(""),
         Line::from(Span::styled(
@@ -5572,6 +6542,9 @@ pub async fn run_tui(mut app: App) -> anyhow::Result<()> {
             app.snapshot_cache.put(hash.clone(), snapshot.clone());
             app.apply_snapshot(&snapshot);
         }
+
+        app.ai_panel.drain_stream();
+        app.ai_panel.tick_spinner();
 
         terminal.draw(|f| {
             render_app(f, &mut app);

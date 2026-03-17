@@ -58,6 +58,7 @@ dependency graph on screen all the time.
 - **Drift over time**: see when coupling, cycles, or boundary pressure get worse
 - **Repository structure**: start from grouped clusters instead of a raw node graph
 - **Hotspots and impact**: identify risky modules and inspect likely downstream effects
+- **AI-powered analysis**: ask natural language questions about health, coupling, churn, blast radius, and refactoring priorities
 - **Project-specific architecture rules**: define boundaries, ignore rules, scan heuristics, clustering, and presentation in `morpharch.toml`
 
 ## Who tends to use it
@@ -76,11 +77,14 @@ MorphArch works with zero configuration, but you can override:
 - boundary rules and exemptions
 - clustering strategy, families, rules, and constraints
 - presentation aliases, kind mode, and color mode
+- AI assistant provider, model, token limits, and context budget
 
-See the [Configuration Guide](./guides/configuration) for the full reference.
+See the [Configuration Guide](./guides/configuration) for the full reference
+and the [AI Assistant Guide](./guides/ai-assistant) for LLM setup.
 
 ## Next steps
 
 1. Read the [Installation](./installation) guide.
 2. Follow the [Quick Start](./quick-start).
 3. Learn how the [pipeline works](./concepts/how-it-works).
+4. Set up the [AI Assistant](./guides/ai-assistant) for natural language analysis.

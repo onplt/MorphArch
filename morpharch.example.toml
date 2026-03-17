@@ -81,3 +81,27 @@
 # File stems treated as entry points (exempt from fragility penalties).
 # These modules naturally have high fan-out and low fan-in.
 # entry_point_stems = ["main", "index", "app", "lib", "mod"]
+
+# ─── AI Configuration ────────────────────────────────────────────────────────
+# Configuration for the AI Assistant panel. Supports any OpenAI-compatible
+# endpoint (OpenAI, Ollama, LM Studio, etc.).
+#
+# Default (OpenAI):
+# [ai]
+# provider = "openai"
+# api_key_env = "OPENAI_API_KEY"
+# model = "gpt-4o-mini"
+# endpoint = "https://api.openai.com/v1/chat/completions"
+# stream = true             # Enable streaming responses (SSE)
+# max_tokens = 4096         # Maximum tokens in AI response (default: 4096)
+# temperature = 0.3         # Response creativity 0.0-1.0 (default: 0.3)
+# max_context_tokens = 12000  # Token budget for architecture context data
+#
+# Example (Local Ollama with llama3.1:8b):
+# [ai]
+# provider = "ollama"
+# api_key_env = ""  # Not needed
+# model = "llama3.1:8b"
+# endpoint = "http://localhost:11434/v1/chat/completions"
+# stream = true  # Set to false if your endpoint doesn't support SSE
+

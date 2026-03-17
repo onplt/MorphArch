@@ -214,17 +214,17 @@ pub fn render_insight_panel(
             Span::styled("  Min:", Style::default().fg(FG_OVERLAY)),
             Span::styled(
                 format!("{:>3}%", min_h),
-                Style::default().fg(drift_color(100 - min_h as u8)),
+                Style::default().fg(drift_color(100u8.saturating_sub(min_h.min(100) as u8))),
             ),
             Span::styled("  Avg:", Style::default().fg(FG_OVERLAY)),
             Span::styled(
                 format!("{:>3}%", avg_h),
-                Style::default().fg(drift_color(100 - avg_h as u8)),
+                Style::default().fg(drift_color(100u8.saturating_sub(avg_h.min(100) as u8))),
             ),
             Span::styled("  Max:", Style::default().fg(FG_OVERLAY)),
             Span::styled(
                 format!("{:>3}%", max_h),
-                Style::default().fg(drift_color(100 - max_h as u8)),
+                Style::default().fg(drift_color(100u8.saturating_sub(max_h.min(100) as u8))),
             ),
         ]);
         frame.render_widget(
@@ -326,6 +326,7 @@ pub fn render_insight_panel(
             if !adv_lines.is_empty() {
                 adv_lines.push(Line::from(""));
             }
+            let mut advisory_shown = 0usize;
             for line in &advisory_lines {
                 if used_lines >= max_lines {
                     break;
@@ -335,15 +336,12 @@ pub fn render_insight_panel(
                     Span::styled(line.clone(), Style::default().fg(FG_TEXT)),
                 ]));
                 used_lines += 1;
+                advisory_shown += 1;
             }
-            if advisory_lines.len() > used_lines.saturating_sub(context_lines.len()) {
+            let remaining = advisory_lines.len().saturating_sub(advisory_shown);
+            if remaining > 0 {
                 adv_lines.push(Line::from(Span::styled(
-                    format!(
-                        "   +{} more suggestions",
-                        advisory_lines
-                            .len()
-                            .saturating_sub(used_lines.saturating_sub(context_lines.len()))
-                    ),
+                    format!("   +{} more suggestions", remaining),
                     Style::default().fg(FG_OVERLAY),
                 )));
             }
@@ -491,13 +489,13 @@ pub fn render_module_inspector(frame: &mut Frame, area: Rect, app: &App) {
     imported_by.sort_by(|a, b| b.1.cmp(&a.1));
     depends_on.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Refactored Layout: Header -> Risk -> Split Lists (Left/Right)
+    // Refactored Layout: Header -> Risk -> Split Lists
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header info
             Constraint::Length(5), // Risk Analysis
-            Constraint::Min(4),    // Split Lists (Horizontal)
+            Constraint::Min(0),    // Split Lists (Horizontal) - Take remaining space
         ])
         .margin(1)
         .split(inner);
