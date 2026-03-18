@@ -109,7 +109,7 @@ lru = "0.16"
 image = { version = "0.25", default-features = false, features = ["gif"] }
 
 # TOML config file parsing
-toml = "0.8"
+toml = "1.0"
 
 # Fast multi-pattern glob matching (used for ignore rules)
 globset = "0.4"
