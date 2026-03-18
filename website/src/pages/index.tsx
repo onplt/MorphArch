@@ -101,9 +101,17 @@ const installMethods = [
 function useInView(threshold = 0.15) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
+
   useEffect(() => {
+    // SSR safety
+    if (typeof window === 'undefined' || !('IntersectionObserver' in window)) {
+      setVisible(true);
+      return;
+    }
+
     const el = ref.current;
     if (!el) return;
+
     const obs = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -116,6 +124,7 @@ function useInView(threshold = 0.15) {
     obs.observe(el);
     return () => obs.disconnect();
   }, [threshold]);
+
   return {ref, visible};
 }
 
