@@ -22,7 +22,7 @@ const config: Config = {
     },
   },
 
-  clientModules: [require.resolve('./src/analytics.ts')],
+  // clientModules: [require.resolve('./src/analytics.ts')],
 
   i18n: {
     defaultLocale: 'en',
