@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -222,9 +223,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo Publish
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Update Homebrew tap
