@@ -100,10 +100,14 @@ const installMethods = [
 
 function useInView(threshold = 0.15) {
   const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(false);
+  const [visible, setVisible] = useState(true); // Default to true for SSR/initial render
+  const [isClient, setIsClient] = useState(false);
 
   useEffect(() => {
-    // SSR safety
+    setIsClient(true);
+    // If we're on client, we can start with false and wait for observer
+    setVisible(false);
+
     if (typeof window === 'undefined' || !('IntersectionObserver' in window)) {
       setVisible(true);
       return;
@@ -125,15 +129,19 @@ function useInView(threshold = 0.15) {
     return () => obs.disconnect();
   }, [threshold]);
 
-  return {ref, visible};
+  return {ref, visible, isClient};
 }
 
 function Reveal({children, delay = 0}: {children: ReactNode; delay?: number}) {
-  const {ref, visible} = useInView();
+  const {ref, visible, isClient} = useInView();
+  
+  // If not on client yet, render visible to avoid blank page during hydration
+  const isVisible = !isClient || visible;
+  
   return (
     <div
       ref={ref}
-      className={`${styles.reveal} ${visible ? styles.revealVisible : ''}`}
+      className={`${styles.reveal} ${isVisible ? styles.revealVisible : ''}`}
       style={{transitionDelay: `${delay}ms`}}>
       {children}
     </div>

@@ -222,8 +222,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Cargo Publish
-        run: cargo publish
+      - name: Publish to crates.io
+        uses: katyo/publish-crates@v2
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Update Homebrew tap
